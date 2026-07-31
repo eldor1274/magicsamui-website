@@ -60,7 +60,7 @@ export default function ContactPage() {
         <div>
           <h2 className="font-serif text-xl text-ink">Send us a message</h2>
           <p className="mt-2 text-sm text-ink-soft">
-            This opens your email app with your message pre-filled to {site.email}.
+            Sent directly to {site.email} — no email app needed.
           </p>
           <div className="mt-5">
             <ContactForm />

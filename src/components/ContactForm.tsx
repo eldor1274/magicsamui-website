@@ -1,20 +1,38 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { site } from "@/data/site";
 
 export default function ContactForm() {
   const [name, setName] = useState("");
   const [contact, setContact] = useState("");
   const [message, setMessage] = useState("");
+  const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
 
-  function handleSubmit(e: FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    const subject = encodeURIComponent(`Inquiry from ${name || "website visitor"}`);
-    const body = encodeURIComponent(
-      `Name: ${name}\nPhone/Email: ${contact}\n\n${message}`
+    setStatus("sending");
+    try {
+      const res = await fetch("/api/contact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, contact, message }),
+      });
+      if (!res.ok) throw new Error();
+      setStatus("sent");
+      setName("");
+      setContact("");
+      setMessage("");
+    } catch {
+      setStatus("error");
+    }
+  }
+
+  if (status === "sent") {
+    return (
+      <div className="rounded-lg bg-stone-100 p-5 text-ink-soft">
+        Thanks — your message has been sent. We&apos;ll get back to you soon.
+      </div>
     );
-    window.location.href = `mailto:${site.email}?subject=${subject}&body=${body}`;
   }
 
   return (
@@ -56,11 +74,17 @@ export default function ContactForm() {
           className="mt-1 w-full rounded-lg border border-stone-100 bg-white px-4 py-2.5 text-ink outline-none ring-pool/40 focus:ring-2"
         />
       </div>
+      {status === "error" && (
+        <p className="text-sm text-red-600">
+          Something went wrong sending your message — please try WhatsApp or phone instead.
+        </p>
+      )}
       <button
         type="submit"
-        className="w-full rounded-full bg-pool px-6 py-3 text-sm font-medium text-white hover:bg-pool-dark"
+        disabled={status === "sending"}
+        className="w-full rounded-full bg-pool px-6 py-3 text-sm font-medium text-white hover:bg-pool-dark disabled:opacity-60"
       >
-        Send
+        {status === "sending" ? "Sending..." : "Send"}
       </button>
     </form>
   );
