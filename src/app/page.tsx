@@ -3,6 +3,7 @@ import Link from "next/link";
 import { Wifi, WashingMachine, Bike, Coffee, Car, ArrowRight } from "lucide-react";
 import BookNowButton from "@/components/BookNowButton";
 import CloudbedsDatePicker from "@/components/CloudbedsDatePicker";
+import DesktopVideo from "@/components/DesktopVideo";
 import RoomCard from "@/components/RoomCard";
 import { rooms } from "@/data/rooms";
 import { getAllBlogPosts } from "@/data/blog";
@@ -31,9 +32,13 @@ export default function Home() {
           sizes="100vw"
           className="object-cover"
         />
+        <DesktopVideo
+          src="/videos/hero-tuxedo.mp4"
+          className="absolute inset-0 h-full w-full object-cover"
+        />
         <div className="absolute inset-0 bg-gradient-to-t from-white/85 via-white/45 to-white/10 sm:from-black/70 sm:via-black/20 sm:to-black/10" />
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 text-ink sm:text-stone-50">
-          <p className="text-sm uppercase tracking-[0.3em] text-ink-soft sm:text-stone-100/80">
+          <p className="text-base font-semibold uppercase tracking-[0.3em] text-ink sm:text-stone-100/90">
             Koh Samui, Thailand
           </p>
           <h1 className="mt-4 max-w-xl font-serif text-4xl leading-tight sm:text-5xl">

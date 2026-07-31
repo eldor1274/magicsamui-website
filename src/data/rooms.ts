@@ -27,6 +27,7 @@ export interface Room {
   guestAccess?: string[];
   notes?: string[];
   heroImage: RoomImage;
+  cardVideo?: string;
   gallery: RoomImage[];
 }
 
@@ -158,6 +159,7 @@ export const rooms: Room[] = [
       "Breakfast is provided on the first day courtesy of the host, at no additional charge (for stays over one night).",
     ],
     heroImage: { src: "/images/honeymoon-suite/hoenymoon-bed-view-v2-scaled.jpg", alt: "Honeymoon suite bedroom with sea view" },
+    cardVideo: "/videos/honeymoon-card.mp4",
     gallery: [
       { src: "/images/honeymoon-suite/hoenymoon-bed-view-v2-scaled.jpg", alt: "Honeymoon suite bedroom" },
       { src: "/images/honeymoon-suite/swimming-pool-1-scaled.jpg", alt: "Honeymoon suite infinity pool" },
