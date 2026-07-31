@@ -176,7 +176,7 @@ export default function Home() {
         <div className="absolute inset-0 bg-black/60" />
         <div className="relative px-5 text-center text-stone-50">
           <h2 className="font-serif text-2xl sm:text-3xl">
-            Book directly for 22% cheaper than online travel agencies
+            Ready for your Koh Samui escape?
           </h2>
           <div className="mt-6 flex justify-center">
             <BookNowButton />
