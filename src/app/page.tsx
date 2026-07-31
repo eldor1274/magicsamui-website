@@ -110,7 +110,7 @@ export default function Home() {
       <section className="bg-stone-100 py-14">
         <div className="mx-auto max-w-6xl px-5">
           <h2 className="text-center font-serif text-2xl text-ink">The Essentials</h2>
-          <div className="mt-8 grid grid-cols-2 gap-6 sm:grid-cols-5">
+          <div className="mt-8 grid grid-cols-2 gap-6 sm:grid-cols-4">
             {essentials.map(({ icon: Icon, label }) => (
               <div key={label} className="flex flex-col items-center gap-3 text-center">
                 <span className="flex h-14 w-14 items-center justify-center rounded-full bg-white text-pool ring-1 ring-black/5">
