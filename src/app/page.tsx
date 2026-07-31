@@ -8,7 +8,9 @@ import RoomCard from "@/components/RoomCard";
 import { rooms } from "@/data/rooms";
 import { getAllBlogPosts } from "@/data/blog";
 
-const featuredRooms = rooms.filter((r) => r.slug !== "seaview-2br" && r.slug !== "island-view-3br");
+const featuredRooms = rooms.filter(
+  (r) => !["seaview-2br", "island-view-3br", "tuxedo-1br", "tuxedo-3br"].includes(r.slug)
+);
 
 const essentials = [
   { icon: Wifi, label: "Free Wi-Fi" },
