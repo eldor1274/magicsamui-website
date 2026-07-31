@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Fraunces, Inter } from "next/font/google";
 import Script from "next/script";
+import ClarityScript from "@/components/ClarityScript";
 import CloudbedsScript from "@/components/CloudbedsScript";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
@@ -42,6 +43,7 @@ export default function RootLayout({
         <main className="flex-1">{children}</main>
         <Footer />
         <CloudbedsScript />
+        <ClarityScript />
         {gaId && (
           <>
             <Script src={`https://www.googletagmanager.com/gtag/js?id=${gaId}`} strategy="afterInteractive" />
