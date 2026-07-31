@@ -21,8 +21,8 @@ export default function RoomsPage() {
       <h1 className="mt-3 font-serif text-4xl text-ink">2 Villas, 4 Suites</h1>
       <p className="mt-4 max-w-2xl text-ink-soft">
         Magic Villa is split into 4 individually bookable suites, each with
-        its own pool. Tuxedo is a standalone 2 bedroom villa. Every space is
-        just minutes from Choeng Mon Beach.
+        its own pool. Tuxedo is a standalone villa with 1, 2 and 3 bedroom
+        options. Every space is just minutes from Choeng Mon Beach.
       </p>
 
       <section className="mt-14">
