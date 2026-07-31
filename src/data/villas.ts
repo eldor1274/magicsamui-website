@@ -11,7 +11,7 @@ export const villas: Villa[] = [
     slug: "magic-villa",
     name: "Magic Villa",
     description:
-      "A 3-floor private villa split into 4 individually bookable suites — Honeymoon, Sunrise, Magic View and Garden — each with its own pool or plunge pool. Book one suite for a private getaway, or combine several when travelling with family or friends.",
+      "A 3-floor private villa split into 4 individually bookable suites — Honeymoon, Sunrise, Magic Seaview and Garden — each with its own pool or plunge pool. Book one suite for a private getaway, or combine several when travelling with family or friends.",
     heroImage: { src: "/images/home/Magic-Suites-50-2.jpg", alt: "Magic Villa exterior with private pool" },
     roomSlugs: ["honeymoon-suite", "sunrise-suite", "seaview-suite", "garden-suite"],
   },

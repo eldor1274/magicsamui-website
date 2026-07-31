@@ -44,7 +44,7 @@ export const rooms: Room[] = [
   {
     slug: "tuxedo",
     name: "Design Modern 2 Bedroom Villa (Tuxedo)",
-    shortName: "Tuxedo Villa",
+    shortName: "Tuxedo 2 Bedroom",
     priceThb: 15000,
     area: { sqm: 170, sqft: 1839 },
     bedrooms: 2,
@@ -304,7 +304,7 @@ export const rooms: Room[] = [
   {
     slug: "seaview-suite",
     name: "Magic Seaview Jet Plunge Pool Private Suite",
-    shortName: "Seaview Suite",
+    shortName: "Magic Seaview 1 Bedroom",
     priceThb: 5000,
     area: { sqm: 150, sqft: 1615 },
     bedrooms: 1,
@@ -358,7 +358,7 @@ export const rooms: Room[] = [
   {
     slug: "seaview-2br",
     name: "Magic Seaview Jet Plunge Pool Private Suite 2BR",
-    shortName: "Seaview Suite 2BR",
+    shortName: "Magic Seaview 2 Bedroom",
     priceThb: 6000,
     area: { sqm: 200, sqft: 2100 },
     bedrooms: 2,
