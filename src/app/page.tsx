@@ -4,6 +4,7 @@ import { Wifi, WashingMachine, Bike, Car, ArrowRight } from "lucide-react";
 import BookNowButton from "@/components/BookNowButton";
 import CloudbedsDatePicker from "@/components/CloudbedsDatePicker";
 import DesktopVideo from "@/components/DesktopVideo";
+import ReviewsSection from "@/components/ReviewsSection";
 import RoomCard from "@/components/RoomCard";
 import { rooms } from "@/data/rooms";
 import { getAllBlogPosts } from "@/data/blog";
@@ -141,6 +142,8 @@ export default function Home() {
           </Link>
         </div>
       </section>
+
+      <ReviewsSection />
 
       <section className="mx-auto max-w-6xl px-5 py-16">
         <div className="flex items-end justify-between">
