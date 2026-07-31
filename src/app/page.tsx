@@ -55,10 +55,8 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="mx-auto -mt-8 max-w-4xl px-5">
-        <div className="rounded-2xl bg-white p-5 shadow-lg ring-1 ring-black/5 sm:p-6">
-          <CloudbedsDatePicker />
-        </div>
+      <section className="mx-auto -mt-9 max-w-3xl px-5">
+        <CloudbedsDatePicker />
       </section>
 
       <section className="mx-auto grid max-w-6xl grid-cols-2 gap-6 px-5 py-14 text-center sm:grid-cols-4">
