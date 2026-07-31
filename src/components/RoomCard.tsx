@@ -25,10 +25,16 @@ export default function RoomCard({ room }: { room: Room }) {
             className="absolute inset-0 h-full w-full object-cover"
           />
         )}
-        {room.hasPool === false && (
+        {room.hasPool === false ? (
           <span className="absolute left-3 top-3 rounded-full bg-sand px-3 py-1 text-xs font-medium text-ink shadow">
             No private pool
           </span>
+        ) : (
+          room.poolType && (
+            <span className="absolute left-3 top-3 rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-pool shadow backdrop-blur-sm">
+              {room.poolType}
+            </span>
+          )
         )}
       </div>
       <div className="flex flex-1 flex-col gap-3 p-5">

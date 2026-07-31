@@ -1,6 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
-import { Wifi, WashingMachine, Bike, Coffee, Car, ArrowRight } from "lucide-react";
+import { Wifi, WashingMachine, Bike, Car, ArrowRight } from "lucide-react";
 import BookNowButton from "@/components/BookNowButton";
 import CloudbedsDatePicker from "@/components/CloudbedsDatePicker";
 import DesktopVideo from "@/components/DesktopVideo";
@@ -16,7 +16,6 @@ const essentials = [
   { icon: Wifi, label: "Free Wi-Fi" },
   { icon: WashingMachine, label: "Laundry Service" },
   { icon: Bike, label: "Motorbike / Car Rental" },
-  { icon: Coffee, label: "Breakfast" },
   { icon: Car, label: "Transportation Service" },
 ];
 

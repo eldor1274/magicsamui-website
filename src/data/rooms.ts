@@ -13,6 +13,7 @@ export interface Room {
   guests: number;
   bathrooms: number;
   hasPool?: boolean;
+  poolType?: string;
   summary: string;
   description: string[];
   amenities: string[];
@@ -43,6 +44,7 @@ const STANDARD_INFO = {
 export const rooms: Room[] = [
   {
     slug: "tuxedo",
+    poolType: "Infinity pool",
     name: "Design Modern 2 Bedroom Villa (Tuxedo)",
     shortName: "Tuxedo 2 Bedroom",
     priceThb: 15000,
@@ -54,7 +56,7 @@ export const rooms: Room[] = [
       "Planned so it harmoniously blends into the surrounding natural landscape, this tropical modern villa combines nature and contemporary design.",
     description: [
       "Planned so it harmoniously blends into the surrounding natural landscape, one can't help but marvel at the ingenious design conceived by its creator. This tropical modern villa on Koh Samui island, based at the gulf of Thailand, offers modern interiors woven into the surrounding landscape — a combination of both nature and science.",
-      "When developing the building, it was impossible not to take into account the surrounding landscape around the house. A 3-floor luxury villa located in Plai Laem soi 8, offering a spectacular sunrise view, comfortable sitting areas, two jacuzzis, a top floor pool, private parking, convenient location and privacy. This villa offers an indoor-outdoor living experience, with a dining table facing a breathtaking view.",
+      "When developing the building, it was impossible not to take into account the surrounding landscape around the house. A 3-floor luxury villa located in Plai Laem soi 8, offering a spectacular sunrise view, comfortable sitting areas, an infinity pool with its own waterfall, private parking, convenient location and privacy. This villa offers an indoor-outdoor living experience, with a dining table facing a breathtaking view.",
     ],
     amenities: [
       "Wi-Fi",
@@ -95,7 +97,7 @@ export const rooms: Room[] = [
       { src: "/images/tuxedo/DMZ_3779.jpg", alt: "Tuxedo villa balcony" },
       { src: "/images/tuxedo/DMZ_3773.jpg", alt: "Tuxedo villa terrace" },
       { src: "/images/tuxedo/DMZ_3497-1.jpg", alt: "Tuxedo villa detail" },
-      { src: "/images/tuxedo/DMZ_3755.jpg", alt: "Tuxedo villa jacuzzi" },
+      { src: "/images/tuxedo/DMZ_3755.jpg", alt: "Tuxedo villa pool waterfall"},
       { src: "/images/tuxedo/DMZ_3703.jpg", alt: "Tuxedo villa sitting area" },
       { src: "/images/tuxedo/DMZ_3004.jpg", alt: "Tuxedo villa sunrise view" },
       { src: "/images/tuxedo/DMZ_3250_1-1.jpg", alt: "Tuxedo villa night view" },
@@ -108,6 +110,7 @@ export const rooms: Room[] = [
   },
   {
     slug: "tuxedo-1br",
+    poolType: "Infinity pool",
     name: "Tuxedo Villa — 1 Bedroom (Private Villa)",
     shortName: "Tuxedo 1 Bedroom",
     priceThb: 13000,
@@ -116,9 +119,9 @@ export const rooms: Room[] = [
     guests: 2,
     bathrooms: 1,
     summary:
-      "The whole Tuxedo villa privately yours — pool, jacuzzis and rooftop terrace — with one bedroom of your choice in use, at a friendlier rate.",
+      "The whole Tuxedo villa privately yours — waterfall infinity pool and rooftop terrace — with one bedroom of your choice in use, at a friendlier rate.",
     description: [
-      "Stay in the Tuxedo villa with complete privacy at a discounted rate: the entire villa — private pool, jacuzzis, rooftop terrace, kitchen and living areas — is exclusively yours, with one of the two bedrooms in use. Choose whichever bedroom you prefer.",
+      "Stay in the Tuxedo villa with complete privacy at a discounted rate: the entire villa — infinity pool with its waterfall, rooftop terrace, kitchen and living areas — is exclusively yours, with one of the two bedrooms in use. Choose whichever bedroom you prefer.",
       "Perfect for couples who want the full villa experience without paying for a second bedroom they won't use — ฿2,000 off the two-bedroom rate.",
     ],
     amenities: [
@@ -157,12 +160,13 @@ export const rooms: Room[] = [
       { src: "/images/tuxedo/DMZ_3822_1.jpg", alt: "Tuxedo villa view" },
       { src: "/images/tuxedo/DMZ_3791.jpg", alt: "Tuxedo villa kitchen" },
       { src: "/images/tuxedo/DMZ_3779.jpg", alt: "Tuxedo villa balcony" },
-      { src: "/images/tuxedo/DMZ_3755.jpg", alt: "Tuxedo villa jacuzzi" },
+      { src: "/images/tuxedo/DMZ_3755.jpg", alt: "Tuxedo villa pool waterfall"},
       { src: "/images/tuxedo/DMZ_3004.jpg", alt: "Tuxedo villa sunrise view" },
     ],
   },
   {
     slug: "tuxedo-3br",
+    poolType: "Infinity pool",
     name: "Tuxedo Villa — 3 Bedroom + Cinema Lounge",
     shortName: "Tuxedo 3 Bedroom",
     priceThb: 25000,
@@ -173,7 +177,7 @@ export const rooms: Room[] = [
     summary:
       "The full Tuxedo experience: the 2-bedroom villa plus the lower cinema level — a third bedroom lounge with recliner beds, office, rock-spa bathroom and kitchenette.",
     description: [
-      "The complete Tuxedo villa across all its levels. Alongside the 2-bedroom villa — private pool, two jacuzzis, rooftop terrace and dining with a breathtaking view — you also get the entire lower level, carved into the hillside stone.",
+      "The complete Tuxedo villa across all its levels. Alongside the 2-bedroom villa — infinity pool with its waterfall, rooftop terrace and dining with a breathtaking view — you also get the entire lower level, carved into the hillside stone.",
       "Downstairs is a private cinema lounge with plush recliner beds and a large screen, a dedicated office with a sea view for those who need to stay connected, a spectacular natural-rock bathroom built around the mountain stone, a kitchenette, and an indoor rock garden. Three bedrooms, three bathrooms, and an office — the whole hillside is yours.",
     ],
     amenities: [
@@ -223,13 +227,14 @@ export const rooms: Room[] = [
       { src: "/images/tuxedo/DMZ_3785_1.jpg", alt: "Tuxedo villa dining area" },
       { src: "/images/tuxedo/DMZ_3779.jpg", alt: "Tuxedo villa balcony" },
       { src: "/images/tuxedo/DMZ_3773.jpg", alt: "Tuxedo villa terrace" },
-      { src: "/images/tuxedo/DMZ_3755.jpg", alt: "Tuxedo villa jacuzzi" },
+      { src: "/images/tuxedo/DMZ_3755.jpg", alt: "Tuxedo villa pool waterfall"},
       { src: "/images/tuxedo/DMZ_3703.jpg", alt: "Tuxedo villa sitting area" },
       { src: "/images/tuxedo/DMZ_3004.jpg", alt: "Tuxedo villa sunrise view" },
     ],
   },
   {
     slug: "honeymoon-suite",
+    poolType: "Infinity pool",
     name: "Honeymoon Seaview Private Pool Suite",
     shortName: "Honeymoon Suite",
     priceThb: 9000,
@@ -303,6 +308,7 @@ export const rooms: Room[] = [
   },
   {
     slug: "seaview-suite",
+    poolType: "Jet plunge pool",
     name: "Magic Seaview Jet Plunge Pool Private Suite",
     shortName: "Magic Seaview 1 Bedroom",
     priceThb: 5000,
@@ -340,7 +346,7 @@ export const rooms: Room[] = [
       "Private Parking",
     ],
     importantInfo: STANDARD_INFO,
-    heroImage: { src: "/images/seaview-suite/pool-view-left-angle-scaled.jpg", alt: "Seaview suite plunge pool" },
+    heroImage: { src: "/images/seaview-suite/livingroom.jpg", alt: "Magic Seaview suite living room with plunge pool and bay view" },
     gallery: [
       { src: "/images/seaview-suite/pool-view-left-angle-scaled.jpg", alt: "Seaview suite plunge pool" },
       { src: "/images/seaview-suite/magic-pool-with-livin-g-room-from-outside-scaled.jpg", alt: "Seaview suite pool and living room" },
@@ -357,6 +363,7 @@ export const rooms: Room[] = [
   },
   {
     slug: "seaview-2br",
+    poolType: "Jet plunge pool",
     name: "Magic Seaview Jet Plunge Pool Private Suite 2BR",
     shortName: "Magic Seaview 2 Bedroom",
     priceThb: 6000,
@@ -411,6 +418,7 @@ export const rooms: Room[] = [
   },
   {
     slug: "sunrise-suite",
+    poolType: "Jet plunge pool",
     name: "Sunrise Seaview Private Jet Plunge Pool Suite",
     shortName: "Sunrise Suite",
     priceThb: 4500,
@@ -534,6 +542,7 @@ export const rooms: Room[] = [
   },
   {
     slug: "island-view-3br",
+    poolType: "Jet plunge pool",
     name: "Island Views & Sunrise Jet Plunge Pool 3 Bedroom Private Suite",
     shortName: "3BR Island View Villa",
     priceThb: 18000,

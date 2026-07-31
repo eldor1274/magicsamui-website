@@ -11,7 +11,7 @@ export const site = {
     { label: "PR Manager", number: "+66 91 860 5001", tel: "+66918605001" },
   ],
   whatsapp: "https://wa.me/66952466011",
-  line: "https://line.me/ti/p/Eldor1274",
+  line: "https://line.me/R/ti/p/~Eldor1274",
   email: "info@magicsamui.com",
   cloudbedsReservationUrl: "https://hotels.cloudbeds.com/reservation/eCMgPn",
   cloudbedsPropertyCode: "eCMgPn",
