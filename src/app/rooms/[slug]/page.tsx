@@ -137,6 +137,38 @@ export default async function RoomPage({
         </div>
       </div>
 
+      {roomReviews[room.slug] && roomReviews[room.slug].length > 0 && (
+        <div className="mt-16">
+          <h2 className="font-serif text-2xl text-ink">Guest Reviews for This Suite</h2>
+          <div className="mt-6 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {roomReviews[room.slug].map((review) => (
+              <figure
+                key={review.name + review.country}
+                className="flex flex-col rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5"
+              >
+                <div className="flex items-center gap-1 text-sand">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <Star key={i} size={14} fill="currentColor" strokeWidth={0} />
+                  ))}
+                </div>
+                <blockquote className="mt-3 flex-1 text-sm leading-relaxed text-ink-soft">
+                  &ldquo;{review.text}&rdquo;
+                </blockquote>
+                <figcaption className="mt-4 flex items-center justify-between border-t border-stone-100 pt-3">
+                  <span className="text-sm font-medium text-ink">
+                    {review.name}
+                    <span className="ml-2 text-xs font-normal text-ink-soft">{review.country}</span>
+                  </span>
+                  <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-ink-soft">
+                    {review.platform === "airbnb" ? "Airbnb" : "Booking.com"}
+                  </span>
+                </figcaption>
+              </figure>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="mt-16">
         <h2 className="font-serif text-2xl text-ink">Explore Other Suites</h2>
         <div className="mt-6 flex flex-wrap gap-3">
