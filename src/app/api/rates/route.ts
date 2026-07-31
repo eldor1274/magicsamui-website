@@ -13,6 +13,7 @@ interface RatePlan {
   roomTypeID: string;
   roomRate: number;
   roomsAvailable: number;
+  isDerived: boolean;
 }
 
 export async function GET() {
@@ -40,13 +41,13 @@ export async function GET() {
     for (const plan of plans) {
       const slug = ROOM_TYPE_TO_SLUG[plan.roomTypeID];
       if (!slug || !plan.roomRate) continue;
-      const existing = rates[slug];
       const available = plan.roomsAvailable > 0;
-      // keep the lowest rate per room; available if any plan has availability
-      if (!existing || plan.roomRate < existing.price) {
-        rates[slug] = { price: plan.roomRate, available: existing?.available || available };
-      } else if (available && !existing.available) {
-        existing.available = true;
+      // price comes from the base rate only (derived plans are discounts:
+      // direct-booking, non-refundable, agency rates, etc.)
+      if (!plan.isDerived) {
+        rates[slug] = { price: plan.roomRate, available: rates[slug]?.available || available };
+      } else if (rates[slug] && available && !rates[slug].available) {
+        rates[slug].available = true;
       }
     }
 
