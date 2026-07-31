@@ -1,15 +1,24 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import { isValidContact } from "@/lib/validateContact";
 
 export default function ContactForm() {
   const [name, setName] = useState("");
   const [contact, setContact] = useState("");
   const [message, setMessage] = useState("");
   const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [contactError, setContactError] = useState("");
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+
+    if (!isValidContact(contact)) {
+      setContactError("Enter a valid email, or a phone number with country code (e.g. +66...)");
+      return;
+    }
+    setContactError("");
+
     setStatus("sending");
     try {
       const res = await fetch("/api/contact", {
@@ -36,7 +45,7 @@ export default function ContactForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form onSubmit={handleSubmit} className="space-y-4" noValidate>
       <div>
         <label className="block text-sm font-medium text-ink" htmlFor="name">
           Name
@@ -51,15 +60,20 @@ export default function ContactForm() {
       </div>
       <div>
         <label className="block text-sm font-medium text-ink" htmlFor="contact">
-          Phone or Email
+          Phone (with country code) or Email
         </label>
         <input
           id="contact"
           value={contact}
-          onChange={(e) => setContact(e.target.value)}
+          onChange={(e) => {
+            setContact(e.target.value);
+            if (contactError) setContactError("");
+          }}
+          placeholder="+66 95 246 6011 or you@example.com"
           required
           className="mt-1 w-full rounded-lg border border-stone-100 bg-white px-4 py-2.5 text-ink outline-none ring-pool/40 focus:ring-2"
         />
+        {contactError && <p className="mt-1 text-sm text-red-600">{contactError}</p>}
       </div>
       <div>
         <label className="block text-sm font-medium text-ink" htmlFor="message">

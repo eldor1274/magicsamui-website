@@ -1,11 +1,19 @@
 import nodemailer from "nodemailer";
 import { site } from "@/data/site";
+import { isValidContact } from "@/lib/validateContact";
 
 export async function POST(request: Request) {
   const { name, contact, message } = await request.json();
 
   if (!name || !contact || !message) {
     return Response.json({ error: "Missing fields" }, { status: 400 });
+  }
+
+  if (!isValidContact(contact)) {
+    return Response.json(
+      { error: "Enter a valid email, or a phone number with country code" },
+      { status: 400 }
+    );
   }
 
   const user = process.env.CONTACT_GMAIL_USER;
