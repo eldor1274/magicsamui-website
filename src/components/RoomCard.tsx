@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { BedDouble, Users, Ruler } from "lucide-react";
 import DesktopVideo from "@/components/DesktopVideo";
+import LiveTonight from "@/components/LiveTonight";
 import type { Room } from "@/data/rooms";
 
 export default function RoomCard({ room }: { room: Room }) {
@@ -51,6 +52,7 @@ export default function RoomCard({ room }: { room: Room }) {
             <span className="text-xs text-ink-soft"> / night</span>
           </span>
         </div>
+        <LiveTonight slug={room.slug} />
       </div>
     </Link>
   );
