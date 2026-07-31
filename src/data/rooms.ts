@@ -581,9 +581,9 @@ export const rooms: Room[] = [
       "Private Parking",
     ],
     importantInfo: STANDARD_INFO,
-    heroImage: { src: "/images/home/DMZ_3612-2.jpg", alt: "Magic Villa rooftop garden and pool terrace" },
+    heroImage: { src: "/images/home/magic-villa-night.jpg", alt: "Magic Villa at night with all three floors and pools lit" },
     gallery: [
-      { src: "/images/home/DMZ_3612-2.jpg", alt: "Rooftop garden and pool terrace" },
+      { src: "/images/home/magic-villa-night.jpg", alt: "Magic Villa at night, all floors lit" },
       { src: "/images/home/Magic-Suites-50-2.jpg", alt: "Magic Villa exterior with infinity pool" },
       { src: "/images/honeymoon-suite/swimming-pool-1-scaled.jpg", alt: "Penthouse infinity pool" },
       { src: "/images/honeymoon-suite/hoenymoon-bed-view-v2-scaled.jpg", alt: "Honeymoon penthouse bedroom" },
@@ -697,8 +697,10 @@ export const rooms: Room[] = [
       "Private Parking",
     ],
     importantInfo: STANDARD_INFO,
-    heroImage: { src: "/images/island-view-3br/magic-pool-with-livin-g-room-from-outside-scaled.jpg", alt: "3 bedroom villa pool and living room" },
+    heroImage: { src: "/images/island-view-3br/lawn.jpg", alt: "Island view villa lawn with sun loungers" },
     gallery: [
+      { src: "/images/island-view-3br/lawn.jpg", alt: "Island view villa lawn with sun loungers" },
+      { src: "/images/island-view-3br/pool-lounge.jpg", alt: "Covered pool lounge with carved ceiling and island views" },
       { src: "/images/island-view-3br/magic-pool-with-livin-g-room-from-outside-scaled.jpg", alt: "3 bedroom villa pool and living room" },
       { src: "/images/island-view-3br/pool-view-left-angle-scaled.jpg", alt: "3 bedroom villa plunge pool" },
       { src: "/images/island-view-3br/sala-scaled.jpg", alt: "3 bedroom villa open-air sala" },

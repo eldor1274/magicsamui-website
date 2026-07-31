@@ -17,6 +17,11 @@ export const reviewStats = {
   // airbnb: added once the Airbnb listing details are available
 };
 
+// Per-suite reviews shown on each room's own page (Airbnb reviews are
+// per-listing, so they map naturally onto individual suites). Fill in as
+// reviews are collected — a suite with no entry simply shows no block.
+export const roomReviews: Record<string, Review[]> = {};
+
 export const reviews: Review[] = [
   {
     platform: "booking",

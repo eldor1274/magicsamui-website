@@ -5,6 +5,7 @@ import { BedDouble, Users, Bath, Ruler, Star, Check } from "lucide-react";
 import BookNowButton from "@/components/BookNowButton";
 import RoomGallery from "@/components/RoomGallery";
 import { rooms, getRoomBySlug } from "@/data/rooms";
+import { roomReviews } from "@/data/reviews";
 
 export function generateStaticParams() {
   return rooms.map((room) => ({ slug: room.slug }));
