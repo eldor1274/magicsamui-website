@@ -20,7 +20,7 @@ const serif = Fraunces({
 export const metadata: Metadata = {
   title: "Magic Suites & Villas | Private Pool Villas in Koh Samui",
   description:
-    "Magic Suites & Villas offers private pool suites and villas on a hillside overlooking the gulf of Thailand in Koh Samui, minutes from Choeng Mon Beach.",
+    "Magic Suites & Villas offers 2 villas and 4 private pool suites on a hillside overlooking the gulf of Thailand in Koh Samui, 5 minutes from Choeng Mon Beach.",
   metadataBase: new URL(`https://${site.domain}`),
   verification: {
     google: process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION,

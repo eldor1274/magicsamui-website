@@ -6,6 +6,8 @@ import RoomCard from "@/components/RoomCard";
 import { rooms } from "@/data/rooms";
 import { getAllBlogPosts } from "@/data/blog";
 
+const featuredRooms = rooms.filter((r) => r.slug !== "seaview-2br" && r.slug !== "island-view-3br");
+
 const essentials = [
   { icon: Wifi, label: "Free Wi-Fi" },
   { icon: WashingMachine, label: "Laundry Service" },
@@ -37,8 +39,8 @@ export default function Home() {
             Magic Private Pool Villas
           </h1>
           <p className="mt-4 max-w-lg text-stone-100/90">
-            2 minutes from Choeng Mon Beach. 5 private suites and villas, each
-            with its own pool, on a hillside overlooking the gulf of Thailand.
+            2 villas, 4 private suites — each with its own pool, on a hillside
+            overlooking the gulf of Thailand, just 5 minutes from the beach.
           </p>
           <div className="mt-8 flex flex-wrap gap-4">
             <BookNowButton />
@@ -55,9 +57,9 @@ export default function Home() {
       <section className="mx-auto grid max-w-6xl grid-cols-2 gap-6 px-5 py-14 text-center sm:grid-cols-4">
         {[
           ["2", "Villas, 1 location"],
-          ["2 min", "From Choeng Mon Beach"],
-          ["1 min", "To all groceries"],
-          ["5", "Units, 10 different ways"],
+          ["4", "Suites in Magic Villa"],
+          ["2 min", "To groceries by motorbike"],
+          ["5 min", "To the beach"],
         ].map(([stat, label]) => (
           <div key={label}>
             <p className="font-serif text-3xl text-pool">{stat}</p>
@@ -118,7 +120,7 @@ export default function Home() {
           </Link>
         </div>
         <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          {rooms.map((room) => (
+          {featuredRooms.map((room) => (
             <RoomCard key={room.slug} room={room} />
           ))}
         </div>

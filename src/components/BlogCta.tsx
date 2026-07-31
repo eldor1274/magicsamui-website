@@ -7,7 +7,7 @@ export default function BlogCta() {
       <h3 className="font-serif text-xl text-sand">Stay at Magic Suites &amp; Villas — Koh Samui</h3>
       <p className="mx-auto mt-2 max-w-lg text-sm text-stone-100/80">
         Private pool suites and villas on a hillside overlooking the Gulf of
-        Thailand, 2 minutes from Choeng Mon Beach.
+        Thailand, 5 minutes from Choeng Mon Beach.
       </p>
       <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
         <BookNowButton />
