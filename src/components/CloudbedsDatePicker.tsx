@@ -8,6 +8,7 @@ export default function CloudbedsDatePicker({ className = "" }: { className?: st
         button-label="Check Availability"
         layout="horizontal"
         open-in-new-tab="true"
+        currency="thb"
       />
     </div>
   );
