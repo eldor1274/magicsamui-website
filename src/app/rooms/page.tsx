@@ -12,7 +12,11 @@ export const metadata: Metadata = {
 
 const magicVilla = villas.find((v) => v.slug === "magic-villa")!;
 const tuxedoVilla = villas.find((v) => v.slug === "tuxedo")!;
-const combineSuites = [getRoomBySlug("seaview-2br")!, getRoomBySlug("island-view-3br")!];
+const combineSuites = [
+  getRoomBySlug("seaview-2br")!,
+  getRoomBySlug("island-view-3br")!,
+  getRoomBySlug("tower-club-3br")!,
+];
 
 export default function RoomsPage() {
   return (
@@ -53,7 +57,7 @@ export default function RoomsPage() {
           <p className="mt-1 text-sm text-ink-soft">
             Combine adjoining suites in Magic Villa for a 2 or 3 bedroom stay.
           </p>
-          <div className="mt-5 grid gap-6 sm:grid-cols-2">
+          <div className="mt-5 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {combineSuites.map((room) => (
               <RoomCard key={room.slug} room={room} />
             ))}

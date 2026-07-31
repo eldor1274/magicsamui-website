@@ -10,7 +10,10 @@ import { rooms } from "@/data/rooms";
 import { getAllBlogPosts } from "@/data/blog";
 
 const featuredRooms = rooms.filter(
-  (r) => !["seaview-2br", "island-view-3br", "tuxedo-1br", "tuxedo-3br"].includes(r.slug)
+  (r) =>
+    !["seaview-2br", "island-view-3br", "tower-club-3br", "tuxedo-1br", "tuxedo-3br"].includes(
+      r.slug
+    )
 );
 
 const essentials = [
