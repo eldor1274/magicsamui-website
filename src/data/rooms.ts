@@ -12,6 +12,7 @@ export interface Room {
   bedrooms: number;
   guests: number;
   bathrooms: number;
+  hasPool?: boolean;
   summary: string;
   description: string[];
   amenities: string[];
@@ -369,11 +370,13 @@ export const rooms: Room[] = [
     bedrooms: 1,
     guests: 2,
     bathrooms: 1,
+    hasPool: false,
     summary:
-      "Modernly minimalist, with a split-level balcony overlooking the sea and an exotic garden, plus a private terrace surrounded by tropical greenery.",
+      "Modernly minimalist, with a split-level balcony overlooking the sea and an exotic garden, plus a private terrace surrounded by tropical greenery. The one suite in Magic Villa without its own pool.",
     description: [
       "Our Garden Suite is modernly minimalist in design and located on the first floor, offering a split level balcony with sea views and an exotic garden, a separate dressing area, as well as a fully equipped kitchen and living area, which can be seen from the top floor of the bedroom.",
       "You can watch a breathtaking view of the sea from your bedroom, as well as stroll to a private terrace with natural stones and a surrounding tropical garden. Beautiful nature can be seen from almost anywhere in the villa through the spacious, high glass windows, allowing an abundance of daylight to fill the rooms.",
+      "Please note: the Garden Suite is the one suite in Magic Villa without a private pool — it makes up for it with the largest garden terrace and the most affordable rate.",
     ],
     amenities: [
       "Wi-Fi",

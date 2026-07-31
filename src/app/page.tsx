@@ -31,15 +31,15 @@ export default function Home() {
           sizes="100vw"
           className="object-cover"
         />
-        <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-black/10" />
-        <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 text-stone-50">
-          <p className="text-sm uppercase tracking-[0.3em] text-stone-100/80">
+        <div className="absolute inset-0 bg-gradient-to-t from-white/85 via-white/45 to-white/10 sm:from-black/70 sm:via-black/20 sm:to-black/10" />
+        <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 text-ink sm:text-stone-50">
+          <p className="text-sm uppercase tracking-[0.3em] text-ink-soft sm:text-stone-100/80">
             Koh Samui, Thailand
           </p>
           <h1 className="mt-4 max-w-xl font-serif text-4xl leading-tight sm:text-5xl">
             Magic Private Pool Villas
           </h1>
-          <p className="mt-4 max-w-lg text-stone-100/90">
+          <p className="mt-4 max-w-lg text-ink-soft sm:text-stone-100/90">
             2 villas, 4 private suites — each with its own pool, on a hillside
             overlooking the gulf of Thailand, just 5 minutes from the beach.
           </p>
@@ -47,7 +47,7 @@ export default function Home() {
             <BookNowButton />
             <Link
               href="/rooms"
-              className="inline-flex items-center gap-2 rounded-full border border-stone-100/60 px-6 py-3 text-sm font-medium text-stone-50 transition-colors hover:bg-white/10"
+              className="inline-flex items-center gap-2 rounded-full border border-ink/30 px-6 py-3 text-sm font-medium text-ink transition-colors hover:bg-black/5 sm:border-stone-100/60 sm:text-stone-50 sm:hover:bg-white/10"
             >
               View Suites &amp; Villas <ArrowRight size={16} />
             </Link>
