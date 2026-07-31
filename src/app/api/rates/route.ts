@@ -5,6 +5,7 @@ const ROOM_TYPE_TO_SLUG: Record<string, string> = {
   "462962": "seaview-suite",
   "462964": "seaview-2br",
   "575061": "tower-club-3br",
+  "501425": "magic-1-villa",
   "464009": "tuxedo",
   "501423": "island-view-3br",
   "501424": "tuxedo-1br",

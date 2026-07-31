@@ -16,6 +16,7 @@ const combineSuites = [
   getRoomBySlug("seaview-2br")!,
   getRoomBySlug("island-view-3br")!,
   getRoomBySlug("tower-club-3br")!,
+  getRoomBySlug("magic-1-villa")!,
 ];
 
 export default function RoomsPage() {
@@ -57,7 +58,7 @@ export default function RoomsPage() {
           <p className="mt-1 text-sm text-ink-soft">
             Combine adjoining suites in Magic Villa for a 2 or 3 bedroom stay.
           </p>
-          <div className="mt-5 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="mt-5 grid gap-6 sm:grid-cols-2">
             {combineSuites.map((room) => (
               <RoomCard key={room.slug} room={room} />
             ))}
