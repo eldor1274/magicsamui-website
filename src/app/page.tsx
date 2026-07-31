@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { Wifi, WashingMachine, Bike, Coffee, Car, ArrowRight } from "lucide-react";
 import BookNowButton from "@/components/BookNowButton";
+import CloudbedsDatePicker from "@/components/CloudbedsDatePicker";
 import RoomCard from "@/components/RoomCard";
 import { rooms } from "@/data/rooms";
 import { getAllBlogPosts } from "@/data/blog";
@@ -51,6 +52,12 @@ export default function Home() {
               View Suites &amp; Villas <ArrowRight size={16} />
             </Link>
           </div>
+        </div>
+      </section>
+
+      <section className="mx-auto -mt-8 max-w-4xl px-5">
+        <div className="rounded-2xl bg-white p-5 shadow-lg ring-1 ring-black/5 sm:p-6">
+          <CloudbedsDatePicker />
         </div>
       </section>
 

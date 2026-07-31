@@ -14,6 +14,7 @@ export const site = {
   line: "https://line.me/ti/p/Eldor1274",
   email: "info@magicsamui.com",
   cloudbedsReservationUrl: "https://hotels.cloudbeds.com/reservation/eCMgPn",
+  cloudbedsPropertyCode: "eCMgPn",
   cloudbedsImmersiveScript:
     "https://static1.cloudbeds.com/booking-engine/latest/static/js/immersive-experience/cb-immersive-experience.js",
 };
