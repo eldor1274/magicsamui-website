@@ -16,6 +16,15 @@ declare module "react" {
         },
         HTMLElement
       >;
+      "cb-immersive-experience": React.DetailedHTMLProps<
+        React.HTMLAttributes<HTMLElement> & {
+          mode?: "standard" | "popup";
+          "property-code"?: string;
+          currency?: string;
+          lang?: string;
+        },
+        HTMLElement
+      >;
     }
   }
 }

@@ -1,4 +1,4 @@
-import { site } from "@/data/site";
+import Link from "next/link";
 
 export default function BookNowButton({
   className = "",
@@ -8,13 +8,11 @@ export default function BookNowButton({
   children?: React.ReactNode;
 }) {
   return (
-    <a
-      href={site.cloudbedsReservationUrl}
-      target="_blank"
-      rel="noopener noreferrer"
+    <Link
+      href="/booking"
       className={`inline-flex items-center justify-center rounded-full bg-pool px-6 py-3 text-sm font-medium tracking-wide text-white transition-colors hover:bg-pool-dark ${className}`}
     >
       {children}
-    </a>
+    </Link>
   );
 }
