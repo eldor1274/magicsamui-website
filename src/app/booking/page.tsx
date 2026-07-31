@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { site } from "@/data/site";
+import CloudbedsImmersive from "@/components/CloudbedsImmersive";
 
 export const metadata: Metadata = {
   title: "Book Your Stay | Magic Suites & Villas",
@@ -16,11 +16,7 @@ export default function BookingPage() {
         Live availability and secure payment, right here on our site.
       </p>
       <div className="mt-8">
-        <cb-immersive-experience
-          mode="standard"
-          property-code={site.cloudbedsPropertyCode}
-          currency="thb"
-        />
+        <CloudbedsImmersive />
       </div>
     </div>
   );
