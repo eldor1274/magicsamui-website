@@ -15,6 +15,12 @@ export function mapsSearchUrl(name: string) {
   )}`;
 }
 
+// 12Go route pages show live timetables and prices; the z/sub_id params
+// credit bookings to our partner account.
+export function twelveGoRouteUrl(fromSlug: string, toSlug: string) {
+  return `https://12go.asia/en/travel/${fromSlug}/${toSlug}?z=15319268&sub_id=magicsamui-guide`;
+}
+
 export const guideLists = {
   breakfast: "https://maps.app.goo.gl/g55SrEsRF1p5zNi97",
   lunchDinner: "https://maps.app.goo.gl/1P682EsVwSnPadGaA",

@@ -14,6 +14,7 @@ import {
   Landmark,
   Star,
   ExternalLink,
+  Ship,
 } from "lucide-react";
 import { site } from "@/data/site";
 import TravelBookingWidget from "@/components/TravelBookingWidget";
@@ -24,8 +25,22 @@ import {
   templesAndSights,
   guideLists,
   mapsSearchUrl,
+  twelveGoRouteUrl,
   type GuidePlace,
 } from "@/data/guidePlaces";
+
+function RouteLink({ from, to, label }: { from: string; to: string; label: string }) {
+  return (
+    <a
+      href={twelveGoRouteUrl(from, to)}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="inline-flex items-center gap-1.5 rounded-full border border-pool px-4 py-2 text-sm font-medium text-pool transition-colors hover:bg-pool hover:text-white"
+    >
+      {label} <ExternalLink size={13} />
+    </a>
+  );
+}
 
 function PlaceCard({ place }: { place: GuidePlace }) {
   return (
@@ -105,6 +120,43 @@ export default function GuidePage() {
             online; tickets arrive by email.
           </p>
           <TravelBookingWidget />
+        </div>
+      </section>
+
+      <section className="mt-12">
+        <h2 className="flex items-center gap-2 font-serif text-2xl text-ink">
+          <Ship size={20} className="text-pool" /> Island Hopping: Koh Phangan &amp; Koh Tao
+        </h2>
+        <p className="mt-2 text-ink-soft">
+          The two most asked-about trips. Live timetables and prices are one
+          tap away — book online, tickets arrive by email.
+        </p>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <div className="rounded-xl bg-stone-100 p-5">
+            <p className="font-medium text-ink">Koh Phangan</p>
+            <p className="mt-1 text-sm text-ink-soft">
+              20–50 min by ferry · from ~฿220 · boats all day from early
+              morning to evening. Lomprayah and Seatran leave from Bangrak
+              pier, a few minutes&apos; drive from the villas; Songserm from
+              Nathon. All arrive at Thong Sala pier.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <RouteLink from="koh-samui" to="koh-phangan" label="Samui → Koh Phangan" />
+              <RouteLink from="koh-phangan" to="koh-samui" label="Koh Phangan → Samui" />
+            </div>
+          </div>
+          <div className="rounded-xl bg-stone-100 p-5">
+            <p className="font-medium text-ink">Koh Tao</p>
+            <p className="mt-1 text-sm text-ink-soft">
+              1.5–3 h by ferry · from ~฿490 · first boats around 08:00, most
+              via Koh Phangan. Lomprayah, Boonsiri, Seatran and Songserm all
+              serve the route; arrival is at Mae Haad pier.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <RouteLink from="koh-samui" to="koh-tao" label="Samui → Koh Tao" />
+              <RouteLink from="koh-tao" to="koh-samui" label="Koh Tao → Samui" />
+            </div>
+          </div>
         </div>
       </section>
 
