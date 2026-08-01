@@ -92,18 +92,17 @@ export default function RoomsPage() {
       </section>
 
       <section className="mt-16 overflow-hidden rounded-3xl bg-ink text-stone-50">
-        <div className="grid gap-0 lg:grid-cols-2">
-          <div className="relative min-h-[280px]">
-            <Image
-              src="/images/eldor-villa/aerial.jpg"
-              alt="Villa EL and Villa DOR taking shape on the hillside below Magic Villa"
-              fill
-              quality={60}
-              sizes="(min-width: 1024px) 50vw, 100vw"
-              className="object-cover"
-            />
-          </div>
-          <div className="p-8 lg:p-12">
+        <div className="relative">
+          <Image
+            src="/images/eldor-villa/aerial.jpg"
+            alt="Villa EL and Villa DOR taking shape on the hillside below Magic Villa"
+            fill
+            quality={60}
+            sizes="100vw"
+            className="object-cover"
+          />
+          <div className="absolute inset-0 bg-gradient-to-r from-ink/95 via-ink/75 to-ink/30" />
+          <div className="relative max-w-2xl p-8 lg:p-12">
             <span className="inline-block rounded-full bg-sand px-4 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-ink">
               Coming soon
             </span>
