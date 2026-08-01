@@ -5,7 +5,7 @@ import { BedDouble, Users, Bath, Ruler, Star, Check } from "lucide-react";
 import BookNowButton from "@/components/BookNowButton";
 import RoomGallery from "@/components/RoomGallery";
 import { rooms, getRoomBySlug } from "@/data/rooms";
-import { airbnbRoomRatings, reviewStats, roomReviews } from "@/data/reviews";
+import { airbnbRoomRatings, roomReviews } from "@/data/reviews";
 
 export function generateStaticParams() {
   return rooms.map((room) => ({ slug: room.slug }));
@@ -36,8 +36,12 @@ export default async function RoomPage({
 
   const otherRooms = rooms.filter((r) => r.slug !== room.slug);
 
+  const suiteReviews = roomReviews[room.slug];
+  const suiteRating = airbnbRoomRatings[room.slug];
+
   return (
-    <div className="mx-auto max-w-6xl px-5 py-12">
+    <>
+      <div className="mx-auto max-w-6xl px-5 py-12">
       <div className="grid gap-10 lg:grid-cols-3">
         <div className="lg:col-span-2">
           <RoomGallery images={room.gallery} />
@@ -47,7 +51,7 @@ export default async function RoomPage({
           <h1 className="font-serif text-3xl text-ink">{room.name}</h1>
           {airbnbRoomRatings[room.slug] ? (
             <a
-              href={reviewStats.airbnb.url}
+              href={airbnbRoomRatings[room.slug].url}
               target="_blank"
               rel="noopener noreferrer"
               className="mt-2 flex items-center gap-1 text-sand hover:opacity-80"
@@ -155,38 +159,6 @@ export default async function RoomPage({
         </div>
       </div>
 
-      {roomReviews[room.slug] && roomReviews[room.slug].length > 0 && (
-        <div className="mt-16">
-          <h2 className="font-serif text-2xl text-ink">Guest Reviews for This Suite</h2>
-          <div className="mt-6 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {roomReviews[room.slug].map((review) => (
-              <figure
-                key={review.name + review.country}
-                className="flex flex-col rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5"
-              >
-                <div className="flex items-center gap-1 text-sand">
-                  {Array.from({ length: 5 }).map((_, i) => (
-                    <Star key={i} size={14} fill="currentColor" strokeWidth={0} />
-                  ))}
-                </div>
-                <blockquote className="mt-3 flex-1 text-sm leading-relaxed text-ink-soft">
-                  &ldquo;{review.text}&rdquo;
-                </blockquote>
-                <figcaption className="mt-4 flex items-center justify-between border-t border-stone-100 pt-3">
-                  <span className="text-sm font-medium text-ink">
-                    {review.name}
-                    <span className="ml-2 text-xs font-normal text-ink-soft">{review.country}</span>
-                  </span>
-                  <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-ink-soft">
-                    {review.platform === "airbnb" ? "Airbnb" : "Booking.com"}
-                  </span>
-                </figcaption>
-              </figure>
-            ))}
-          </div>
-        </div>
-      )}
-
       <div className="mt-16">
         <h2 className="font-serif text-2xl text-ink">Explore Other Suites</h2>
         <div className="mt-6 flex flex-wrap gap-3">
@@ -201,6 +173,67 @@ export default async function RoomPage({
           ))}
         </div>
       </div>
-    </div>
+      </div>
+
+      {suiteReviews && suiteReviews.length > 0 && (
+        <section className="mt-4 bg-stone-100 py-14">
+          <div className="mx-auto max-w-6xl px-5">
+            <div className="flex flex-wrap items-end justify-between gap-6">
+              <div>
+                <p className="text-sm uppercase tracking-[0.3em] text-pool">Guest reviews</p>
+                <h2 className="mt-3 font-serif text-3xl text-ink">What Our Guests Say</h2>
+              </div>
+              {suiteRating && (
+                <a
+                  href={suiteRating.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5 transition-shadow hover:shadow-md"
+                >
+                  <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-ink font-serif text-lg text-white">
+                    {suiteRating.rating}
+                  </span>
+                  <span>
+                    <span className="block text-sm font-medium text-ink">
+                      {room.shortName} on Airbnb
+                    </span>
+                    <span className="block text-xs text-ink-soft">
+                      {suiteRating.count} guest reviews →
+                    </span>
+                  </span>
+                </a>
+              )}
+            </div>
+
+            <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              {suiteReviews.map((review) => (
+                <figure
+                  key={review.name + review.country}
+                  className="flex flex-col rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5"
+                >
+                  <div className="flex items-center gap-1 text-sand">
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <Star key={i} size={14} fill="currentColor" strokeWidth={0} />
+                    ))}
+                  </div>
+                  <blockquote className="mt-3 flex-1 text-sm leading-relaxed text-ink-soft">
+                    &ldquo;{review.text}&rdquo;
+                  </blockquote>
+                  <figcaption className="mt-4 flex items-center justify-between border-t border-stone-100 pt-3">
+                    <span className="text-sm font-medium text-ink">
+                      {review.name}
+                      <span className="ml-2 text-xs font-normal text-ink-soft">{review.country}</span>
+                    </span>
+                    <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-ink-soft">
+                      Airbnb
+                    </span>
+                  </figcaption>
+                </figure>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+    </>
   );
 }
