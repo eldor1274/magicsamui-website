@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { MessageCircle, X, SendHorizontal } from "lucide-react";
+import { track } from "@/lib/track";
 
 // Floating concierge chat. Talks to the Magic Suites AI bot (same brain as
 // the WhatsApp/Messenger/Instagram concierge) over its webchat endpoint, so
@@ -69,6 +70,7 @@ export default function ConciergeChat() {
     setInput("");
     setMessages((m) => [...m, { role: "guest", text }]);
     setBusy(true);
+    track("chat_message_sent");
     try {
       const res = await fetch(`${BOT_URL}/webchat`, {
         method: "POST",
@@ -163,7 +165,10 @@ export default function ConciergeChat() {
 
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          if (!open) track("chat_open");
+          setOpen(!open);
+        }}
         aria-label={open ? "Close chat" : "Chat with us"}
         className="flex h-14 w-14 items-center justify-center rounded-full bg-pool text-white shadow-lg transition-transform hover:scale-110"
       >

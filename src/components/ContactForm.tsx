@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import { track } from "@/lib/track";
 import { isValidContact } from "@/lib/validateContact";
 
 export default function ContactForm() {
@@ -30,6 +31,7 @@ export default function ContactForm() {
       });
       if (!res.ok) throw new Error();
       setStatus("sent");
+      track("contact_form_submit");
       setName("");
       setContact("");
       setMessage("");

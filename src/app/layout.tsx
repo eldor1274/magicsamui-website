@@ -51,9 +51,20 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const gaId = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID;
+
   return (
     <html lang="en" className={`${sans.variable} ${serif.variable} h-full`}>
       <body className="flex min-h-full flex-col font-sans antialiased">
+        {gaId && (
+          // Seeds the gtag queue at page start so funnel events fired before
+          // the lazily-loaded gtag.js arrives are replayed in order.
+          <script
+            dangerouslySetInnerHTML={{
+              __html: `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}window.gtag=gtag;gtag('js',new Date());gtag('config','${gaId}');`,
+            }}
+          />
+        )}
         <Header />
         <main className="flex-1">{children}</main>
         <Footer />
