@@ -116,6 +116,14 @@ export default function RoomsPage() {
               this hillside from the very first stone.
             </p>
             <p className="mt-4 leading-relaxed text-stone-50/80">
+              Carved into the rock of the same serene hillside, in the quiet
+              residence overlooking the gulf of Thailand, the villas carry
+              the signature of everything around them — ultra-modern lines
+              softened by natural stone rising from the mountain, and living
+              grass roofs that melt into the green of Koh Samui. Designed to
+              feel like they grew here, not like they were built here.
+            </p>
+            <p className="mt-4 leading-relaxed text-stone-50/80">
               Each villa sleeps four across 2 bedrooms with 3 bathrooms and 3
               showers, with everything you love about the Honeymoon Suite —
               plus your own washing and drying machine for longer stays.
