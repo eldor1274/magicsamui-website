@@ -5,7 +5,7 @@ import ClarityScript from "@/components/ClarityScript";
 import CloudbedsScript from "@/components/CloudbedsScript";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
-import WhatsAppFloat from "@/components/WhatsAppFloat";
+import ConciergeChat from "@/components/ConciergeChat";
 import { site } from "@/data/site";
 import "./globals.css";
 
@@ -43,7 +43,7 @@ export default function RootLayout({
         <Header />
         <main className="flex-1">{children}</main>
         <Footer />
-        <WhatsAppFloat />
+        <ConciergeChat />
         <CloudbedsScript />
         <ClarityScript />
         {gaId && (
