@@ -16,6 +16,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { site } from "@/data/site";
+import TravelBookingWidget from "@/components/TravelBookingWidget";
 import {
   breakfastSpots,
   lunchDinnerSpots,
@@ -95,6 +96,15 @@ export default function GuidePage() {
             </Link>
             .
           </p>
+          <p>
+            <span className="font-medium text-ink">
+              Ferries, trains, buses &amp; flights:
+            </span>{" "}
+            book onward travel anywhere in Thailand and Asia — Koh Phangan,
+            Koh Tao, Bangkok, Chiang Mai and beyond. Search below and pay
+            online; tickets arrive by email.
+          </p>
+          <TravelBookingWidget />
         </div>
       </section>
 
