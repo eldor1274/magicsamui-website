@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { MessageCircle, Phone, Mail, MapPin } from "lucide-react";
+import { InstagramIcon, FacebookIcon, TikTokIcon } from "@/components/SocialIcons";
 import { nav, site } from "@/data/site";
 
 export default function Footer() {
@@ -60,6 +61,36 @@ export default function Footer() {
             <li>
               <a href={site.line} className="flex items-center gap-2 hover:text-pool">
                 <MessageCircle size={14} /> LINE
+              </a>
+            </li>
+            <li>
+              <a
+                href={site.instagram}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 hover:text-pool"
+              >
+                <InstagramIcon size={14} /> Instagram
+              </a>
+            </li>
+            <li>
+              <a
+                href={site.facebook}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 hover:text-pool"
+              >
+                <FacebookIcon size={14} /> Facebook
+              </a>
+            </li>
+            <li>
+              <a
+                href={site.tiktok}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 hover:text-pool"
+              >
+                <TikTokIcon size={14} /> TikTok
               </a>
             </li>
           </ul>

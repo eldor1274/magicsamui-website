@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Phone, MessageCircle, Mail, MapPin } from "lucide-react";
 import ContactForm from "@/components/ContactForm";
+import { InstagramIcon, FacebookIcon, TikTokIcon } from "@/components/SocialIcons";
 import { site } from "@/data/site";
 
 export const metadata: Metadata = {
@@ -29,6 +30,48 @@ export default function ContactPage() {
               <div>
                 <p className="font-medium text-ink">LINE</p>
                 <p className="text-sm text-ink-soft">@Eldor1274</p>
+              </div>
+            </a>
+            <a
+              href={site.instagram}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-3 rounded-xl bg-stone-100 p-4 hover:bg-sand-light/40"
+            >
+              <span className="text-pool">
+                <InstagramIcon size={20} />
+              </span>
+              <div>
+                <p className="font-medium text-ink">Instagram</p>
+                <p className="text-sm text-ink-soft">@magic1samui</p>
+              </div>
+            </a>
+            <a
+              href={site.facebook}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-3 rounded-xl bg-stone-100 p-4 hover:bg-sand-light/40"
+            >
+              <span className="text-pool">
+                <FacebookIcon size={20} />
+              </span>
+              <div>
+                <p className="font-medium text-ink">Facebook</p>
+                <p className="text-sm text-ink-soft">Magicsamui Villas&amp;Suites</p>
+              </div>
+            </a>
+            <a
+              href={site.tiktok}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-3 rounded-xl bg-stone-100 p-4 hover:bg-sand-light/40"
+            >
+              <span className="text-pool">
+                <TikTokIcon size={20} />
+              </span>
+              <div>
+                <p className="font-medium text-ink">TikTok</p>
+                <p className="text-sm text-ink-soft">@magic.suites</p>
               </div>
             </a>
             {site.phones.map((p) => (
