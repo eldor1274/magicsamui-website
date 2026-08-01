@@ -5,6 +5,7 @@ import { getRoomBySlug } from "@/data/rooms";
 import { villas } from "@/data/villas";
 
 export const metadata: Metadata = {
+  alternates: { canonical: "/rooms" },
   title: "Suites & Villas | Magic Suites & Villas",
   description:
     "Explore Magic Villa's 4 private suites and the standalone Tuxedo Villa in Koh Samui — every suite has its own pool.",

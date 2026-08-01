@@ -3,9 +3,11 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { BedDouble, Users, Bath, Ruler, Star, Check } from "lucide-react";
 import BookNowButton from "@/components/BookNowButton";
+import JsonLd from "@/components/JsonLd";
 import RoomGallery from "@/components/RoomGallery";
 import { rooms, getRoomBySlug } from "@/data/rooms";
 import { airbnbRoomRatings, roomReviews } from "@/data/reviews";
+import { roomJsonLd, breadcrumbJsonLd } from "@/lib/structuredData";
 
 export function generateStaticParams() {
   return rooms.map((room) => ({ slug: room.slug }));
@@ -22,6 +24,12 @@ export async function generateMetadata({
   return {
     title: `${room.name} | Magic Suites & Villas`,
     description: room.summary,
+    alternates: { canonical: `/rooms/${room.slug}` },
+    openGraph: {
+      title: `${room.name} | Magic Suites & Villas`,
+      description: room.summary,
+      images: [{ url: room.heroImage.src, width: 1200, height: 630, alt: room.heroImage.alt }],
+    },
   };
 }
 
@@ -41,6 +49,14 @@ export default async function RoomPage({
 
   return (
     <>
+      <JsonLd data={roomJsonLd(room)} />
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: "Home", path: "/" },
+          { name: "Suites & Villas", path: "/rooms" },
+          { name: room.shortName, path: `/rooms/${room.slug}` },
+        ])}
+      />
       <div className="mx-auto max-w-6xl px-5 py-12">
       <div className="grid gap-10 lg:grid-cols-3">
         <div className="lg:col-span-2">

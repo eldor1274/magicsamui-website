@@ -20,6 +20,14 @@ export async function generateMetadata({
   return {
     title: `${post.title} | Magic Suites & Villas`,
     description: post.description,
+    alternates: { canonical: `/blog/${post.slug}` },
+    openGraph: {
+      title: post.title,
+      description: post.description,
+      ...(post.heroImage
+        ? { images: [{ url: post.heroImage, width: 1200, height: 630, alt: post.title }] }
+        : {}),
+    },
   };
 }
 

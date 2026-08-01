@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import CloudbedsImmersive from "@/components/CloudbedsImmersive";
 
 export const metadata: Metadata = {
+  alternates: { canonical: "/booking" },
   title: "Book Your Stay | Magic Suites & Villas",
   description:
     "Check live availability and book your private pool suite or villa at Magic Suites & Villas, Koh Samui — best rate, always, when you book direct.",

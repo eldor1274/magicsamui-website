@@ -5,6 +5,7 @@ import { InstagramIcon, FacebookIcon, TikTokIcon } from "@/components/SocialIcon
 import { site } from "@/data/site";
 
 export const metadata: Metadata = {
+  alternates: { canonical: "/contact" },
   title: "Contact Us | Magic Suites & Villas",
   description: "Get in touch with Magic Suites & Villas, Koh Samui.",
 };

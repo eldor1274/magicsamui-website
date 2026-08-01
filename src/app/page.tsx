@@ -1,6 +1,9 @@
+import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
 import { Wifi, WashingMachine, Bike, Car, ArrowRight } from "lucide-react";
+import JsonLd from "@/components/JsonLd";
+import { resortJsonLd } from "@/lib/structuredData";
 import BookNowButton from "@/components/BookNowButton";
 import CloudbedsDatePicker from "@/components/CloudbedsDatePicker";
 import DesktopVideo from "@/components/DesktopVideo";
@@ -28,11 +31,16 @@ const essentials = [
   { icon: Car, label: "Transportation Service" },
 ];
 
+export const metadata: Metadata = {
+  alternates: { canonical: "/" },
+};
+
 export default function Home() {
   const latestPosts = getAllBlogPosts().slice(0, 3);
 
   return (
     <>
+      <JsonLd data={resortJsonLd()} />
       <section className="relative flex h-[90vh] min-h-[560px] w-full items-end">
         <Image
           src="/images/home/Magic-Suites-50-2.jpg"

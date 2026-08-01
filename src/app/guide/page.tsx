@@ -74,6 +74,7 @@ function ListLink({ href }: { href: string }) {
 }
 
 export const metadata: Metadata = {
+  alternates: { canonical: "/guide" },
   title: "Island Guide | Magic Suites & Villas",
   description: "Everything you need during your stay at Magic Suites & Villas, Koh Samui.",
 };

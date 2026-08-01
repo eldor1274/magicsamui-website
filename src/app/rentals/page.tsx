@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Image from "next/image";
 
 export const metadata: Metadata = {
+  alternates: { canonical: "/rentals" },
   title: "Motorbike & Car Rentals | Magic Suites & Villas",
   description: "Motorbikes and cars available directly through Magic Suites & Villas, Koh Samui.",
 };

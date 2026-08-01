@@ -25,6 +25,22 @@ export const metadata: Metadata = {
   description:
     "Magic Suites & Villas offers 2 villas and 4 private pool suites on a hillside overlooking the gulf of Thailand in Koh Samui, 5 minutes from Choeng Mon Beach.",
   metadataBase: new URL(`https://${site.domain}`),
+  openGraph: {
+    type: "website",
+    siteName: site.name,
+    locale: "en_US",
+    images: [
+      {
+        url: "/images/home/Magic-Suites-50-2.jpg",
+        width: 1200,
+        height: 630,
+        alt: "Magic Suites private pool villa at sunset",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+  },
   verification: {
     google: process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION,
   },

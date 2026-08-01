@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { site } from "@/data/site";
 
 export const metadata: Metadata = {
+  alternates: { canonical: "/about" },
   title: "About Us | Magic Suites & Villas",
   description: "About Magic Suites & Villas and the company behind it.",
 };

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { getAllBlogPosts } from "@/data/blog";
 
 export const metadata: Metadata = {
+  alternates: { canonical: "/blog" },
   title: "Blog | Magic Suites & Villas",
   description: "Guides and tips for planning your stay in Koh Samui, from Magic Suites & Villas.",
 };
