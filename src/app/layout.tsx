@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import { Fraunces, Inter } from "next/font/google";
-import Script from "next/script";
 import ClarityScript from "@/components/ClarityScript";
 import CloudbedsScript from "@/components/CloudbedsScript";
+import GaScript from "@/components/GaScript";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import ConciergeChat from "@/components/ConciergeChat";
@@ -30,8 +30,6 @@ export const metadata: Metadata = {
   },
 };
 
-const gaId = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID;
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -46,19 +44,7 @@ export default function RootLayout({
         <ConciergeChat />
         <CloudbedsScript />
         <ClarityScript />
-        {gaId && (
-          <>
-            <Script src={`https://www.googletagmanager.com/gtag/js?id=${gaId}`} strategy="afterInteractive" />
-            <Script id="ga-init" strategy="afterInteractive">
-              {`
-                window.dataLayer = window.dataLayer || [];
-                function gtag(){dataLayer.push(arguments);}
-                gtag('js', new Date());
-                gtag('config', '${gaId}');
-              `}
-            </Script>
-          </>
-        )}
+        <GaScript />
       </body>
     </html>
   );
