@@ -29,7 +29,9 @@ export default function CloudbedsDatePicker({ className = "" }: { className?: st
   }
 
   return (
-    <div className={className}>
+    // min-height reserves the widget's space while its script loads on
+    // first interaction, so the late upgrade causes no layout shift.
+    <div className={className} style={{ minHeight: 56 }}>
       <cb-property-date-picker
         property-code={site.cloudbedsPropertyCode}
         button-label="Check Availability"

@@ -38,7 +38,9 @@ export default function Home() {
           src="/images/home/Magic-Suites-50-2.jpg"
           alt="Magic Suites private pool villa at sunset"
           fill
-          priority
+          preload
+          fetchPriority="high"
+          quality={60}
           sizes="100vw"
           className="object-cover"
         />
@@ -94,6 +96,7 @@ export default function Home() {
             src="/images/home/DMZ_3612-2.jpg"
             alt="Rooftop garden and pool terrace"
             fill
+            quality={60}
             sizes="(min-width: 1024px) 50vw, 100vw"
             className="object-cover"
           />
@@ -192,6 +195,7 @@ export default function Home() {
           src="/images/tuxedo/DMZ_3612-1.jpg"
           alt="Private pool villa at dusk"
           fill
+          quality={60}
           sizes="100vw"
           className="object-cover"
         />

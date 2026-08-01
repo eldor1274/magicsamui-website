@@ -38,7 +38,7 @@ export default function Footer() {
               <li key={p.tel}>
                 <a href={`tel:${p.tel}`} className="flex items-center gap-2 hover:text-pool">
                   <Phone size={14} /> {p.number}
-                  <span className="text-xs text-ink-soft/70">({p.label})</span>
+                  <span className="text-xs text-ink-soft">({p.label})</span>
                 </a>
               </li>
             ))}
@@ -97,7 +97,7 @@ export default function Footer() {
         </div>
       </div>
 
-      <div className="border-t border-stone-100/80 px-5 py-6 text-center text-xs text-ink-soft/70">
+      <div className="border-t border-stone-100/80 px-5 py-6 text-center text-xs text-ink-soft">
         <p>
           &copy; {new Date().getFullYear()} {site.legalName}, Registration No. {site.registrationNumber}
         </p>
