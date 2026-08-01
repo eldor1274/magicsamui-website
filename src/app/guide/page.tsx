@@ -1,7 +1,61 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { MapPin, MessageCircle, ShoppingBasket, Fuel, Shirt, Sparkles, ShieldAlert } from "lucide-react";
+import {
+  MapPin,
+  MessageCircle,
+  ShoppingBasket,
+  Fuel,
+  Shirt,
+  Sparkles,
+  ShieldAlert,
+  Coffee,
+  UtensilsCrossed,
+  Waves,
+  Landmark,
+  Star,
+  ExternalLink,
+} from "lucide-react";
 import { site } from "@/data/site";
+import {
+  breakfastSpots,
+  lunchDinnerSpots,
+  beaches,
+  templesAndSights,
+  guideLists,
+  mapsSearchUrl,
+  type GuidePlace,
+} from "@/data/guidePlaces";
+
+function PlaceCard({ place }: { place: GuidePlace }) {
+  return (
+    <a
+      href={mapsSearchUrl(place.name)}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="rounded-xl bg-stone-100 p-4 transition-colors hover:bg-stone-100/60"
+    >
+      <p className="font-medium text-ink">{place.name}</p>
+      <p className="mt-1 flex items-center gap-1 text-sm text-ink-soft">
+        <Star size={13} className="text-sand" fill="currentColor" strokeWidth={0} />
+        {place.rating} ({place.reviews.toLocaleString()}) · {place.type}
+        {place.price ? ` · ${place.price}` : ""}
+      </p>
+    </a>
+  );
+}
+
+function ListLink({ href }: { href: string }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="mt-4 inline-flex items-center gap-1.5 text-sm text-pool underline"
+    >
+      Open the full list in Google Maps <ExternalLink size={13} />
+    </a>
+  );
+}
 
 export const metadata: Metadata = {
   title: "Island Guide | Magic Suites & Villas",
@@ -77,6 +131,58 @@ export default function GuidePage() {
             </p>
           </div>
         </div>
+      </section>
+
+      <section className="mt-12">
+        <h2 className="flex items-center gap-2 font-serif text-2xl text-ink">
+          <Coffee size={20} className="text-pool" /> Breakfast Spots
+        </h2>
+        <p className="mt-2 text-ink-soft">Our favourite places to start the day.</p>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          {breakfastSpots.map((place) => (
+            <PlaceCard key={place.name} place={place} />
+          ))}
+        </div>
+        <ListLink href={guideLists.breakfast} />
+      </section>
+
+      <section className="mt-12">
+        <h2 className="flex items-center gap-2 font-serif text-2xl text-ink">
+          <UtensilsCrossed size={20} className="text-pool" /> Lunch &amp; Dinner
+        </h2>
+        <p className="mt-2 text-ink-soft">
+          Places to have lunch and dinner in Choeng Mon, minutes from the villas.
+        </p>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          {lunchDinnerSpots.map((place) => (
+            <PlaceCard key={place.name} place={place} />
+          ))}
+        </div>
+        <ListLink href={guideLists.lunchDinner} />
+      </section>
+
+      <section className="mt-12">
+        <h2 className="flex items-center gap-2 font-serif text-2xl text-ink">
+          <Waves size={20} className="text-pool" /> Swimmable Beaches
+        </h2>
+        <p className="mt-2 text-ink-soft">
+          The beaches around the island we recommend for swimming.
+        </p>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          {beaches.map((place) => (
+            <PlaceCard key={place.name} place={place} />
+          ))}
+        </div>
+
+        <h2 className="mt-10 flex items-center gap-2 font-serif text-2xl text-ink">
+          <Landmark size={20} className="text-pool" /> Temples &amp; Sights
+        </h2>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          {templesAndSights.map((place) => (
+            <PlaceCard key={place.name} place={place} />
+          ))}
+        </div>
+        <ListLink href={guideLists.beachesTemples} />
       </section>
 
       <section className="mt-12">
