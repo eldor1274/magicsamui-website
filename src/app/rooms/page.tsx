@@ -27,7 +27,8 @@ export default function RoomsPage() {
       <p className="mt-4 max-w-2xl text-ink-soft">
         Magic Villa is split into 4 individually bookable suites, each with
         its own pool. Tuxedo is a standalone villa with 1, 2 and 3 bedroom
-        options. Every space is just minutes from Choeng Mon Beach.
+        options. Every space is just minutes from Choeng Mon Beach — and two
+        brand-new villas, EL and DOR, are opening soon.
       </p>
 
       <section className="mt-14">
@@ -87,6 +88,68 @@ export default function RoomsPage() {
             const room = getRoomBySlug(slug)!;
             return <RoomCard key={room.slug} room={room} />;
           })}
+        </div>
+      </section>
+
+      <section className="mt-16 overflow-hidden rounded-3xl bg-ink text-stone-50">
+        <div className="grid gap-0 lg:grid-cols-2">
+          <div className="relative min-h-[280px]">
+            <Image
+              src="/images/eldor-villa/aerial.jpg"
+              alt="Villa EL and Villa DOR taking shape on the hillside below Magic Villa"
+              fill
+              quality={60}
+              sizes="(min-width: 1024px) 50vw, 100vw"
+              className="object-cover"
+            />
+          </div>
+          <div className="p-8 lg:p-12">
+            <span className="inline-block rounded-full bg-sand px-4 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-ink">
+              Coming soon
+            </span>
+            <h2 className="mt-4 font-serif text-3xl">ELDOR Villa</h2>
+            <p className="mt-4 leading-relaxed text-stone-50/80">
+              Just below Magic Villa and Tuxedo, two new villas are taking
+              their final shape: <span className="font-medium text-stone-50">Villa EL</span> and{" "}
+              <span className="font-medium text-stone-50">Villa DOR</span>. Put the names together
+              and you get ELDOR — our host, who has built and watched over
+              this hillside from the very first stone.
+            </p>
+            <p className="mt-4 leading-relaxed text-stone-50/80">
+              Each villa sleeps four across 2 bedrooms with 3 bathrooms and 3
+              showers, with everything you love about the Honeymoon Suite —
+              plus your own washing and drying machine for longer stays.
+            </p>
+            <div className="mt-6 flex flex-wrap gap-2 text-sm">
+              {["2 bedrooms", "3 bathrooms", "Sleeps 4", "Washer & dryer"].map((chip) => (
+                <span key={chip} className="rounded-full border border-stone-50/30 px-4 py-1.5 text-stone-50/90">
+                  {chip}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="grid gap-0 sm:grid-cols-2">
+          <div className="relative aspect-[16/9]">
+            <Image
+              src="/images/eldor-villa/el-terrace.jpg"
+              alt="Villa EL top floor with rooftop lawn terrace"
+              fill
+              quality={60}
+              sizes="(min-width: 640px) 50vw, 100vw"
+              className="object-cover"
+            />
+          </div>
+          <div className="relative aspect-[16/9]">
+            <Image
+              src="/images/eldor-villa/el-night.jpg"
+              alt="Villa EL glowing at night"
+              fill
+              quality={60}
+              sizes="(min-width: 640px) 50vw, 100vw"
+              className="object-cover"
+            />
+          </div>
         </div>
       </section>
     </div>
