@@ -15,24 +15,44 @@ export default function ReviewsSection() {
             <p className="text-sm uppercase tracking-[0.3em] text-pool">Guest reviews</p>
             <h2 className="mt-3 font-serif text-3xl text-ink">What Our Guests Say</h2>
           </div>
-          <a
-            href={reviewStats.booking.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5 transition-shadow hover:shadow-md"
-          >
-            <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-pool font-serif text-lg text-white">
-              {reviewStats.booking.score}
-            </span>
-            <span>
-              <span className="block text-sm font-medium text-ink">
-                {reviewStats.booking.label} on Booking.com
+          <div className="flex flex-wrap gap-4">
+            <a
+              href={reviewStats.booking.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5 transition-shadow hover:shadow-md"
+            >
+              <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-pool font-serif text-lg text-white">
+                {reviewStats.booking.score}
               </span>
-              <span className="block text-xs text-ink-soft">
-                {reviewStats.booking.count} verified guest reviews →
+              <span>
+                <span className="block text-sm font-medium text-ink">
+                  {reviewStats.booking.label} on Booking.com
+                </span>
+                <span className="block text-xs text-ink-soft">
+                  {reviewStats.booking.count} verified guest reviews →
+                </span>
               </span>
-            </span>
-          </a>
+            </a>
+            <a
+              href={reviewStats.airbnb.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5 transition-shadow hover:shadow-md"
+            >
+              <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-ink font-serif text-lg text-white">
+                {reviewStats.airbnb.score}
+              </span>
+              <span>
+                <span className="block text-sm font-medium text-ink">
+                  {reviewStats.airbnb.label} on Airbnb
+                </span>
+                <span className="block text-xs text-ink-soft">
+                  {reviewStats.airbnb.count} reviews · {reviewStats.airbnb.years} years hosting →
+                </span>
+              </span>
+            </a>
+          </div>
         </div>
 
         <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">

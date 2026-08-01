@@ -14,7 +14,24 @@ export const reviewStats = {
     count: 64,
     url: "https://www.booking.com/hotel/th/magic-one-suites.en-gb.html",
   },
-  // airbnb: added once the Airbnb listing details are available
+  airbnb: {
+    score: "4.96",
+    label: "Superhost",
+    count: 280,
+    years: 8,
+    url: "https://www.airbnb.com/users/profile/1463186963221697726",
+  },
+};
+
+// Per-suite Airbnb ratings, from the host profile listing cards.
+export const airbnbRoomRatings: Record<string, { rating: string; count: number }> = {
+  "honeymoon-suite": { rating: "4.97", count: 73 },
+  "sunrise-suite": { rating: "4.95", count: 110 },
+  "garden-suite": { rating: "5.0", count: 32 },
+  "seaview-suite": { rating: "4.93", count: 28 },
+  "seaview-2br": { rating: "4.88", count: 8 },
+  tuxedo: { rating: "5.0", count: 22 },
+  "tuxedo-1br": { rating: "5.0", count: 5 },
 };
 
 // Per-suite reviews shown on each room's own page (Airbnb reviews are
@@ -58,5 +75,23 @@ export const reviews: Review[] = [
     name: "Daniel",
     country: "Australia",
     text: "Beautiful and unique condo. Spectacular view. I will definitely stay there again.",
+  },
+  {
+    platform: "airbnb",
+    name: "David",
+    country: "Australia",
+    text: "Absolutely amazing stay from start to finish. Eldor is an exceptional host and the accommodation is exactly as described. Highly recommended and we will be back.",
+  },
+  {
+    platform: "airbnb",
+    name: "Ugur",
+    country: "",
+    text: "Wonderful villa, super comfy place with great views. And the host Eldor is more than welcoming and available every time you need him. Great accommodation.",
+  },
+  {
+    platform: "airbnb",
+    name: "Memphis",
+    country: "",
+    text: "Highly recommend! The host was wonderful. I can't say enough good things about the service and the property was even more impressive.",
   },
 ];

@@ -5,7 +5,7 @@ import { BedDouble, Users, Bath, Ruler, Star, Check } from "lucide-react";
 import BookNowButton from "@/components/BookNowButton";
 import RoomGallery from "@/components/RoomGallery";
 import { rooms, getRoomBySlug } from "@/data/rooms";
-import { roomReviews } from "@/data/reviews";
+import { airbnbRoomRatings, reviewStats, roomReviews } from "@/data/reviews";
 
 export function generateStaticParams() {
   return rooms.map((room) => ({ slug: room.slug }));
@@ -45,12 +45,30 @@ export default async function RoomPage({
 
         <div>
           <h1 className="font-serif text-3xl text-ink">{room.name}</h1>
-          <div className="mt-2 flex items-center gap-1 text-sand">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <Star key={i} size={16} fill="currentColor" strokeWidth={0} />
-            ))}
-            <span className="ml-1 text-sm text-ink-soft">Rated 5 out of 5</span>
-          </div>
+          {airbnbRoomRatings[room.slug] ? (
+            <a
+              href={reviewStats.airbnb.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 flex items-center gap-1 text-sand hover:opacity-80"
+            >
+              <Star size={16} fill="currentColor" strokeWidth={0} />
+              <span className="ml-1 text-sm text-ink">
+                {airbnbRoomRatings[room.slug].rating}
+                <span className="text-ink-soft">
+                  {" "}
+                  · {airbnbRoomRatings[room.slug].count} reviews on Airbnb
+                </span>
+              </span>
+            </a>
+          ) : (
+            <div className="mt-2 flex items-center gap-1 text-sand">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Star key={i} size={16} fill="currentColor" strokeWidth={0} />
+              ))}
+              <span className="ml-1 text-sm text-ink-soft">Rated 5 out of 5</span>
+            </div>
+          )}
 
           <p className="mt-5 font-serif text-3xl text-pool">
             ฿{room.priceThb.toLocaleString()}
