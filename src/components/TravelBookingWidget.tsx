@@ -10,7 +10,7 @@ export default function TravelBookingWidget() {
         src="/12go-widget.html"
         title="Search ferries, trains, buses and flights with 12Go"
         loading="lazy"
-        className="hidden h-[360px] w-full max-w-xl border-0 sm:block"
+        className="hidden h-[360px] w-full max-w-[500px] border-0 sm:block"
       />
       <a
         href="https://12go.asia/en?z=15319268&sub_id=magicsamui-guide"
