@@ -13,6 +13,7 @@ export function resortJsonLd() {
     "@type": "Resort",
     "@id": `${BASE}/#resort`,
     name: site.name,
+    legalName: site.legalName,
     url: BASE,
     image: `${BASE}/images/home/Magic-Suites-50-2.jpg`,
     description:

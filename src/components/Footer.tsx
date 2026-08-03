@@ -99,7 +99,10 @@ export default function Footer() {
 
       <div className="border-t border-stone-100/80 px-5 py-6 text-center text-xs text-ink-soft">
         <p>
-          &copy; {new Date().getFullYear()} {site.legalName}, Registration No. {site.registrationNumber}
+          &copy; {new Date().getFullYear()} {site.name} ·{" "}
+          <Link href="/legal" className="hover:text-pool">
+            Legal
+          </Link>
         </p>
       </div>
     </footer>

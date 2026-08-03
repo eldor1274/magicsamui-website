@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import Link from "next/link";
 import {
   MapPin,
@@ -15,6 +16,10 @@ import {
   Star,
   ExternalLink,
   Ship,
+  Flame,
+  Music,
+  Beef,
+  Flower2,
 } from "lucide-react";
 import { site } from "@/data/site";
 import TravelBookingWidget from "@/components/TravelBookingWidget";
@@ -62,6 +67,47 @@ function PlaceCard({ place }: { place: GuidePlace }) {
     </a>
   );
 }
+
+const GOLD = "#d8b360";
+
+const fishermansHighlights: {
+  icon: typeof Flame;
+  title: string;
+  text: string;
+  badge?: string;
+}[] = [
+  {
+    icon: Flame,
+    title: "Fire Show at Coco Tam's",
+    text: "Fire dancers on the sand every night, usually around 19:15 and 21:00 — reserve a table in high season.",
+  },
+  {
+    icon: UtensilsCrossed,
+    title: "Dining On & Off the Beach",
+    text: "Tables on the sand and all along the walking street, every cuisine you can think of.",
+  },
+  {
+    icon: Beef,
+    title: "The Shack",
+    text: "The village's famous steak house — seriously good steaks, mostly by reservation, so book your table ahead.",
+  },
+  {
+    icon: Music,
+    title: "Live Music",
+    text: "Live songs in the heart of the village as the evening picks up.",
+  },
+  {
+    icon: Flower2,
+    title: "Massage & Wellness Spas",
+    text: "Massage shops and wellness spas all over the village, most near the entrance — some with beautiful views.",
+  },
+  {
+    icon: Waves,
+    title: "Watersports",
+    text: "Jet skis, paddleboards and kayaks off Bophut Beach.",
+    badge: "Morning activity",
+  },
+];
 
 function ListLink({ href }: { href: string }) {
   return (
@@ -225,6 +271,70 @@ export default function GuidePage() {
           ))}
         </div>
         <ListLink href={guideLists.lunchDinner} />
+      </section>
+
+      <section id="fishermans-village" className="mt-12 overflow-hidden rounded-3xl bg-ink">
+        <div className="relative h-64 sm:h-96">
+          <Image
+            src="/images/guide/fishermans-village.jpg"
+            alt="The Fisherman's Village walking street entrance at night"
+            fill
+            quality={75}
+            sizes="(min-width: 896px) 896px, 100vw"
+            className="object-cover object-[50%_30%]"
+          />
+          <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-b from-transparent to-ink" />
+        </div>
+        <div className="relative p-6 pt-4 sm:p-8 sm:pt-5">
+        <p
+          className="text-sm font-semibold uppercase tracking-[0.35em]"
+          style={{ color: GOLD }}
+        >
+          Fisherman&apos;s Village · Bophut
+        </p>
+        <h2 className="mt-3 font-serif text-3xl text-stone-50">
+          An Evening at Fisherman&apos;s Village
+        </h2>
+        <p className="mt-3 max-w-2xl leading-relaxed text-stone-50/75">
+          The island&apos;s most charming night out, just{" "}
+          <span className="font-medium text-stone-50">3.5 km · ~5 min by motorbike</span>{" "}
+          from the villas. Old wooden shophouses, restaurants on the sand,
+          wellness spas, fire shows and live music — the walking street comes
+          alive every evening from 18:00 to 22:00, and Friday night is the
+          biggest one.
+        </p>
+        <div className="-mx-6 mt-6 flex snap-x gap-4 overflow-x-auto px-6 pb-2 sm:-mx-8 sm:px-8">
+          {fishermansHighlights.map(({ icon: Icon, title, text, badge }) => (
+            <div
+              key={title}
+              className="min-w-[230px] max-w-[230px] snap-start rounded-2xl bg-white/5 p-5 ring-1 ring-white/10"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <Icon size={22} style={{ color: GOLD }} />
+                {badge && (
+                  <span
+                    className="rounded-full border px-2.5 py-0.5 text-[11px] font-medium"
+                    style={{ color: GOLD, borderColor: `${GOLD}66` }}
+                  >
+                    {badge}
+                  </span>
+                )}
+              </div>
+              <p className="mt-3 font-medium text-stone-50">{title}</p>
+              <p className="mt-1.5 text-sm leading-relaxed text-stone-50/70">{text}</p>
+            </div>
+          ))}
+        </div>
+        <a
+          href={mapsSearchUrl("Fisherman's Village Bophut")}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-5 inline-flex items-center gap-1.5 text-sm underline"
+          style={{ color: GOLD }}
+        >
+          Open Fisherman&apos;s Village in Google Maps <ExternalLink size={13} />
+        </a>
+        </div>
       </section>
 
       <section className="mt-12">
