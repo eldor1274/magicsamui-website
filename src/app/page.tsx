@@ -1,7 +1,17 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
-import { Wifi, WashingMachine, Bike, Car, ArrowRight } from "lucide-react";
+import {
+  Wifi,
+  WashingMachine,
+  Bike,
+  Car,
+  ArrowRight,
+  BadgePercent,
+  PlaneLanding,
+  MessageCircle,
+  Clock,
+} from "lucide-react";
 import JsonLd from "@/components/JsonLd";
 import { resortJsonLd } from "@/lib/structuredData";
 import BookNowButton from "@/components/BookNowButton";
@@ -23,6 +33,29 @@ const featuredRooms = rooms.filter(
       "tuxedo-3br",
     ].includes(r.slug)
 );
+
+const directPerks = [
+  {
+    icon: BadgePercent,
+    title: "Best rate, always",
+    text: "Code DIRECT at checkout beats any booking site.",
+  },
+  {
+    icon: PlaneLanding,
+    title: "Free airport pickup",
+    text: "Complimentary transfer on stays of 2+ nights.",
+  },
+  {
+    icon: MessageCircle,
+    title: "Direct line to the host",
+    text: "WhatsApp with us before, during and after your stay.",
+  },
+  {
+    icon: Clock,
+    title: "Flexible arrival",
+    text: "Drop your luggage anytime — just let us know ahead.",
+  },
+];
 
 const essentials = [
   { icon: Wifi, label: "Free Wi-Fi" },
@@ -82,6 +115,21 @@ export default function Home() {
 
       <section className="mx-auto -mt-9 max-w-3xl px-5">
         <CloudbedsDatePicker />
+      </section>
+
+      <section className="mx-auto max-w-6xl px-5 pt-12">
+        <p className="text-center text-sm uppercase tracking-[0.3em] text-pool">
+          Why book direct
+        </p>
+        <div className="mt-6 grid grid-cols-2 gap-5 lg:grid-cols-4">
+          {directPerks.map(({ icon: Icon, title, text }) => (
+            <div key={title} className="rounded-2xl bg-stone-100 p-5">
+              <Icon size={22} className="text-pool" />
+              <p className="mt-3 text-sm font-semibold text-ink">{title}</p>
+              <p className="mt-1 text-sm leading-relaxed text-ink-soft">{text}</p>
+            </div>
+          ))}
+        </div>
       </section>
 
       <section className="mx-auto grid max-w-6xl grid-cols-2 gap-6 px-5 py-14 text-center sm:grid-cols-4">
