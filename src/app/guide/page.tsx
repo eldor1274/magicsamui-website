@@ -75,11 +75,15 @@ const fishermansHighlights: {
   title: string;
   text: string;
   badge?: string;
+  // Card photos lazy-load by default and are served at card width
+  // (~230px), so they cost phones almost nothing.
+  image?: { src: string; alt: string };
 }[] = [
   {
     icon: Flame,
     title: "Fire Show at Coco Tam's",
     text: "Fire dancers on the sand every night, usually around 19:15 and 21:00 — reserve a table in high season.",
+    image: { src: "/images/guide/fireshow.jpg", alt: "Fire show sparks spinning on the beach at night" },
   },
   {
     icon: UtensilsCrossed,
@@ -304,24 +308,38 @@ export default function GuidePage() {
           biggest one.
         </p>
         <div className="-mx-6 mt-6 flex snap-x gap-4 overflow-x-auto px-6 pb-2 sm:-mx-8 sm:px-8">
-          {fishermansHighlights.map(({ icon: Icon, title, text, badge }) => (
+          {fishermansHighlights.map(({ icon: Icon, title, text, badge, image }) => (
             <div
               key={title}
-              className="min-w-[230px] max-w-[230px] snap-start rounded-2xl bg-white/5 p-5 ring-1 ring-white/10"
+              className="min-w-[230px] max-w-[230px] snap-start overflow-hidden rounded-2xl bg-white/5 ring-1 ring-white/10"
             >
-              <div className="flex items-start justify-between gap-2">
-                <Icon size={22} style={{ color: GOLD }} />
-                {badge && (
-                  <span
-                    className="rounded-full border px-2.5 py-0.5 text-[11px] font-medium"
-                    style={{ color: GOLD, borderColor: `${GOLD}66` }}
-                  >
-                    {badge}
-                  </span>
-                )}
+              {image && (
+                <div className="relative aspect-[16/10]">
+                  <Image
+                    src={image.src}
+                    alt={image.alt}
+                    fill
+                    quality={60}
+                    sizes="230px"
+                    className="object-cover"
+                  />
+                </div>
+              )}
+              <div className="p-5">
+                <div className="flex items-start justify-between gap-2">
+                  <Icon size={22} style={{ color: GOLD }} />
+                  {badge && (
+                    <span
+                      className="rounded-full border px-2.5 py-0.5 text-[11px] font-medium"
+                      style={{ color: GOLD, borderColor: `${GOLD}66` }}
+                    >
+                      {badge}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-3 font-medium text-stone-50">{title}</p>
+                <p className="mt-1.5 text-sm leading-relaxed text-stone-50/70">{text}</p>
               </div>
-              <p className="mt-3 font-medium text-stone-50">{title}</p>
-              <p className="mt-1.5 text-sm leading-relaxed text-stone-50/70">{text}</p>
             </div>
           ))}
         </div>
