@@ -49,7 +49,6 @@ export const lunchDinnerSpots: GuidePlace[] = [
 
 export const beaches: GuidePlace[] = [
   { name: "Choeng Mon Beach", rating: "4.5", reviews: 1484, type: "Beach", distanceKm: 1.9, driveMin: 4 },
-  { name: "Thongson Bay Beach", rating: "3.8", reviews: 58, type: "Beach", distanceKm: 3.5, driveMin: 7 },
   { name: "Thongson Beach", rating: "4.3", reviews: 493, type: "Beach", distanceKm: 3.6, driveMin: 7 },
   { name: "Coral Cove Beach", rating: "4.4", reviews: 1731, type: "Beach", distanceKm: 11.5, driveMin: 14 },
   { name: "Silver Beach", rating: "4.2", reviews: 2860, type: "Beach", distanceKm: 13.1, driveMin: 16 },

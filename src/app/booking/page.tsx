@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import CloudbedsImmersive from "@/components/CloudbedsImmersive";
+import PromoHint from "@/components/PromoHint";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/booking" },
@@ -16,7 +17,10 @@ export default function BookingPage() {
       <p className="mt-4 max-w-2xl text-ink-soft">
         Live availability and secure payment, right here on our site.
       </p>
-      <div className="mt-8">
+      <div className="mt-5 max-w-2xl">
+        <PromoHint />
+      </div>
+      <div className="mt-6">
         <CloudbedsImmersive />
       </div>
     </div>
