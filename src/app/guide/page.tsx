@@ -311,10 +311,10 @@ export default function GuidePage() {
           {fishermansHighlights.map(({ icon: Icon, title, text, badge, image }) => (
             <div
               key={title}
-              className="min-w-[230px] max-w-[230px] snap-start overflow-hidden rounded-2xl bg-white/5 ring-1 ring-white/10"
+              className={`relative min-w-[230px] max-w-[230px] snap-start overflow-hidden rounded-2xl ring-1 ring-white/10 ${image ? "" : "bg-white/5"}`}
             >
               {image && (
-                <div className="relative aspect-[16/10]">
+                <>
                   <Image
                     src={image.src}
                     alt={image.alt}
@@ -323,9 +323,10 @@ export default function GuidePage() {
                     sizes="230px"
                     className="object-cover"
                   />
-                </div>
+                  <div className="absolute inset-0 bg-gradient-to-t from-ink/95 via-ink/45 to-ink/10" />
+                </>
               )}
-              <div className="p-5">
+              <div className="relative flex h-full flex-col justify-between p-5">
                 <div className="flex items-start justify-between gap-2">
                   <Icon size={22} style={{ color: GOLD }} />
                   {badge && (
@@ -337,8 +338,10 @@ export default function GuidePage() {
                     </span>
                   )}
                 </div>
-                <p className="mt-3 font-medium text-stone-50">{title}</p>
-                <p className="mt-1.5 text-sm leading-relaxed text-stone-50/70">{text}</p>
+                <div>
+                  <p className="mt-3 font-medium text-stone-50">{title}</p>
+                  <p className="mt-1.5 text-sm leading-relaxed text-stone-50/70">{text}</p>
+                </div>
               </div>
             </div>
           ))}
