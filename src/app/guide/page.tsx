@@ -56,6 +56,9 @@ function PlaceCard({ place }: { place: GuidePlace }) {
         {place.rating} ({place.reviews.toLocaleString()}) · {place.type}
         {place.price ? ` · ${place.price}` : ""}
       </p>
+      <p className="mt-1 text-sm font-medium text-pool">
+        {place.distanceKm} km · ~{place.driveMin} min by motorbike
+      </p>
     </a>
   );
 }
