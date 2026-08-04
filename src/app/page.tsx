@@ -20,7 +20,9 @@ import DesktopVideo from "@/components/DesktopVideo";
 import ReviewsSection from "@/components/ReviewsSection";
 import RoomCard from "@/components/RoomCard";
 import { rooms } from "@/data/rooms";
+import { reviewStats } from "@/data/reviews";
 import { getAllBlogPosts } from "@/data/blog";
+import { Star } from "lucide-react";
 
 const featuredRooms = rooms.filter(
   (r) =>
@@ -90,6 +92,19 @@ export default function Home() {
           className="absolute inset-0 h-full w-full object-cover"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-white/85 via-white/45 to-white/10 sm:from-black/70 sm:via-black/20 sm:to-black/10" />
+        {/* Heatmaps show guests tapping the hero photo — make it lead somewhere. */}
+        <Link
+          href="/rooms"
+          aria-label="View our suites and villas"
+          className="absolute inset-0"
+        />
+        <a
+          href="#reviews"
+          className="absolute right-5 top-5 z-10 flex items-center gap-1.5 rounded-full bg-white/90 px-3 py-1.5 text-xs font-medium text-ink shadow-md backdrop-blur transition-transform hover:scale-105"
+        >
+          <Star size={12} className="text-sand" fill="currentColor" strokeWidth={0} />
+          {reviewStats.booking.score} Booking.com · {reviewStats.airbnb.score} Airbnb
+        </a>
         <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 text-ink sm:text-stone-50">
           <p className="text-base font-semibold uppercase tracking-[0.3em] text-ink sm:text-stone-100/90">
             Koh Samui, Thailand

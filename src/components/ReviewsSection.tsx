@@ -8,7 +8,7 @@ const platformLabel: Record<string, string> = {
 
 export default function ReviewsSection() {
   return (
-    <section className="bg-stone-100 py-16">
+    <section id="reviews" className="bg-stone-100 py-16">
       <div className="mx-auto max-w-6xl px-5">
         <div className="flex flex-wrap items-end justify-between gap-6">
           <div>
