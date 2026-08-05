@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Image from "next/image";
+import EldorWaitlist from "@/components/EldorWaitlist";
 import RoomCard from "@/components/RoomCard";
 import { getRoomBySlug } from "@/data/rooms";
 import { villas } from "@/data/villas";
@@ -135,6 +136,7 @@ export default function RoomsPage() {
                 </span>
               ))}
             </div>
+            <EldorWaitlist />
           </div>
         </div>
         <div className="grid gap-0 sm:grid-cols-2">
