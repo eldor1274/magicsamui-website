@@ -9,7 +9,7 @@ export const metadata: Metadata = {
   alternates: { canonical: "/rooms" },
   title: "Suites & Villas | Magic Suites & Villas",
   description:
-    "Explore Magic Villa's 4 private suites and the standalone Tuxedo Villa in Koh Samui — every suite has its own pool.",
+    "Luxury private pool suites and villas in Koh Samui from ฿4,000 a night — Magic Villa's 4 private suites and the standalone Tuxedo Villa, every one with its own pool.",
 };
 
 const magicVilla = villas.find((v) => v.slug === "magic-villa")!;
