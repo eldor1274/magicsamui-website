@@ -37,6 +37,42 @@ export function getAllBlogPosts(): BlogPost[] {
     .sort((a, b) => a.title.localeCompare(b.title));
 }
 
+// Words too generic to signal topical relatedness between posts.
+const STOP_WORDS = new Set([
+  "koh", "samui", "in", "for", "the", "a", "to", "of", "and", "your",
+  "how", "what", "where", "best", "guide", "villa", "villas",
+]);
+
+function slugKeywords(slug: string): Set<string> {
+  return new Set(slug.split("-").filter((w) => w.length > 2 && !STOP_WORDS.has(w)));
+}
+
+/**
+ * Related posts by shared slug keywords ("villa" and "koh samui" excluded
+ * as they appear everywhere). Falls back to alphabetical neighbours so
+ * every post always links to three others — the internal-link mesh is
+ * what lets Google discover and rank these pages.
+ */
+export function getRelatedPosts(slug: string, count = 3): BlogPost[] {
+  const everyone = getAllBlogPosts();
+  const myIdx = everyone.findIndex((p) => p.slug === slug);
+  const n = everyone.length;
+  const mine = slugKeywords(slug);
+  const scored = everyone
+    .map((p, idx) => {
+      let score = 0;
+      for (const w of slugKeywords(p.slug)) if (mine.has(w)) score++;
+      // Tiebreak: alphabetical successors of THIS post (wrapping), so
+      // zero-match posts each link to different neighbours and every
+      // post in the mesh receives incoming links.
+      const distance = (idx - myIdx + n) % n;
+      return { p, score, distance };
+    })
+    .filter(({ p }) => p.slug !== slug)
+    .sort((a, b) => b.score - a.score || a.distance - b.distance);
+  return scored.slice(0, count).map((s) => s.p);
+}
+
 export function getBlogPostBySlug(slug: string): BlogPost | undefined {
   const filePath = path.join(BLOG_DIR, `${slug}.json`);
   if (!fs.existsSync(filePath)) return undefined;

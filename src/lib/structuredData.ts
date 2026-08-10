@@ -65,6 +65,29 @@ export function roomJsonLd(room: Room) {
   };
 }
 
+export function blogPostJsonLd(post: {
+  slug: string;
+  title: string;
+  description: string;
+  heroImage: string | null;
+}) {
+  return {
+    "@context": "https://schema.org",
+    "@type": "BlogPosting",
+    headline: post.title,
+    description: post.description,
+    url: `${BASE}/blog/${post.slug}`,
+    mainEntityOfPage: `${BASE}/blog/${post.slug}`,
+    ...(post.heroImage ? { image: `${BASE}${post.heroImage}` } : {}),
+    author: { "@type": "Organization", name: site.name, url: BASE },
+    publisher: {
+      "@type": "Organization",
+      name: site.name,
+      url: BASE,
+    },
+  };
+}
+
 export function breadcrumbJsonLd(items: { name: string; path: string }[]) {
   return {
     "@context": "https://schema.org",

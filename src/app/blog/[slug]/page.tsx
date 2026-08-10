@@ -3,7 +3,10 @@ import Image from "next/image";
 import { notFound } from "next/navigation";
 import BlogContent from "@/components/BlogContent";
 import BlogCta from "@/components/BlogCta";
-import { getAllBlogPosts, getBlogPostBySlug } from "@/data/blog";
+import JsonLd from "@/components/JsonLd";
+import RelatedPosts from "@/components/RelatedPosts";
+import { getAllBlogPosts, getBlogPostBySlug, getRelatedPosts } from "@/data/blog";
+import { blogPostJsonLd, breadcrumbJsonLd } from "@/lib/structuredData";
 
 export function generateStaticParams() {
   return getAllBlogPosts().map((post) => ({ slug: post.slug }));
@@ -39,9 +42,18 @@ export default async function BlogPostPage({
   const { slug } = await params;
   const post = getBlogPostBySlug(slug);
   if (!post) notFound();
+  const related = getRelatedPosts(slug);
 
   return (
     <article className="mx-auto max-w-3xl px-5 py-16">
+      <JsonLd data={blogPostJsonLd(post)} />
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: "Home", path: "/" },
+          { name: "Blog", path: "/blog" },
+          { name: post.title, path: `/blog/${post.slug}` },
+        ])}
+      />
       <h1 className="font-serif text-3xl leading-tight text-ink sm:text-4xl">{post.title}</h1>
       {post.description && <p className="mt-4 text-lg text-ink-soft">{post.description}</p>}
 
@@ -51,7 +63,8 @@ export default async function BlogPostPage({
             src={post.heroImage}
             alt={post.title}
             fill
-            priority
+            preload
+            fetchPriority="high"
             sizes="(min-width: 1024px) 768px, 100vw"
             className="object-cover"
           />
@@ -63,6 +76,7 @@ export default async function BlogPostPage({
       </div>
 
       <BlogCta />
+      <RelatedPosts posts={related} />
     </article>
   );
 }
