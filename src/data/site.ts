@@ -28,5 +28,6 @@ export const nav = [
   { label: "Rentals", href: "/rentals" },
   { label: "Guide", href: "/guide" },
   { label: "Blog", href: "/blog" },
+  { label: "Points", href: "/points" },
   { label: "Contact", href: "/contact" },
 ];
