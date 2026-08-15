@@ -1,8 +1,8 @@
-// Guest points: 3% of what a stay was worth, valid for 3 years from checkout.
+// Guest points: 5% of what a stay was worth, valid for 3 years from checkout.
 // Balances are DERIVED from stay history minus what Eldor has manually cleared,
 // so there is no balance field that can drift out of sync with reality.
 
-export const EARN_RATE = 0.03;
+export const EARN_RATE = 0.05;
 export const VALID_YEARS = 3;
 
 // Cloudbeds stores the gross price the guest paid, not what actually lands in

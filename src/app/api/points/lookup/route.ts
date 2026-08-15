@@ -4,7 +4,7 @@ import { loadClears, loadStays } from "@/lib/pointsData";
 
 // Guest-facing balance lookup. Requires phone number AND surname together:
 // either one alone would turn this into a public "who stayed at Magic Suites"
-// search, which leaks guest travel history and, via the 3% rate, what they paid.
+// search, which leaks guest travel history and, via the earn rate, what they paid.
 
 // Generous enough that a guest mistyping their number never gets locked out,
 // tight enough that nobody can walk the number space. Mobile networks put many
