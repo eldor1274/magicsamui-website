@@ -15,6 +15,7 @@ interface Stay {
 interface Account {
   phoneKey: string;
   name: string;
+  hasPhone: boolean;
   balance: number;
   earned: number;
   cleared: number;
@@ -159,10 +160,15 @@ export default function PointsAdmin() {
               <div>
                 <p className="font-medium text-ink">{a.name}</p>
                 <p className="text-xs text-ink-soft">
-                  …{a.phoneKey.slice(-6)} · {a.stays.length}{" "}
-                  {a.stays.length === 1 ? "stay" : "stays"} · ฿
+                  {a.hasPhone ? `…${a.phoneKey.slice(-6)}` : "no phone on file"} ·{" "}
+                  {a.stays.length} {a.stays.length === 1 ? "stay" : "stays"} · ฿
                   {a.spend.toLocaleString()} spent
                 </p>
+                {!a.hasPhone && (
+                  <p className="mt-1 text-xs text-sand">
+                    Add their number in Cloudbeds so they can check this themselves
+                  </p>
+                )}
               </div>
               <div className="text-right">
                 <p className="font-serif text-xl text-pool">

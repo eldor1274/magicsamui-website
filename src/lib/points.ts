@@ -26,12 +26,17 @@ export function netFactor(source: string): number {
   return 1;
 }
 
-// Owner/staff numbers and internal booking sources never earn points.
+// Owner and staff stays never earn points. Matched on number and on the owner's
+// name, because his own bookings are entered by hand and carry no phone.
+// Note: "Default Corporate Client" is NOT a house marker — it is simply the
+// source Cloudbeds assigns to any manually created booking, and most of those
+// are real guests.
 const HOUSE_PHONES = ["66952466011", "66659911732", "66918605001", "66968896525"];
-const HOUSE_SOURCES = ["default corporate"];
+const HOUSE_NAMES = ["eldormizrahi"];
 
 export interface Stay {
   reservationID: string;
+  status: string;
   startDate: string;
   endDate: string;
   total: number;
@@ -53,6 +58,9 @@ export interface Account {
   phoneKey: string;
   name: string;
   lastName: string;
+  /** False when Cloudbeds holds no number for this guest, so they cannot look
+   *  themselves up on the website until one is added to the booking. */
+  hasPhone: boolean;
   earned: number;
   cleared: number;
   balance: number;
@@ -80,8 +88,9 @@ export function earnsPoints(stay: Stay, asOf: Date): boolean {
   const end = new Date(stay.endDate);
   if (Number.isNaN(end.getTime()) || end > asOf) return false;
   if (HOUSE_PHONES.includes((stay.phone || "").replace(/\D/g, ""))) return false;
-  const src = (stay.source || "").toLowerCase();
-  if (HOUSE_SOURCES.some((h) => src.includes(h))) return false;
+  if (HOUSE_NAMES.includes(normName(`${stay.firstName}${stay.lastName}`))) return false;
+  const status = (stay.status || "").toLowerCase();
+  if (status === "canceled" || status === "cancelled" || status === "no_show") return false;
   return stay.total > 0;
 }
 
@@ -89,15 +98,46 @@ export function pointsForStay(stay: Stay): number {
   return Math.floor(stay.total * netFactor(stay.source) * EARN_RATE);
 }
 
+/**
+ * Many hand-entered bookings carry no phone number — they are some of the most
+ * valuable direct guests. Those stays are grouped under a name key instead so
+ * they are at least visible in the admin and can be redeemed manually. A name
+ * key is only ever merged into a phone account when that name maps to exactly
+ * one number, so two guests sharing a name can never inherit each other's
+ * points. Guest self-service still requires a phone: name keys never match a
+ * phone lookup, which is what keeps the public page from being a name search.
+ */
+function nameToPhone(stays: Stay[], asOf: Date): Map<string, string> {
+  const seen = new Map<string, Set<string>>();
+  for (const stay of stays) {
+    if (!earnsPoints(stay, asOf)) continue;
+    const key = phoneKey(stay.phone);
+    if (!key) continue;
+    const name = normName(`${stay.firstName}${stay.lastName}`);
+    if (!name) continue;
+    const set = seen.get(name);
+    if (set) set.add(key);
+    else seen.set(name, new Set([key]));
+  }
+  const unique = new Map<string, string>();
+  for (const [name, keys] of seen) {
+    if (keys.size === 1) unique.set(name, [...keys][0]);
+  }
+  return unique;
+}
+
 export function buildAccounts(
   stays: Stay[],
   clears: ClearEvent[],
   asOf: Date = new Date()
 ): Map<string, Account> {
+  const knownNumbers = nameToPhone(stays, asOf);
   const byPhone = new Map<string, Stay[]>();
   for (const stay of stays) {
     if (!earnsPoints(stay, asOf)) continue;
-    const key = phoneKey(stay.phone);
+    const name = normName(`${stay.firstName}${stay.lastName}`);
+    const key =
+      phoneKey(stay.phone) || knownNumbers.get(name) || (name ? `name:${name}` : "");
     if (!key) continue;
     // Points older than the validity window are simply never counted.
     if (daysBetween(new Date(stay.endDate), asOf) > VALID_YEARS * 365) continue;
@@ -129,6 +169,7 @@ export function buildAccounts(
       phoneKey: key,
       name: `${latest.firstName} ${latest.lastName}`.trim(),
       lastName: latest.lastName,
+      hasPhone: !key.startsWith("name:"),
       earned,
       cleared,
       balance,

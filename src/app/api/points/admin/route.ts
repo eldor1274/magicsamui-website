@@ -40,6 +40,7 @@ export async function POST(request: NextRequest) {
       .map((a) => ({
         phoneKey: a.phoneKey,
         name: a.name,
+        hasPhone: a.hasPhone,
         balance: a.balance,
         earned: a.earned,
         cleared: a.cleared,
