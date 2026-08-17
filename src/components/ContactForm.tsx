@@ -32,6 +32,10 @@ export default function ContactForm() {
       if (!res.ok) throw new Error();
       setStatus("sent");
       track("contact_form_submit");
+      // Google Ads lead conversion. Fires only on a successful send — Google's
+      // setup mail suggests putting this in <head>, which would count every
+      // pageview as a lead.
+      track("ads_conversion_Submit_lead_form_1");
       setName("");
       setContact("");
       setMessage("");
