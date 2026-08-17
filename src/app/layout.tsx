@@ -7,6 +7,7 @@ import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import ConciergeChat from "@/components/ConciergeChat";
 import { site } from "@/data/site";
+import { GOOGLE_ADS_ID } from "@/lib/analytics";
 import "./globals.css";
 
 const sans = Inter({
@@ -52,16 +53,20 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   const gaId = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID;
+  const tagIds = [gaId, GOOGLE_ADS_ID].filter(Boolean);
 
   return (
     <html lang="en" className={`${sans.variable} ${serif.variable} h-full`}>
       <body className="flex min-h-full flex-col font-sans antialiased">
-        {gaId && (
+        {tagIds.length > 0 && (
           // Seeds the gtag queue at page start so funnel events fired before
-          // the lazily-loaded gtag.js arrives are replayed in order.
+          // the lazily-loaded gtag.js arrives are replayed in order. Both the
+          // GA4 property and the Google Ads tag are configured here.
           <script
             dangerouslySetInnerHTML={{
-              __html: `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}window.gtag=gtag;gtag('js',new Date());gtag('config','${gaId}');`,
+              __html: `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}window.gtag=gtag;gtag('js',new Date());${tagIds
+                .map((id) => `gtag('config','${id}');`)
+                .join("")}`,
             }}
           />
         )}
