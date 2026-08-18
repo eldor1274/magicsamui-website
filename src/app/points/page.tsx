@@ -75,7 +75,11 @@ export default function PointsPage() {
             </ul>
           </div>
 
-          <PointsLookup />
+          {/* min-h reserves the result card's height so the form→card swap
+              doesn't shove the footer (layout-shift fix) */}
+          <div className="min-h-[480px]">
+            <PointsLookup />
+          </div>
         </div>
       </section>
 

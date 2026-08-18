@@ -28,18 +28,33 @@ export default function LiveTonight({ slug }: { slug: string }) {
     };
   }, [slug]);
 
-  if (!rate) return null;
-
+  // The row's space is reserved from first paint — popping it in after the
+  // rates fetch shifted every card below it (the site's main CLS source).
   return (
     <div className="flex items-center justify-between border-t border-stone-100 pt-2 text-xs">
       <span className="text-ink-soft">
-        Tonight: <span className="font-medium text-ink">฿{rate.price.toLocaleString()}</span>
+        {rate ? (
+          <>
+            Tonight: <span className="font-medium text-ink">฿{rate.price.toLocaleString()}</span>
+          </>
+        ) : (
+          <span
+            aria-hidden
+            className="inline-block h-3 w-24 animate-pulse rounded bg-stone-100 align-middle"
+          />
+        )}
       </span>
-      {rate.available ? (
-        <span className="rounded-full bg-pool/10 px-2 py-0.5 font-medium text-pool">Available</span>
+      {rate ? (
+        rate.available ? (
+          <span className="rounded-full bg-pool/10 px-2 py-0.5 font-medium text-pool">Available</span>
+        ) : (
+          <span className="rounded-full bg-stone-100 px-2 py-0.5 font-medium text-ink-soft">
+            Booked tonight
+          </span>
+        )
       ) : (
-        <span className="rounded-full bg-stone-100 px-2 py-0.5 font-medium text-ink-soft">
-          Booked tonight
+        <span aria-hidden className="invisible rounded-full px-2 py-0.5 font-medium">
+          Available
         </span>
       )}
     </div>
