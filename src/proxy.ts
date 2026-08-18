@@ -42,7 +42,7 @@ const SPAM_EXACT = new Set([
 
 // Catches spam variants not yet seen in search results.
 const SPAM_PATTERN =
-  /casino|kasino|kazino|gambl|igralnica|bingo|melbet|mostbet|bukmeker|zerkalo|spinmama|spinaway|cannabis|dispensary|sweepstake|jattipot|pelikulttuuri|szerencsejatek|qumar|pragmatic-play|betallinjer|mobilspel|kasinoverksamhet/i;
+  /casino|kasino|kazino|gambl|igralnica|bingo|melbet|mostbet|bukmeker|zerkalo|spinmama|spinaway|cannabis|dispensary|sweepstake|jattipot|pelikulttuuri|szerencsejatek|qumar|pragmatic-play|betallinjer|mobilspel|kasinoverksamhet|1xbet|pinco|slot|poker|betting/i;
 
 export function proxy(request: NextRequest) {
   const slug = request.nextUrl.pathname.replace(/^\/+|\/+$/g, "");
