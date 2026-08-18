@@ -100,6 +100,10 @@ export default function Footer() {
       <div className="border-t border-stone-100/80 px-5 py-6 text-center text-xs text-ink-soft">
         <p>
           &copy; {new Date().getFullYear()} {site.name} ·{" "}
+          <Link href="/privacy" className="hover:text-pool">
+            Privacy Policy
+          </Link>{" "}
+          ·{" "}
           <Link href="/legal" className="hover:text-pool">
             Legal
           </Link>
