@@ -7,6 +7,7 @@ import type { NextRequest } from "next/server";
 // Legit old URLs never reach here: next.config redirects run before proxy.
 const SPAM_EXACT = new Set([
   "profesionalen-analiz",
+  "집",
   "fr-bingo",
   "najboljsa-spletna-igralnica",
   "many-years-gate",
@@ -42,10 +43,13 @@ const SPAM_EXACT = new Set([
 
 // Catches spam variants not yet seen in search results.
 const SPAM_PATTERN =
-  /casino|kasino|kazino|gambl|igralnica|bingo|melbet|mostbet|bukmeker|zerkalo|spinmama|spinaway|cannabis|dispensary|sweepstake|jattipot|pelikulttuuri|szerencsejatek|qumar|pragmatic-play|betallinjer|mobilspel|kasinoverksamhet|1xbet|pinco|slot|poker|betting/i;
+  /casino|kasin|kazino|sportsbook|gambl|igralnica|bingo|melbet|mostbet|bukmeker|zerkalo|spinmama|spinaway|cannabis|dispensary|sweepstake|jattipot|pelikulttuuri|szerencsejatek|qumar|pragmatic-play|betallinjer|mobilspel|kasinoverksamhet|1xbet|pinco|slot|poker|betting/i;
 
 export function proxy(request: NextRequest) {
-  const slug = request.nextUrl.pathname.replace(/^\/+|\/+$/g, "");
+  let slug = request.nextUrl.pathname.replace(/^\/+|\/+$/g, "");
+  try {
+    slug = decodeURIComponent(slug);
+  } catch {}
   if (!slug.includes("/") && (SPAM_EXACT.has(slug) || SPAM_PATTERN.test(slug))) {
     return new NextResponse("Gone", { status: 410 });
   }
