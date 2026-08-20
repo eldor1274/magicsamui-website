@@ -2,6 +2,7 @@ import Link from "next/link";
 import { MessageCircle, Phone, Mail, MapPin } from "lucide-react";
 import { InstagramIcon, FacebookIcon, TikTokIcon } from "@/components/SocialIcons";
 import { nav, site } from "@/data/site";
+import { LANG_LINKS } from "@/data/landings";
 
 export default function Footer() {
   return (
@@ -97,7 +98,16 @@ export default function Footer() {
         </div>
       </div>
 
-      <div className="border-t border-stone-100/80 px-5 py-6 text-center text-xs text-ink-soft">
+      <div className="border-t border-stone-100/80 px-5 pt-5 text-center text-xs text-ink-soft">
+        <p className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
+          {LANG_LINKS.map((lang) => (
+            <Link key={lang.code} href={lang.href} className="hover:text-pool">
+              {lang.label}
+            </Link>
+          ))}
+        </p>
+      </div>
+      <div className="px-5 py-6 text-center text-xs text-ink-soft">
         <p>
           &copy; {new Date().getFullYear()} {site.name} ·{" "}
           <Link href="/privacy" className="hover:text-pool">

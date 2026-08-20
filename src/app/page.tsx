@@ -22,6 +22,7 @@ import RoomCard from "@/components/RoomCard";
 import { rooms } from "@/data/rooms";
 import { reviewStats } from "@/data/reviews";
 import { getAllBlogPosts } from "@/data/blog";
+import { LANG_ALTERNATES } from "@/data/landings";
 import { Star } from "lucide-react";
 
 const featuredRooms = rooms.filter(
@@ -67,7 +68,7 @@ const essentials = [
 ];
 
 export const metadata: Metadata = {
-  alternates: { canonical: "/" },
+  alternates: { canonical: "/", languages: LANG_ALTERNATES },
 };
 
 export default function Home() {
