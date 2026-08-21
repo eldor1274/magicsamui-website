@@ -1,6 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { MessageCircle, Star } from "lucide-react";
+import HtmlLang from "@/components/HtmlLang";
 import JsonLd from "@/components/JsonLd";
 import { resortJsonLd } from "@/lib/structuredData";
 import { rooms } from "@/data/rooms";
@@ -18,6 +19,7 @@ const featured = ["honeymoon-suite", "sunrise-suite", "seaview-suite"]
 export default function LocalizedLanding({ t }: { t: Landing }) {
   return (
     <div dir={t.dir} lang={t.htmlLang}>
+      <HtmlLang lang={t.htmlLang} />
       <JsonLd data={resortJsonLd()} />
 
       <section className="relative flex h-[70vh] min-h-[480px] w-full items-end">
