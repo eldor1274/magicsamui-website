@@ -31,7 +31,7 @@ export const site = {
 export const nav = [
   { label: "Home", href: "/" },
   { label: "Suites & Villas", href: "/rooms" },
-  { label: "Rentals", href: "/rentals" },
+  { label: "Motorbike Rentals", href: "/rentals" },
   { label: "Guide", href: "/guide" },
   { label: "Blog", href: "/blog" },
   { label: "Points", href: "/points" },
