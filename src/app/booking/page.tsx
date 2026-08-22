@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import CloudbedsImmersive from "@/components/CloudbedsImmersive";
 import PromoHint from "@/components/PromoHint";
+import BookingHelpStrip from "@/components/BookingHelpStrip";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/booking" },
@@ -19,6 +20,9 @@ export default function BookingPage() {
       </p>
       <div className="mt-5 max-w-2xl">
         <PromoHint />
+      </div>
+      <div className="mt-3 max-w-2xl">
+        <BookingHelpStrip />
       </div>
       <div className="mt-6">
         <CloudbedsImmersive />
