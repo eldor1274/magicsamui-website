@@ -43,6 +43,14 @@ const nextConfig: NextConfig = {
       { source: "/tag/:path*", destination: "/blog", permanent: true },
       { source: "/events", destination: "/guide", permanent: true },
       { source: "/check-out", destination: "/booking", permanent: true },
+      // Cloudbeds reservation links occasionally arrive on our domain
+      // (7 dead sessions in 28 days); hand them to the booking engine
+      // with their dates intact instead of a 404.
+      {
+        source: "/en/reservation/:path*",
+        destination: "https://hotels.cloudbeds.com/en/reservation/:path*",
+        permanent: false,
+      },
       { source: "/2024/:path*", destination: "/blog", permanent: true },
       { source: "/2025/:path*", destination: "/blog", permanent: true },
     ];
