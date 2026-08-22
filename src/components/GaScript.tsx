@@ -3,6 +3,7 @@
 import Script from "next/script";
 import { useInteractionLoad } from "@/lib/useInteractionLoad";
 import { GOOGLE_ADS_ID } from "@/lib/analytics";
+import { isOwnerDevice } from "@/lib/owner";
 
 const gaId = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID;
 
@@ -14,7 +15,9 @@ export default function GaScript() {
   const load = useInteractionLoad(4000);
   const tagId = gaId || GOOGLE_ADS_ID;
 
-  if (!tagId || !load) return null;
+  // Owner devices never load gtag.js, so the queued pageview/events are
+  // never sent - Eldor's own visits stay out of GA4 and Ads conversions.
+  if (!tagId || !load || isOwnerDevice()) return null;
 
   return (
     <Script
