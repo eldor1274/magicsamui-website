@@ -61,7 +61,12 @@ export default function PointsAdmin() {
   }
 
   async function unlock() {
-    if (await search("")) setUnlocked(true);
+    if (await search("")) {
+      setUnlocked(true);
+      // Only the owner gets here: mark this device so its visits are left
+      // out of Clarity from now on (see ClarityScript).
+      try { window.localStorage.setItem("msv_owner", "1"); } catch { /* ignore */ }
+    }
   }
 
   async function clearPoints(account: Account) {
