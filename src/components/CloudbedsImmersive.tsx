@@ -15,7 +15,11 @@ export default function CloudbedsImmersive() {
     track("booking_engine_view");
   }, []);
 
-  if (isLocal === null) return <div style={{ minHeight: 400 }} />;
+  // The engine renders at height 0 until its script arrives, then expands and
+  // shoves the footer down - Lighthouse measured CLS 0.569 on /booking from
+  // exactly that footer jump. Reserving a viewport of height keeps the footer
+  // below the fold from first paint, so the pop-in shifts nothing visible.
+  if (isLocal === null) return <div className="min-h-dvh" />;
 
   if (isLocal) {
     return (
@@ -27,6 +31,7 @@ export default function CloudbedsImmersive() {
 
   return (
     <div
+      className="min-h-dvh"
       onClickCapture={() => {
         if (!tracked.current) {
           tracked.current = true;

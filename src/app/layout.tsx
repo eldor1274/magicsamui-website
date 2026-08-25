@@ -7,7 +7,7 @@ import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import ConciergeChat from "@/components/ConciergeChat";
 import { site } from "@/data/site";
-import { GOOGLE_ADS_ID } from "@/lib/analytics";
+import { ADS_PURCHASE_SEND_TO, GOOGLE_ADS_ID } from "@/lib/analytics";
 import "./globals.css";
 
 const sans = Inter({
@@ -64,7 +64,11 @@ export default function RootLayout({
           // GA4 property and the Google Ads tag are configured here.
           <script
             dangerouslySetInnerHTML={{
-              __html: `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}window.gtag=gtag;gtag('js',new Date());${tagIds
+              __html: `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);${
+                ADS_PURCHASE_SEND_TO
+                  ? `try{if(arguments[0]==='event'&&arguments[1]==='purchase'){var p=arguments[2]||{};(function(){dataLayer.push(arguments)})('event','conversion',{send_to:'${ADS_PURCHASE_SEND_TO}',value:p.value,currency:p.currency||'THB',transaction_id:p.transaction_id||''});}}catch(e){}`
+                  : ""
+              }}window.gtag=gtag;gtag('js',new Date());${tagIds
                 .map((id) => `gtag('config','${id}');`)
                 .join("")}`,
             }}
