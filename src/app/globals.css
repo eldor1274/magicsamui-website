@@ -32,3 +32,15 @@ body {
   background: var(--background);
   color: var(--foreground);
 }
+
+/* The Cloudbeds calendar shows a rate/availability tooltip on every date.
+   On phones the first tap opens it instead of selecting, and it covers the
+   dates below - Clarity recorded guests tapping up to 98 times against it.
+   Eldor wants it gone on all devices; the engine renders in light DOM (its
+   tooltips portal to <reach-portal> at body level), so plain CSS reaches it. */
+reach-portal [role="tooltip"],
+reach-portal .chakra-tooltip,
+#cb-bookingengine [role="tooltip"],
+#cb-bookingengine .chakra-tooltip {
+  display: none !important;
+}
