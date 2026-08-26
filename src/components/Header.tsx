@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Menu, X, Phone } from "lucide-react";
 import { nav, site } from "@/data/site";
 import BookNowButton from "./BookNowButton";
@@ -10,6 +10,13 @@ import BookNowButton from "./BookNowButton";
 export default function Header() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+
+  // The per-link onClick used to be the only thing closing the mobile menu,
+  // so navigating via Book Now left the panel open on top of the new page.
+  // Closing on every route change catches all ways out of the menu.
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
 
   return (
     <header className="sticky top-0 z-50 border-b border-stone-100 bg-stone-50/95 backdrop-blur">
@@ -69,7 +76,12 @@ export default function Header() {
               </Link>
             ))}
           </nav>
-          <div className="mt-5 flex flex-col gap-3">
+          {/* onClickCapture also covers Book Now when already on /booking,
+              where the pathname effect never fires. */}
+          <div
+            className="mt-5 flex flex-col gap-3"
+            onClickCapture={() => setOpen(false)}
+          >
             <a href={`tel:${site.phones[0].tel}`} className="text-sm text-ink-soft">
               {site.phones[0].number}
             </a>
