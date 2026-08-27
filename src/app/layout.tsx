@@ -5,7 +5,7 @@ import CloudbedsScript from "@/components/CloudbedsScript";
 import GaScript from "@/components/GaScript";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
-import ConciergeChat from "@/components/ConciergeChat";
+import WhatsAppFab from "@/components/WhatsAppFab";
 import { site } from "@/data/site";
 import { ADS_PURCHASE_SEND_TO, GOOGLE_ADS_ID } from "@/lib/analytics";
 import "./globals.css";
@@ -77,7 +77,7 @@ export default function RootLayout({
         <Header />
         <main className="flex-1">{children}</main>
         <Footer />
-        <ConciergeChat />
+        <WhatsAppFab />
         <CloudbedsScript />
         <ClarityScript />
         <GaScript />
