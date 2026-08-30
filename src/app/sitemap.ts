@@ -6,10 +6,14 @@ import { site } from "@/data/site";
 export default function sitemap(): MetadataRoute.Sitemap {
   const base = `https://${site.domain}`;
 
+  // /booking and /points are real, indexable, guest-facing pages that llms.txt
+  // already points crawlers at — only /points/admin is disallowed in robots.ts.
   const staticRoutes = [
     "",
+    "/booking",
     "/rooms",
     "/rentals",
+    "/points",
     "/guide",
     "/blog",
     "/about",
