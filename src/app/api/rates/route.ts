@@ -9,6 +9,7 @@ const ROOM_TYPE_TO_SLUG: Record<string, string> = {
   "464009": "tuxedo",
   "501423": "island-view-3br",
   "501424": "tuxedo-1br",
+  "681024": "tuxedo-seaview-unit",
 };
 
 interface RatePlan {

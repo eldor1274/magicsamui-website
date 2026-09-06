@@ -6,7 +6,7 @@ import BookNowButton from "@/components/BookNowButton";
 import JsonLd from "@/components/JsonLd";
 import RoomGallery from "@/components/RoomGallery";
 import { rooms, getRoomBySlug } from "@/data/rooms";
-import { airbnbRoomRatings, roomReviews } from "@/data/reviews";
+import { airbnbRoomRatings, reviewStats, roomReviews } from "@/data/reviews";
 import { roomJsonLd, breadcrumbJsonLd } from "@/lib/structuredData";
 
 export function generateStaticParams() {
@@ -82,12 +82,18 @@ export default async function RoomPage({
               </span>
             </a>
           ) : (
-            <div className="mt-2 flex items-center gap-1 text-sand">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <Star key={i} size={16} fill="currentColor" strokeWidth={0} />
-              ))}
-              <span className="ml-1 text-sm text-ink-soft">Rated 5 out of 5</span>
-            </div>
+            <a
+              href={reviewStats.booking.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 inline-flex items-center gap-1 text-sm text-ink-soft hover:text-ink"
+            >
+              <Star size={16} className="text-sand" fill="currentColor" strokeWidth={0} />
+              <span>
+                <span className="font-medium text-ink">{reviewStats.booking.score}</span>{" "}
+                {reviewStats.booking.label} · {reviewStats.booking.count} reviews on Booking.com
+              </span>
+            </a>
           )}
 
           <p className="mt-5 font-serif text-3xl text-pool">

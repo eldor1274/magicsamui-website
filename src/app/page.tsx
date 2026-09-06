@@ -114,7 +114,7 @@ export default function Home() {
             Magic Private Pool Villas
           </h1>
           <p className="mt-4 max-w-lg text-ink-soft sm:text-stone-100/90">
-            2 villas, 4 private suites — each with its own pool, on a hillside
+            2 villas, 5 private suites — most with their own pool, on a hillside
             overlooking the gulf of Thailand, just 5 minutes from the beach.
           </p>
           <div className="mt-8 flex flex-wrap gap-4">
