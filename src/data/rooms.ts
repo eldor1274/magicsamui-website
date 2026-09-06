@@ -290,7 +290,6 @@ export const rooms: Room[] = [
       { src: "/images/tuxedo-3br/DMZ_3098.jpg", alt: "Mezzanine nook with beanbags and hanging garden" },
       { src: "/images/tuxedo-3br/DMZ_3889.jpg", alt: "Lounge beds by the indoor rock garden" },
       { src: "/images/tuxedo-seaview-unit/img_7636.jpg", alt: "Private entrance path to the unit" },
-      { src: "/images/tuxedo-seaview-unit/img_7635.jpg", alt: "Tuxedo villa from below, the unit on the lower level" },
       { src: "/images/tuxedo/DMZ_3865.jpg", alt: "Tuxedo villa entrance at night" },
     ],
   },
