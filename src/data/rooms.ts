@@ -211,6 +211,7 @@ export const rooms: Room[] = [
     gallery: [
       { src: "/images/tuxedo/DMZ_3612-1.jpg", alt: "Tuxedo villa private pool" },
       { src: "/images/tuxedo-3br/DMZ_3066.jpg", alt: "Lower-level desk with sea view" },
+      { src: "/images/tuxedo-3br/DMZ_3889.jpg", alt: "Lower-level lounge beds by the indoor rock garden" },
       { src: "/images/tuxedo-3br/DMZ_3126.jpg", alt: "Natural-rock bathroom built into the mountain stone" },
       { src: "/images/tuxedo-3br/DMZ_3098.jpg", alt: "Mezzanine nook with beanbags and hanging garden" },
       { src: "/images/tuxedo-3br/kitchenette.jpg", alt: "Lower-level kitchenette by the stone staircase" },
@@ -278,7 +279,6 @@ export const rooms: Room[] = [
       { src: "/images/tuxedo-seaview-unit/img_7620.jpg", alt: "Bedroom with king bed and TV" },
       { src: "/images/tuxedo-seaview-unit/img_7497.jpg", alt: "King bed beside the sea-view window" },
       { src: "/images/tuxedo-3br/DMZ_3066.jpg", alt: "Desk with sea view and sofa bed" },
-      { src: "/images/tuxedo-seaview-unit/img_7630.jpg", alt: "Office desk with the sea-view window and sofa bed" },
       { src: "/images/tuxedo-seaview-unit/img_7626.jpg", alt: "Sofa bed in the living area" },
       { src: "/images/tuxedo-seaview-unit/img_7633.jpg", alt: "Office chair, coffee table and sofa bed" },
       { src: "/images/tuxedo-seaview-unit/img_7588.jpg", alt: "Second desk set between the natural boulders" },
@@ -288,9 +288,10 @@ export const rooms: Room[] = [
       { src: "/images/tuxedo-seaview-unit/img_7570.jpg", alt: "Kitchen with rock wall and fridge" },
       { src: "/images/tuxedo-3br/kitchenette.jpg", alt: "Kitchenette by the stone staircase" },
       { src: "/images/tuxedo-3br/DMZ_3098.jpg", alt: "Mezzanine nook with beanbags and hanging garden" },
+      { src: "/images/tuxedo-3br/DMZ_3889.jpg", alt: "Lounge beds by the indoor rock garden" },
       { src: "/images/tuxedo-seaview-unit/img_7636.jpg", alt: "Private entrance path to the unit" },
       { src: "/images/tuxedo-seaview-unit/img_7635.jpg", alt: "Tuxedo villa from below, the unit on the lower level" },
-      { src: "/images/tuxedo/DMZ_3004.jpg", alt: "Sunrise view from the Tuxedo hillside" },
+      { src: "/images/tuxedo/DMZ_3865.jpg", alt: "Tuxedo villa entrance at night" },
     ],
   },
   {
