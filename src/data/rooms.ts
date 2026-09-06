@@ -211,8 +211,6 @@ export const rooms: Room[] = [
     gallery: [
       { src: "/images/tuxedo/DMZ_3612-1.jpg", alt: "Tuxedo villa private pool" },
       { src: "/images/tuxedo-3br/DMZ_3066.jpg", alt: "Lower-level desk with sea view" },
-      { src: "/images/tuxedo-3br/DMZ_3086-2.jpg", alt: "Lower-level living area" },
-      { src: "/images/tuxedo-3br/DMZ_3889.jpg", alt: "Lower level and indoor rock garden" },
       { src: "/images/tuxedo-3br/DMZ_3126.jpg", alt: "Natural-rock bathroom built into the mountain stone" },
       { src: "/images/tuxedo-3br/DMZ_3098.jpg", alt: "Mezzanine nook with beanbags and hanging garden" },
       { src: "/images/tuxedo-3br/kitchenette.jpg", alt: "Lower-level kitchenette by the stone staircase" },
@@ -277,8 +275,6 @@ export const rooms: Room[] = [
     heroImage: { src: "/images/tuxedo-3br/DMZ_3066.jpg", alt: "Tuxedo seaview unit — desk with sea view" },
     gallery: [
       { src: "/images/tuxedo-3br/DMZ_3066.jpg", alt: "Desk with sea view" },
-      { src: "/images/tuxedo-3br/DMZ_3086-2.jpg", alt: "Living area with sea view" },
-      { src: "/images/tuxedo-3br/DMZ_3889.jpg", alt: "Living area and indoor rock garden" },
       { src: "/images/tuxedo-3br/DMZ_3126.jpg", alt: "Natural-rock bathroom built into the mountain stone" },
       { src: "/images/tuxedo-3br/kitchenette.jpg", alt: "Kitchenette by the stone staircase" },
       { src: "/images/tuxedo-3br/DMZ_3098.jpg", alt: "Mezzanine nook with beanbags and hanging garden" },
