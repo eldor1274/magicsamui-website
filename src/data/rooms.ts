@@ -273,11 +273,11 @@ export const rooms: Room[] = [
       "Private Parking",
     ],
     importantInfo: STANDARD_INFO,
-    heroImage: { src: "/images/tuxedo-seaview-unit/img_7614.jpg", alt: "King bed with the hillside window and wall TV" },
+    heroImage: { src: "/images/tuxedo-seaview-unit/img_7497.jpg", alt: "King bed beside the sea-view window" },
     gallery: [
+      { src: "/images/tuxedo-seaview-unit/img_7497.jpg", alt: "King bed beside the sea-view window" },
       { src: "/images/tuxedo-seaview-unit/img_7614.jpg", alt: "King bed with the hillside window and wall TV" },
       { src: "/images/tuxedo-seaview-unit/img_7620.jpg", alt: "Bedroom with king bed and TV" },
-      { src: "/images/tuxedo-seaview-unit/img_7497.jpg", alt: "King bed beside the sea-view window" },
       { src: "/images/tuxedo-3br/DMZ_3066.jpg", alt: "Desk with sea view and sofa bed" },
       { src: "/images/tuxedo-seaview-unit/img_7626.jpg", alt: "Sofa bed in the living area" },
       { src: "/images/tuxedo-seaview-unit/img_7633.jpg", alt: "Office chair, coffee table and sofa bed" },
