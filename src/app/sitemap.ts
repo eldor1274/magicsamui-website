@@ -22,6 +22,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     "/he",
     "/ru",
     "/fr",
+    "/de",
     "/zh",
     "/es",
     "/th",

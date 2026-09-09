@@ -41,6 +41,7 @@ export const LANG_ALTERNATES: Record<string, string> = {
   he: "/he",
   ru: "/ru",
   fr: "/fr",
+  de: "/de",
   zh: "/zh",
   es: "/es",
   th: "/th",
@@ -51,6 +52,7 @@ export const LANG_LINKS = [
   { code: "he", href: "/he", label: "עברית" },
   { code: "ru", href: "/ru", label: "Русский" },
   { code: "fr", href: "/fr", label: "Français" },
+  { code: "de", href: "/de", label: "Deutsch" },
   { code: "zh", href: "/zh", label: "中文" },
   { code: "es", href: "/es", label: "Español" },
   { code: "th", href: "/th", label: "ไทย" },
@@ -157,6 +159,40 @@ export const landings: Record<string, Landing> = {
     ctaText:
       "Écrivez-nous sur WhatsApp — Eldor, votre hôte, vit sur l’île depuis plus de 12 ans et vous aidera à organiser votre séjour.",
     langNote: "Site complet en anglais",
+  },
+
+  de: {
+    code: "de",
+    htmlLang: "de",
+    dir: "ltr",
+    label: "Deutsch",
+    title: "Villen mit privatem Pool auf Koh Samui | Magic Suites",
+    description:
+      "Villen und Suiten am Hang mit Meerblick auf Koh Samui, fast alle mit eigenem Pool. 9,8 auf Booking.com. Strand in 5 Minuten – direkt buchen zum besten Preis.",
+    eyebrow: "Koh Samui, Thailand",
+    h1: "Villen mit privatem Pool auf Koh Samui",
+    sub: "2 Villen und 5 private Suiten – die meisten mit eigenem Pool – am Hang über dem Golf von Thailand, nur 5 Minuten vom Strand.",
+    ctaBook: "Jetzt buchen",
+    ctaWhats: "Schreiben Sie uns auf WhatsApp",
+    roomsTitle: "Unsere Villen und Suiten",
+    roomsSub: "Jede Unterkunft ist komplett privat: eigener Pool, Terrasse und Meerblick.",
+    viewAll: "Alle Villen und Suiten ansehen",
+    guestsWord: "Gäste",
+    perksTitle: "Warum direkt buchen?",
+    perks: [
+      { title: "Immer der beste Preis", text: "Mit dem Code DIRECT an der Kasse günstiger als auf jedem Buchungsportal." },
+      { title: "Kostenloser Flughafentransfer", text: "Gratis ab 2 Übernachtungen." },
+      { title: "Direkter Draht zum Gastgeber", text: "WhatsApp vor, während und nach Ihrem Aufenthalt." },
+      { title: "Flexible Anreise", text: "Gepäck jederzeit abstellen – sagen Sie uns einfach Bescheid." },
+    ],
+    reviewsLine: "9,8 „Außergewöhnlich“ auf Booking.com · 4,96 auf Airbnb",
+    locationTitle: "Lage",
+    locationText:
+      "Wir liegen in Choeng Mon (Plai Laem), einer ruhigen, gehobenen Ecke von Koh Samui: 3 km vom Flughafen, nahe dem Big Buddha, 7 Autominuten von Chaweng und dem Fisherman's Village.",
+    ctaTitle: "Bereit für Samui?",
+    ctaText:
+      "Schreiben Sie uns auf WhatsApp – Eldor, Ihr Gastgeber, lebt seit über 12 Jahren auf der Insel und hilft Ihnen gern bei der Planung.",
+    langNote: "Vollständige Website auf Englisch",
   },
 
   zh: {
