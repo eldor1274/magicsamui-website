@@ -18,7 +18,12 @@ export default function CloudbedsDatePicker({ className = "" }: { className?: st
     setIsLocal(["localhost", "127.0.0.1"].includes(window.location.hostname));
   }, []);
 
-  if (!bookingUrl) return <div className={className} style={{ minHeight: 56 }} />;
+  // Measured on the live widget (2026-09-09): it renders 98px tall on phones and
+  // 101-106px from tablet width up, never the 56px this used to reserve. That
+  // 42-50px pop-in was the homepage's whole field CLS (0.05 per view).
+  const reserve = "min-h-[98px] md:min-h-[106px]";
+
+  if (!bookingUrl) return <div className={`${className} ${reserve}`} />;
 
   if (isLocal) {
     return (
@@ -31,11 +36,10 @@ export default function CloudbedsDatePicker({ className = "" }: { className?: st
   }
 
   return (
-    // min-height reserves the widget's space while its script loads on
+    // min-height reserves the widget's full space while its script loads on
     // first interaction, so the late upgrade causes no layout shift.
     <div
-      className={className}
-      style={{ minHeight: 56 }}
+      className={`${className} ${reserve}`}
       onClickCapture={() => {
         if (!tracked.current) {
           tracked.current = true;
