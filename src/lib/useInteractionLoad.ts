@@ -10,14 +10,29 @@ export type LoadTrigger = false | "interaction" | "fallback";
 // Both are truthy, so callers that only care whether to load keep working;
 // the distinction lets analytics tag sessions that never showed a human.
 // Always false on localhost so dev sessions stay clean.
-export function useInteractionLoad(fallbackMs: number): LoadTrigger {
+// `interactionDelayMs` staggers the non-essential scripts: without it, GA,
+// Clarity and the ~430 KiB Cloudbeds bundle all arrived and evaluated on the
+// main thread within the same second after the first tap, which is exactly
+// when the visitor taps again (field INP sat at ~300 ms). Cloudbeds keeps 0
+// because the date picker needs it; the trackers can wait a moment.
+export function useInteractionLoad(
+  fallbackMs: number,
+  interactionDelayMs = 0
+): LoadTrigger {
   const [load, setLoad] = useState<LoadTrigger>(false);
 
   useEffect(() => {
     if (load) return;
     if (["localhost", "127.0.0.1"].includes(window.location.hostname)) return;
 
-    const start = () => setLoad("interaction");
+    let delayed: ReturnType<typeof setTimeout> | undefined;
+    const start = () => {
+      if (interactionDelayMs > 0) {
+        delayed = setTimeout(() => setLoad("interaction"), interactionDelayMs);
+      } else {
+        setLoad("interaction");
+      }
+    };
     const events: (keyof WindowEventMap)[] = [
       "pointerdown",
       "touchstart",
@@ -40,8 +55,9 @@ export function useInteractionLoad(fallbackMs: number): LoadTrigger {
       events.forEach((e) => window.removeEventListener(e, start));
       window.removeEventListener("load", armFallback);
       if (fallback) clearTimeout(fallback);
+      if (delayed) clearTimeout(delayed);
     };
-  }, [load, fallbackMs]);
+  }, [load, fallbackMs, interactionDelayMs]);
 
   return load;
 }

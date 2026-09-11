@@ -26,7 +26,7 @@ function shouldRecord(): boolean {
 // useful recordings anyway. Engagement classification (low/medium/high
 // intent) is Clarity's own job, so nothing is tagged here.
 export default function ClarityScript() {
-  const load = useInteractionLoad(10000);
+  const load = useInteractionLoad(10000, 3000);
 
   if (!load || !shouldRecord()) return null;
 

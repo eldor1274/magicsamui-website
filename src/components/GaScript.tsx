@@ -12,7 +12,7 @@ const gaId = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID;
 // which container to fetch; the dataLayer stub in layout.tsx configures both
 // and gtag.js replays that queue when it loads here.
 export default function GaScript() {
-  const load = useInteractionLoad(4000);
+  const load = useInteractionLoad(4000, 1500);
   const tagId = gaId || GOOGLE_ADS_ID;
 
   // Owner devices never load gtag.js, so the queued pageview/events are

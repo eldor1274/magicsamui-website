@@ -47,7 +47,11 @@ export default function RoomGallery({ images }: { images: RoomImage[] }) {
           src={current.src}
           alt={current.alt}
           fill
-          priority
+          // The first photo is the page's LCP element. `priority` is deprecated in
+          // Next 16 and no longer set fetchpriority; preload + fetchPriority do.
+          // Only the initial photo gets it - the ones the guest cycles to don't.
+          preload={active === 0}
+          fetchPriority={active === 0 ? "high" : "auto"}
           sizes="(min-width: 1024px) 66vw, 100vw"
           className="object-cover"
         />

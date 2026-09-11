@@ -40,6 +40,11 @@ export default function RoomsPage() {
               src={magicVilla.heroImage.src}
               alt={magicVilla.heroImage.alt}
               fill
+              // First photo on the page = the LCP element on phones; Lighthouse
+              // (2026-09-09) caught it lazy-loading, adding ~1.6s of load delay.
+              preload
+              fetchPriority="high"
+              quality={60}
               sizes="(min-width: 1024px) 33vw, 100vw"
               className="object-cover"
             />
