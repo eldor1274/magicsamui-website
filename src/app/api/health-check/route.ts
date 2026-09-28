@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import nodemailer from "nodemailer";
 import tls from "tls";
+import { sendSiteMail } from "@/lib/siteMail";
 
 // Daily health check, run by Vercel Cron (vercel.json). Emails Eldor only
 // when something needs attention: bot down, SSL certificate nearing
@@ -136,15 +136,33 @@ export async function GET(req: NextRequest) {
     problems.push(`Could not check the Cloudbeds booking engine code (network error). Harmless once; if it repeats, check magicsamui.com/booking on a phone.`);
   }
 
-  const shouldEmail = problems.length > 0 || isManualTest;
-  if (shouldEmail && process.env.CONTACT_GMAIL_USER && process.env.CONTACT_GMAIL_APP_PASSWORD) {
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.CONTACT_GMAIL_USER,
-        pass: process.env.CONTACT_GMAIL_APP_PASSWORD,
-      },
+  // 5. Can the site still send email? The contact form, the waitlist and this
+  // very alert depend on it, and it broke unnoticed for three weeks in 2026-09
+  // when a Google password reset revoked the app password. The droplet relay
+  // is the primary route; if it is down the alert below may not arrive, but
+  // the droplet's own watchdog reports a dead bot server separately.
+  try {
+    const relay = await fetch(`${process.env.POINTS_API_URL ?? ""}/site/mail`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(15000),
+      cache: "no-store",
     });
+    // Without the secret a healthy relay answers 401; anything else means the
+    // endpoint is missing (old bot code deployed) or the server is down.
+    if (relay.status === 401) {
+      okReport.push("Website mail relay: OK");
+    } else {
+      problems.push(`The website's mail relay on the bot server answered HTTP ${relay.status} instead of 401. Contact-form messages may not be reaching you. Ask Claude to check /site/mail in server.js on the droplet.`);
+    }
+  } catch {
+    problems.push(`The website's mail relay on the bot server is unreachable. Contact-form messages may not be reaching you until the droplet is back.`);
+  }
+
+  const shouldEmail = problems.length > 0 || isManualTest;
+  let emailed = false;
+  if (shouldEmail) {
     const subject = problems.length
       ? `[Magic Suites ALERT] ${problems.length} issue(s) need attention`
       : "[Magic Suites] Health check test — all systems OK";
@@ -157,13 +175,13 @@ export async function GET(req: NextRequest) {
       "",
       "— Automated daily health check, magicsamui.com",
     ].join("\n");
-    await transporter.sendMail({
-      from: `Magic Suites Monitor <${process.env.CONTACT_GMAIL_USER}>`,
+    emailed = await sendSiteMail({
       to: ALERT_TO,
       subject,
       text: body,
+      fromName: "Magic Suites Monitor",
     });
   }
 
-  return NextResponse.json({ problems, ok: okReport, emailed: shouldEmail });
+  return NextResponse.json({ problems, ok: okReport, emailed });
 }

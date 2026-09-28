@@ -1,12 +1,15 @@
-import nodemailer from "nodemailer";
+import { sendSiteMail, storeDiag } from "@/lib/siteMail";
+import { site } from "@/data/site";
 
 // Receives the on-device scroll recording from /booking?diag=1 (see
-// components/ScrollDiag.tsx) and emails it to our own inbox, where it is read
-// and analysed. Not reachable by normal browsing: the recorder only exists
-// behind the ?diag parameter, and the key below keeps drive-by POSTs out.
+// components/ScrollDiag.tsx). The recording is stored on the droplet, where it
+// is read back over SSH, and a short notice is mailed to our own inbox.
+// Not reachable by normal browsing: the recorder only exists behind the ?diag
+// parameter, and the key below keeps drive-by POSTs out.
 
 const KEY = "ms-diag-2026";
 const MAX_BYTES = 700_000;
+const PART_LIMIT = 90_000; // the droplet accepts JSON bodies up to 100 KB
 const RATE_LIMIT = 20;
 const RATE_WINDOW_MS = 60 * 60 * 1000;
 const hits = new Map<string, number[]>();
@@ -44,50 +47,53 @@ export async function POST(request: Request) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const user = process.env.CONTACT_GMAIL_USER;
-  const pass = process.env.CONTACT_GMAIL_APP_PASSWORD;
-  if (!user || !pass) {
-    return Response.json({ error: "Email is not configured" }, { status: 500 });
-  }
-
   const report = data.report as Record<string, unknown>;
-  const count = (k: string) => (Array.isArray(report[k]) ? (report[k] as unknown[]).length : 0);
+  const rows = (k: string) => (Array.isArray(report[k]) ? (report[k] as unknown[]) : []);
   const env = (report.env ?? {}) as Record<string, unknown>;
-  const stamp = new Date().toISOString();
-  const json = JSON.stringify(report);
+  const id = new Date().toISOString();
+  const summary = String(data.summary ?? "").slice(0, 400);
 
-  // The mailbox is read back through a connector that shows message text but
-  // not attachments, so the recording is sent as plain-text parts small enough
-  // to come back whole. Part 1 is the decisive one; the full JSON also rides
-  // along as an attachment for a human to open.
-  const tail = (k: string, n: number) => (Array.isArray(report[k]) ? (report[k] as unknown[]).slice(-n) : []);
-  const parts: [string, unknown][] = [
-    ["overview", { env, endedAtMs: report.endedAtMs, switches: report.switches, shifts: tail("shifts", 400), events: tail("events", 500) }],
-    ["frames", { cols: "t,scrollY,scrollX,vvHeight,vvOffsetTop,innerHeight,siteHeaderTop,fabTop", frames: tail("frames", 1500) }],
-    ["sizes-muts", { sizes: tail("sizes", 400), muts: tail("muts", 500) }],
-  ];
-  const head = [
-    `summary: ${String(data.summary ?? "").slice(0, 400)}`,
-    `ua: ${String(env.ua ?? "").slice(0, 200)}`,
-    `rows: frames ${count("frames")}, shifts ${count("shifts")}, sizes ${count("sizes")}, events ${count("events")}, muts ${count("muts")}, switches ${count("switches")}`,
-    `ip: ${ip}`,
-  ].join("\n");
-
-  const transporter = nodemailer.createTransport({ service: "gmail", auth: { user, pass } });
-  try {
-    for (let i = 0; i < parts.length; i++) {
-      const [name, body] = parts[i];
-      await transporter.sendMail({
-        from: `"Magic Suites scroll test" <${user}>`,
-        to: user,
-        subject: `[scroll-diag] ${stamp} part ${i + 1}/${parts.length} ${name}`,
-        text: [head, "", "JSON-BEGIN", JSON.stringify(body).slice(0, 150_000), "JSON-END"].join("\n"),
-        attachments: i === 0 ? [{ filename: `scroll-diag-${stamp.replace(/[:.]/g, "-")}.json`, content: json }] : [],
-      });
+  // Newest rows matter most (the guest presses Send right after the shake), so
+  // each list keeps its tail and is halved until the part fits the limit.
+  const fit = (name: string, build: (n: number) => Record<string, unknown>, start: number) => {
+    let n = start;
+    let part = build(n);
+    while (JSON.stringify(part).length > PART_LIMIT && n > 20) {
+      n = Math.floor(n / 2);
+      part = build(n);
     }
-  } catch {
-    return Response.json({ error: "Could not send" }, { status: 502 });
+    return { id, part: name, ...part };
+  };
+  const parts = [
+    fit("overview", (n) => ({ summary, ip, env, endedAtMs: report.endedAtMs, switches: rows("switches"), shifts: rows("shifts").slice(-n), events: rows("events").slice(-n) }), 500),
+    fit("frames", (n) => ({ cols: "t,scrollY,scrollX,vvHeight,vvOffsetTop,innerHeight,siteHeaderTop,fabTop", frames: rows("frames").slice(-n) }), 1800),
+    fit("sizes", (n) => ({ sizes: rows("sizes").slice(-n) }), 800),
+    fit("muts", (n) => ({ muts: rows("muts").slice(-n) }), 800),
+  ];
+
+  let stored = 0;
+  for (const part of parts) {
+    if (await storeDiag(part)) stored++;
+  }
+  if (stored === 0) {
+    return Response.json({ error: "Could not store" }, { status: 502 });
   }
 
-  return Response.json({ ok: true });
+  // Best effort: the recording is already safe on the droplet.
+  await sendSiteMail({
+    to: site.email,
+    fromName: "Magic Suites scroll test",
+    subject: `[scroll-diag] report ${id}`,
+    text: [
+      `A scroll recording arrived from /booking?diag=1 and was stored on the droplet (${stored}/${parts.length} parts).`,
+      "",
+      `summary: ${summary}`,
+      `device: ${String(env.ua ?? "").slice(0, 200)}`,
+      `rows: frames ${rows("frames").length}, shifts ${rows("shifts").length}, sizes ${rows("sizes").length}, events ${rows("events").length}, muts ${rows("muts").length}, switches ${rows("switches").length}`,
+      "",
+      "Tell Claude a report is in; it reads /root/whatsapp-cloud-bot/site-scroll-diag.jsonl.",
+    ].join("\n"),
+  });
+
+  return Response.json({ ok: true, stored });
 }

@@ -1,5 +1,5 @@
-import nodemailer from "nodemailer";
 import { site } from "@/data/site";
+import { sendSiteMail } from "@/lib/siteMail";
 
 // EL & DOR "notify me" signups — each lands in the inbox tagged with the
 // same subject so the launch list is one Gmail search away.
@@ -40,27 +40,14 @@ export async function POST(request: Request) {
     return Response.json({ error: "Enter a valid email address" }, { status: 400 });
   }
 
-  const user = process.env.CONTACT_GMAIL_USER;
-  const pass = process.env.CONTACT_GMAIL_APP_PASSWORD;
-  if (!user || !pass) {
-    return Response.json({ error: "Email is not configured" }, { status: 500 });
-  }
-
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: { user, pass },
+  const sent = await sendSiteMail({
+    to: site.email,
+    replyTo: email,
+    subject: "EL & DOR waitlist signup",
+    text: `New EL & DOR waitlist signup:\n\n${email}\n\nSigned up: ${new Date().toISOString()}`,
   });
-
-  try {
-    await transporter.sendMail({
-      from: `"Magic Suites Website" <${user}>`,
-      to: site.email,
-      replyTo: email,
-      subject: "EL & DOR waitlist signup",
-      text: `New EL & DOR waitlist signup:\n\n${email}\n\nSigned up: ${new Date().toISOString()}`,
-    });
-    return Response.json({ ok: true });
-  } catch {
+  if (!sent) {
     return Response.json({ error: "Failed to send" }, { status: 500 });
   }
+  return Response.json({ ok: true });
 }
