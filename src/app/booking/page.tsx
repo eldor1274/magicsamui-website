@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import CloudbedsImmersive from "@/components/CloudbedsImmersive";
 import PromoHint from "@/components/PromoHint";
 import BookingHelpStrip from "@/components/BookingHelpStrip";
+import ScrollDiag from "@/components/ScrollDiag";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/booking" },
@@ -27,6 +28,8 @@ export default function BookingPage() {
       <div className="mt-6">
         <CloudbedsImmersive />
       </div>
+      {/* Inert unless the URL carries ?diag=1 - see the component. */}
+      <ScrollDiag />
     </div>
   );
 }
