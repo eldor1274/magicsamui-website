@@ -44,3 +44,19 @@ reach-portal .chakra-tooltip,
 #cb-bookingengine .chakra-tooltip {
   display: none !important;
 }
+
+/* The booking page jumped about 90px mid-scroll on phones (Eldor, iPhone,
+   2026-09-28). Reproduced in WebKit: when the engine's big search panel
+   scrolls out of view, the engine adds a compact date bar to its own header.
+   That header is sticky only on Cloudbeds' hosted page; embedded here it sits
+   at the top of the engine, far above the screen, so growing it from 69px to
+   161px pushes the whole page down while the guest is scrolling (and back up
+   on the way back). The bar can never be seen in that state, so on the
+   landing view it is hidden and its empty grid row collapsed. Search-results
+   and checkout views keep the bar: it is always shown there, so no jump. */
+#cb-bookingengine-main-layout:has(main.cb-landing-page) .cb-header-date-picker-section {
+  display: none !important;
+}
+#cb-bookingengine-main-layout:has(main.cb-landing-page) .cb-header {
+  row-gap: 0 !important;
+}
