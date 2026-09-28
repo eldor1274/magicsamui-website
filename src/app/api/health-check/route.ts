@@ -14,6 +14,23 @@ const DOMAINS = ["magicsamui.com", "magicsuitesbot.com"];
 const CERT_WARN_DAYS = 21;
 const DOMAIN_WARN_DAYS = 30;
 
+// globals.css and CloudbedsImmersive.tsx fix the /booking scroll jump by
+// targeting these names inside the Cloudbeds engine. The engine is served from
+// a /latest/ path, so a Cloudbeds release can rename them and the fix would stop
+// working without anyone noticing (Eldor's own phone sends no analytics).
+const CLOUDBEDS_CHUNKS = [
+  "https://static1.cloudbeds.com/booking-engine/latest/static/js/immersive-experience/cb-immersive-experience.js",
+  "https://static1.cloudbeds.com/booking-engine/latest/static/js/immersive-experience/property.cb-immersive-experience.js",
+];
+const CLOUDBEDS_NAMES = [
+  "cb-bookingengine-main-layout",
+  "cb-landing-page",
+  '"cb-header"',
+  "cb-header-date-picker-section",
+  "landing-search-panel",
+  "scroll-top-indicator",
+];
+
 function certDaysLeft(host: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const socket = tls.connect(443, host, { servername: host, timeout: 15000 }, () => {
@@ -94,6 +111,29 @@ export async function GET(req: NextRequest) {
     } else {
       okReport.push(`Domain ${domain}: ${Math.floor(days)} days left`);
     }
+  }
+
+  // 4. Cloudbeds engine still has the names our /booking fixes rely on?
+  try {
+    const bodies = await Promise.all(
+      CLOUDBEDS_CHUNKS.map(async (url) => {
+        const res = await fetch(url, { signal: AbortSignal.timeout(20000), cache: "no-store" });
+        return res.ok ? res.text() : "";
+      })
+    );
+    if (bodies.some((body) => !body)) {
+      problems.push(`Could not download the Cloudbeds booking engine code to check it. If this repeats tomorrow, Cloudbeds may have moved the file: open magicsamui.com/booking on a phone and check it still scrolls without jumping.`);
+    } else {
+      const code = bodies.join("\n");
+      const missing = CLOUDBEDS_NAMES.filter((name) => !code.includes(name));
+      if (missing.length) {
+        problems.push(`Cloudbeds changed its booking engine: ${missing.join(", ")} no longer exists in its code. The fix that stops magicsamui.com/booking from jumping while scrolling on phones has probably stopped working. Ask Claude to re-check the booking page scroll fix (globals.css).`);
+      } else {
+        okReport.push("Cloudbeds engine names for the /booking scroll fix: OK");
+      }
+    }
+  } catch {
+    problems.push(`Could not check the Cloudbeds booking engine code (network error). Harmless once; if it repeats, check magicsamui.com/booking on a phone.`);
   }
 
   const shouldEmail = problems.length > 0 || isManualTest;

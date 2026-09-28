@@ -13,7 +13,9 @@ export default function PromoHint() {
     setApplied(new URLSearchParams(window.location.search).has("promo"));
   }, []);
 
-  if (applied === null) return <div style={{ minHeight: 44 }} />;
+  // Reserve the real height: on phones the hint wraps to two lines (64px); the
+  // old 44px placeholder let everything below drop 20px at hydration.
+  if (applied === null) return <div className="min-h-[64px] sm:min-h-[44px]" />;
 
   if (applied) {
     return (

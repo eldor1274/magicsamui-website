@@ -7,6 +7,7 @@ import { track } from "@/lib/track";
 export default function CloudbedsImmersive() {
   const [isLocal, setIsLocal] = useState<boolean | null>(null);
   const tracked = useRef(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     // Cloudbeds only serves its widgets to whitelisted public domains,
@@ -14,6 +15,32 @@ export default function CloudbedsImmersive() {
     setIsLocal(["localhost", "127.0.0.1"].includes(window.location.hostname));
     track("booking_engine_view");
   }, []);
+
+  // The engine keeps one search control alive at a time: while its landing
+  // search panel is off screen it marks the panel inert + aria-hidden and
+  // relies on the compact bar in its header. globals.css hides that bar on the
+  // landing view (it made the page jump while scrolling), so without this the
+  // date fields were unreachable by keyboard and invisible to screen readers
+  // whenever the panel was off screen - including at load on short screens.
+  // Attribute-only observer, scoped to the engine: it fires on inert changes,
+  // not on the engine's heavy DOM churn.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (isLocal !== false || !wrap) return;
+    const release = (el: Element) => {
+      if (!el.hasAttribute("inert") || !el.closest("main.cb-landing-page")) return;
+      el.removeAttribute("inert");
+      el.removeAttribute("aria-hidden");
+    };
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.target instanceof Element) release(record.target);
+      }
+    });
+    observer.observe(wrap, { subtree: true, attributes: true, attributeFilter: ["inert"] });
+    wrap.querySelectorAll("main.cb-landing-page [inert]").forEach(release);
+    return () => observer.disconnect();
+  }, [isLocal]);
 
   // The engine renders at height 0 until its script arrives, then expands and
   // shoves the footer down - Lighthouse measured CLS 0.569 on /booking from
@@ -31,6 +58,7 @@ export default function CloudbedsImmersive() {
 
   return (
     <div
+      ref={wrapRef}
       className="min-h-dvh"
       onClickCapture={() => {
         if (!tracked.current) {

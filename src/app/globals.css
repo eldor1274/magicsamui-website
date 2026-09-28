@@ -48,15 +48,31 @@ reach-portal .chakra-tooltip,
 /* The booking page jumped about 90px mid-scroll on phones (Eldor, iPhone,
    2026-09-28). Reproduced in WebKit: when the engine's big search panel
    scrolls out of view, the engine adds a compact date bar to its own header.
-   That header is sticky only on Cloudbeds' hosted page; embedded here it sits
-   at the top of the engine, far above the screen, so growing it from 69px to
-   161px pushes the whole page down while the guest is scrolling (and back up
-   on the way back). The bar can never be seen in that state, so on the
-   landing view it is hidden and its empty grid row collapsed. Search-results
-   and checkout views keep the bar: it is always shown there, so no jump. */
-#cb-bookingengine-main-layout:has(main.cb-landing-page) .cb-header-date-picker-section {
+   That header is sticky only on Cloudbeds' hosted page and in popup mode;
+   embedded here (mode="standard") it sits at the top of the engine, normally
+   far above the screen, so growing it from 69px to 161px pushes the whole page
+   down while the guest is scrolling, and back up on the way back. On the
+   landing view the bar is therefore hidden, its empty grid row collapsed and
+   the 3-column header layout it triggers switched off. Search-results and
+   checkout views keep the bar: it is always shown there, so nothing jumps.
+   Trade-off: on very short screens (phone landscape, 600px-high laptops) the
+   bar would have been visible at load; there the guest scrolls to the search
+   panel instead. CloudbedsImmersive.tsx keeps that panel reachable by keyboard.
+   Keep these as standalone rules: a browser without :has() drops the whole
+   rule, which must not take the tooltip rule above with it.
+   The cb- class names are Cloudbeds' documented styling hooks; the daily
+   health check emails Eldor if any of them disappears from the engine. */
+#cb-bookingengine-main-layout:not([data-mode="popup"]):has(main.cb-landing-page) .cb-header-date-picker-section {
   display: none !important;
 }
-#cb-bookingengine-main-layout:has(main.cb-landing-page) .cb-header {
+#cb-bookingengine-main-layout:not([data-mode="popup"]):has(main.cb-landing-page) .cb-header {
   row-gap: 0 !important;
+  grid-template-columns: none !important;
+}
+
+/* After a search the engine scrolls itself to the top of the screen, which put
+   its header (and on desktop most of its date bar) underneath our sticky site
+   header (61px on phones, 77px on desktop). Stop 80px short instead. */
+#cb-bookingengine #scroll-top-indicator {
+  scroll-margin-top: 80px;
 }
