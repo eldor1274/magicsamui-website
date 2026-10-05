@@ -12,9 +12,12 @@
 // - Only Beam playground test card numbers are accepted (classifyDemoCard);
 //   anything else shows DEMO_CARD_HINT.
 // - The only request is postDemoPay({ t: token, outcome }).
+// The signed booking token leaves the address bar on mount (kept in this
+// tab's sessionStorage so a reload still works - see BeamDemoRecover) before
+// the site's analytics tags load and record the page URL.
 // Keep BeamDemoCheckoutProps stable.
 
-import { useId, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
 import { CircleAlert, Clock, CreditCard, FlaskConical, LoaderCircle, Lock, QrCode, ShieldCheck, X } from "lucide-react";
 import { postDemoPay } from "@/lib/booking/apiClient";
@@ -33,6 +36,7 @@ import { formatThbWithCode } from "@/lib/booking/format";
 import type { DemoPayOutcome } from "@/lib/booking/types";
 import FieldShell, { FIELD_CONTROL_CLASS, describedBy } from "../checkout/FormField";
 import PaymentMethodBadges, { CARD_METHODS } from "../checkout/PaymentMethodBadges";
+import { TOUCH_TARGET } from "../ui/styles";
 
 export interface BeamDemoCheckoutProps {
   /** Signed booking token (pass straight to postDemoPay). */
@@ -50,6 +54,31 @@ export interface BeamDemoCheckoutProps {
 
 type Method = "card" | "promptpay";
 type CardField = "number" | "expiry" | "cvv" | "name";
+
+/* --------------------- token out of the address bar --------------------- */
+
+const DEMO_TOKEN_KEY = "msv_beam_demo_token_v1";
+
+/**
+ * Rendered by the page when it was loaded WITHOUT ?t (a reload after the
+ * token was moved out of the URL): puts the saved token back and reloads once.
+ */
+export function BeamDemoRecover() {
+  useEffect(() => {
+    let saved: string | null = null;
+    try {
+      saved = sessionStorage.getItem(DEMO_TOKEN_KEY);
+      sessionStorage.removeItem(DEMO_TOKEN_KEY); // one attempt only - never a reload loop
+    } catch {
+      return;
+    }
+    if (!saved || !/^[A-Za-z0-9_.-]{1,4096}$/.test(saved)) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("t", saved);
+    window.location.replace(url.toString());
+  }, []);
+  return null;
+}
 
 /* ------------------------------ clock ------------------------------ */
 
@@ -174,13 +203,37 @@ export default function BeamDemoCheckout({
   const [errors, setErrors] = useState<Partial<Record<CardField, string>>>({});
   const [busy, setBusy] = useState<false | "paying" | "redirecting">(false);
   const [failure, setFailure] = useState<string | null>(null);
+  const failureRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(DEMO_TOKEN_KEY, token);
+    } catch {
+      // storage blocked: a reload then shows "link not valid" with a way back
+    }
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("t")) {
+      url.searchParams.delete("t");
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+    }
+  }, [token]);
+
+  // A failed attempt: move focus to the message (the button that had focus stays enabled, see `locked`).
+  useEffect(() => {
+    if (failure) failureRef.current?.focus();
+  }, [failure]);
 
   const expiresAtSeconds = Math.floor(Date.parse(expiresAt) / 1000);
   const remaining = now === null || Number.isNaN(expiresAtSeconds) ? null : expiresAtSeconds - now;
   const expired = remaining !== null && remaining <= 0;
   const brand = detectBrand(card.number);
   const amount = formatThbWithCode(amountSatang);
-  const disabled = busy !== false || expired || now === null;
+  // Before hydration / after expiry the controls are truly disabled. While a
+  // payment runs they are only locked (readOnly + aria-disabled), so the
+  // focused control keeps focus and announces "Processing...".
+  const notReady = expired || now === null;
+  const locked = busy !== false;
+  const disabled = notReady || locked;
 
   const ids = {
     number: `${uid}-number`,
@@ -266,12 +319,17 @@ export default function BeamDemoCheckout({
   }
 
   const tabClass = (on: boolean) =>
-    `flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-(--bk-radius-control) px-2 py-2.5 text-sm font-semibold transition-colors ${
+    `flex min-h-11 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-(--bk-radius-control) px-2 py-3 text-sm font-semibold transition-colors ${
       on ? "bg-(--bk-surface) text-(--bk-text) shadow-(--bk-shadow-card)" : "text-(--bk-text-muted) hover:text-(--bk-text)"
     }`;
 
   return (
-    <div className="mx-auto w-full max-w-md space-y-4">
+    // data-clarity-mask: the card form is personal/payment data even though it is simulated.
+    <div className="mx-auto w-full max-w-md space-y-4" data-clarity-mask="true">
+      {/* The page stands alone (no site header): give it its own h1 for screen-reader navigation. */}
+      <h1 className="bk-sr-only">
+        Simulated Beam checkout - pay {amount} to {merchantName}
+      </h1>
       <div
         role="note"
         className="flex items-center justify-center gap-2 rounded-(--bk-radius-control) bg-(--bk-danger) px-4 py-3 text-center text-sm font-bold uppercase tracking-wide text-(--bk-surface)"
@@ -283,8 +341,9 @@ export default function BeamDemoCheckout({
       <div className="overflow-hidden rounded-(--bk-radius-card) bg-(--bk-surface) shadow-(--bk-shadow-pop)">
         {/* Beam-style header */}
         <div className="flex items-center justify-between gap-3 border-b border-(--bk-border) px-5 py-3">
-          <p className="text-lg font-extrabold lowercase tracking-tight text-(--bk-text)" aria-label="Beam checkout (simulated)">
+          <p className="text-lg font-extrabold lowercase tracking-tight text-(--bk-text)">
             beam<span className="font-medium text-(--bk-text-subtle)"> checkout</span>
+            <span className="bk-sr-only"> (simulated)</span>
           </p>
           <span className="rounded-(--bk-radius-pill) bg-(--bk-warning-soft) px-2.5 py-1 text-xs font-semibold text-(--bk-warning)">
             Demo
@@ -294,11 +353,11 @@ export default function BeamDemoCheckout({
         {/* Order */}
         <div className="space-y-1 bg-(--bk-surface-muted) px-5 py-4">
           <p className="text-sm font-medium text-(--bk-text-muted)">{merchantName}</p>
-          <p className="bk-price text-3xl font-semibold text-(--bk-text)">{amount}</p>
+          <p className="font-sans text-3xl font-semibold tabular-nums text-(--bk-text)">{amount}</p>
           <p className="text-sm text-(--bk-text-muted)">{description}</p>
           <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs text-(--bk-text-subtle)">
             <span>Reference {bookingRef}</span>
-            <span className="inline-flex min-w-[9.5rem] items-center justify-end gap-1 tabular-nums" aria-live="off">
+            <span className="inline-flex items-center gap-1 tabular-nums sm:min-w-[9.5rem] sm:justify-end" aria-live="off">
               <Clock size={12} aria-hidden="true" />
               {remaining === null ? "Link valid for 30 min" : expired ? "Link expired" : `Link expires in ${formatCountdown(remaining)}`}
             </span>
@@ -321,6 +380,7 @@ export default function BeamDemoCheckout({
             </div>
           ) : (
             <>
+              <h2 className="bk-sr-only">Payment method</h2>
               <div
                 role="tablist"
                 aria-label="Payment method"
@@ -358,8 +418,10 @@ export default function BeamDemoCheckout({
 
               {failure && (
                 <div
+                  ref={failureRef}
+                  tabIndex={-1}
                   role="alert"
-                  className="flex items-start gap-2 rounded-(--bk-radius-control) border border-(--bk-danger) bg-(--bk-danger-soft) p-3 text-sm text-(--bk-text)"
+                  className="flex items-start gap-2 rounded-(--bk-radius-control) border border-(--bk-danger) bg-(--bk-danger-soft) p-3 text-sm text-(--bk-text) focus:outline-none focus-visible:outline-2"
                 >
                   <CircleAlert size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-danger)" />
                   <p>{failure}</p>
@@ -384,11 +446,13 @@ export default function BeamDemoCheckout({
                         autoComplete="off"
                         autoCorrect="off"
                         spellCheck={false}
-                        placeholder="4111 1111 1111 1111"
+                        placeholder="1234 1234 1234 1234"
                         maxLength={23}
                         value={card.number}
                         onChange={(e) => update("number", formatCardNumber(e.target.value))}
-                        disabled={disabled}
+                        disabled={notReady}
+                        readOnly={locked}
+                        aria-disabled={locked || undefined}
                         aria-required="true"
                         aria-invalid={Boolean(errors.number) || undefined}
                         aria-describedby={describedBy(ids.number, { error: Boolean(errors.number) })}
@@ -402,11 +466,13 @@ export default function BeamDemoCheckout({
                           type="text"
                           inputMode="numeric"
                           autoComplete="off"
-                          placeholder="12/29"
+                          placeholder="MM/YY"
                           maxLength={5}
                           value={card.expiry}
                           onChange={(e) => update("expiry", formatExpiryInput(e.target.value, card.expiry))}
-                          disabled={disabled}
+                          disabled={notReady}
+                          readOnly={locked}
+                          aria-disabled={locked || undefined}
                           aria-required="true"
                           aria-invalid={Boolean(errors.expiry) || undefined}
                           aria-describedby={describedBy(ids.expiry, { error: Boolean(errors.expiry) })}
@@ -419,11 +485,13 @@ export default function BeamDemoCheckout({
                           type="password"
                           inputMode="numeric"
                           autoComplete="off"
-                          placeholder={brand === "Amex" ? "1234" : "123"}
+                          placeholder="CVC"
                           maxLength={4}
                           value={card.cvv}
                           onChange={(e) => update("cvv", digitsOnly(e.target.value).slice(0, 4))}
-                          disabled={disabled}
+                          disabled={notReady}
+                          readOnly={locked}
+                          aria-disabled={locked || undefined}
                           aria-required="true"
                           aria-invalid={Boolean(errors.cvv) || undefined}
                           aria-describedby={describedBy(ids.cvv, { error: Boolean(errors.cvv) })}
@@ -441,7 +509,9 @@ export default function BeamDemoCheckout({
                         maxLength={60}
                         value={card.name}
                         onChange={(e) => update("name", e.target.value)}
-                        disabled={disabled}
+                        disabled={notReady}
+                        readOnly={locked}
+                        aria-disabled={locked || undefined}
                         aria-required="true"
                         aria-invalid={Boolean(errors.name) || undefined}
                         aria-describedby={describedBy(ids.name, { error: Boolean(errors.name) })}
@@ -450,9 +520,10 @@ export default function BeamDemoCheckout({
                     </FieldShell>
                     <button
                       type="submit"
-                      disabled={disabled}
-                      aria-busy={busy !== false || undefined}
-                      className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-(--bk-radius-pill) bg-(--bk-accent) px-6 text-base font-semibold text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover) disabled:cursor-not-allowed disabled:opacity-(--bk-disabled-opacity)"
+                      disabled={notReady}
+                      aria-disabled={locked || undefined}
+                      aria-busy={locked || undefined}
+                      className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-(--bk-radius-pill) bg-(--bk-accent) px-6 text-base font-semibold text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover) disabled:cursor-not-allowed disabled:opacity-(--bk-disabled-opacity) aria-disabled:cursor-wait"
                     >
                       {busy ? (
                         <>
@@ -486,10 +557,13 @@ export default function BeamDemoCheckout({
                     </p>
                     <button
                       type="button"
-                      onClick={() => void pay("paid")}
-                      disabled={disabled}
-                      aria-busy={busy !== false || undefined}
-                      className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-(--bk-radius-pill) bg-(--bk-accent) px-6 text-base font-semibold text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover) disabled:cursor-not-allowed disabled:opacity-(--bk-disabled-opacity)"
+                      onClick={() => {
+                        if (!disabled) void pay("paid");
+                      }}
+                      disabled={notReady}
+                      aria-disabled={locked || undefined}
+                      aria-busy={locked || undefined}
+                      className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-(--bk-radius-pill) bg-(--bk-accent) px-6 text-base font-semibold text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover) disabled:cursor-not-allowed disabled:opacity-(--bk-disabled-opacity) aria-disabled:cursor-wait"
                     >
                       {busy ? (
                         <LoaderCircle size={18} aria-hidden="true" className="animate-spin" />
@@ -509,7 +583,7 @@ export default function BeamDemoCheckout({
           <a
             href={cancelUrl}
             aria-disabled={busy !== false || undefined}
-            className={`inline-flex items-center gap-1.5 text-sm font-medium text-(--bk-text-muted) underline-offset-2 hover:text-(--bk-text) hover:underline ${
+            className={`inline-flex min-h-11 items-center gap-1.5 text-sm font-medium text-(--bk-text-muted) underline-offset-2 hover:text-(--bk-text) hover:underline ${
               busy ? "pointer-events-none opacity-(--bk-disabled-opacity)" : ""
             }`}
           >
@@ -525,7 +599,8 @@ export default function BeamDemoCheckout({
 
       {!expired && (
         <details className="rounded-(--bk-radius-card) border border-(--bk-border) bg-(--bk-surface) px-5 py-3 text-sm">
-          <summary className="cursor-pointer font-semibold text-(--bk-text)">Beam test cards for this demo</summary>
+          {/* -my-3 py-3: a 44px-tall target inside the card's own padding. */}
+          <summary className="-my-3 cursor-pointer py-3 font-semibold text-(--bk-text)">Beam test cards for this demo</summary>
           <p className="mt-2 text-xs text-(--bk-text-muted)">
             These are Beam&apos;s published playground numbers. Any future expiry works; the security code is 123 (Amex 1234). Real card
             numbers are refused here and nothing you type leaves this page.
@@ -541,7 +616,8 @@ export default function BeamDemoCheckout({
                   type="button"
                   onClick={() => fillTestCard(c.number)}
                   disabled={disabled}
-                  className="shrink-0 rounded-(--bk-radius-pill) border border-(--bk-accent) px-3 py-1 text-xs font-semibold text-(--bk-text) transition-colors hover:bg-(--bk-accent) hover:text-(--bk-accent-contrast) disabled:opacity-(--bk-disabled-opacity)"
+                  aria-label={`Use ${c.label} test card`}
+                  className={`${TOUCH_TARGET} shrink-0 rounded-(--bk-radius-pill) border border-(--bk-accent) px-4 py-1.5 text-xs font-semibold text-(--bk-text) transition-colors hover:bg-(--bk-accent) hover:text-(--bk-accent-contrast) disabled:opacity-(--bk-disabled-opacity)`}
                 >
                   Use
                 </button>

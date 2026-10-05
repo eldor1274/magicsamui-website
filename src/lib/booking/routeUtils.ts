@@ -26,7 +26,12 @@ export function configErrorResponse(e: unknown): Response {
 }
 
 export function clientIp(request: Request): string {
-  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  return ipFromHeaders(request.headers);
+}
+
+/** Client IP from forwarding headers (server components pass `await headers()`). */
+export function ipFromHeaders(headers: Pick<Headers, "get">): string {
+  return headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
 }
 
 /**
@@ -51,13 +56,54 @@ export function logEvent(message: string, data?: Record<string, unknown>): void 
   console.info(`[booking] ${message}`, data ? JSON.stringify(data) : "");
 }
 
-/** Reads a JSON body with a size cap; returns undefined on bad or oversized JSON. */
-export async function readJsonBody(request: Request, maxBytes = 16_384): Promise<unknown> {
-  const text = await request.text();
-  if (text.length > maxBytes) return undefined;
+/**
+ * Reads a request body but never buffers more than `maxBytes`: an oversized
+ * Content-Length is refused before reading, and the stream is cancelled as
+ * soon as the running total passes the cap. Returns null when too large.
+ */
+export async function readCapped(request: Request, maxBytes: number): Promise<Uint8Array | null> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > maxBytes) return null;
+  if (!request.body) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
+}
+
+export type JsonBodyResult = { ok: true; value: unknown } | { ok: false; response: Response };
+
+/**
+ * Reads a JSON POST body: application/json only (415 otherwise, so cross-site
+ * "simple" text/plain form posts are refused before any work is done), size
+ * capped (413), and parsed (400 on bad JSON).
+ */
+export async function readJsonBody(request: Request, maxBytes = 16_384): Promise<JsonBodyResult> {
+  const type = (request.headers.get("content-type") ?? "").trim().toLowerCase();
+  if (!type.startsWith("application/json")) {
+    return { ok: false, response: apiError(415, "invalid_request", "Expected a JSON request body.") };
+  }
+  const bytes = await readCapped(request, maxBytes);
+  if (bytes === null) return { ok: false, response: apiError(413, "invalid_request", "Request body too large.") };
   try {
-    return JSON.parse(text) as unknown;
+    return { ok: true, value: JSON.parse(new TextDecoder().decode(bytes)) as unknown };
   } catch {
-    return undefined;
+    return { ok: false, response: apiError(400, "invalid_request", "Invalid request body.") };
   }
 }

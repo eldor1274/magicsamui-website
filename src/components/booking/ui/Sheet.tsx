@@ -112,7 +112,7 @@ export default function Sheet({ open, onClose, title, subtitle, variant = "botto
               </p>
             )}
           </div>
-          <button type="button" onClick={onClose} aria-label="Close" className={`${BTN_ICON} -mr-2 h-10 w-10`}>
+          <button type="button" onClick={onClose} aria-label="Close" className={`${BTN_ICON} -mr-2 h-11 w-11`}>
             <X size={20} aria-hidden="true" />
           </button>
         </div>

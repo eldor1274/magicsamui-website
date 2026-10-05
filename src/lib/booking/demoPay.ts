@@ -49,7 +49,7 @@ export function runDemoPay(rawBody: unknown, deps: DemoPayDeps): DemoPayResult {
     const proof = createDemoProof(booking.ref, "paid", null, deps.config.tokenSecret, TOKEN_TTL_HOURS * 3600, nowMs);
     return {
       status: 200,
-      body: { ok: true, status: "paid", returnUrl: demoReturnUrl(deps.origin, booking.ref, body.t as string, proof) },
+      body: { ok: true, status: "paid", returnUrl: demoReturnUrl(deps.origin, booking.ref, body.t as string, proof, booking.theme) },
     };
   }
   const failureCode: DemoFailureCode = outcome === "insufficient_funds" ? "CH_INSUFFICIENT_FUNDS" : "CH_CARD_DECLINED";

@@ -46,8 +46,9 @@ export default function FieldShell({ id, label, required, error, hint, trailing,
       <div
         className={`relative flex items-stretch rounded-(--bk-radius-control) border bg-(--bk-surface) transition-[border-color,box-shadow] ${
           invalid
-            ? "border-(--bk-danger) shadow-[0_0_0_1px_var(--bk-danger)] focus-within:shadow-[0_0_0_3px_var(--bk-danger-soft)]"
-            : "border-(--bk-border-strong) focus-within:border-(--bk-focus) focus-within:shadow-[0_0_0_1px_var(--bk-focus)]"
+            ? // Focus ADDS emphasis on an invalid field: a thicker danger ring plus the focus outline.
+              "border-(--bk-danger) shadow-[0_0_0_1px_var(--bk-danger)] focus-within:shadow-[0_0_0_2px_var(--bk-danger)] focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-(--bk-focus)"
+            : "border-(--bk-field-border) focus-within:border-(--bk-focus) focus-within:shadow-[0_0_0_1px_var(--bk-focus)]"
         }`}
       >
         <div className="min-w-0 flex-1">

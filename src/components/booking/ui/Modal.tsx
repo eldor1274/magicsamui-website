@@ -52,7 +52,7 @@ export default function Modal({ open, onClose, title, hideTitle, size = "md", ch
       type="button"
       onClick={onClose}
       aria-label="Close"
-      className={`${BTN_ICON} h-9 w-9 ${hideTitle ? "bg-(--bk-surface) shadow-(--bk-shadow-pop)" : "bg-(--bk-surface-sunken)"}`}
+      className={`${BTN_ICON} h-11 w-11 ${hideTitle ? "bg-(--bk-surface) shadow-(--bk-shadow-pop)" : "bg-(--bk-surface-sunken)"}`}
     >
       <X size={18} aria-hidden="true" />
     </button>

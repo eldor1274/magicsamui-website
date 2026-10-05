@@ -50,23 +50,36 @@ export function demoNightlySatang(referencePriceThb: number, night: IsoDate): nu
   return wholeThb * SATANG_PER_THB;
 }
 
+/** Extra-adult (occupancy) charge for the stay at `adults` guests; 0 when none applies. */
+export function occupancyExtraSatang(adultsExtraSatang: Record<string, number> | undefined, adults: number): number {
+  const v = adultsExtraSatang?.[String(adults)];
+  return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : 0;
+}
+
 /** Builds the sellable rate plans for a room from its base nightly rates. */
-export function buildRateOffers(baseNightly: NightRate[], adults: number): RateOffer[] {
-  const base = baseNightly.reduce((sum, n) => sum + n.amountSatang, 0);
-  return [RATE_PLANS.standard, RATE_PLANS.breakfast].map((plan) => ({
-    ratePlanId: plan.id,
-    ratePlanName: plan.name,
-    baseNightly,
-    supplementSatangPerGuestPerNight: plan.supplementSatangPerGuestPerNight,
-    totalSatang: base + plan.supplementSatangPerGuestPerNight * adults * baseNightly.length,
-    pricedForAdults: adults,
-  }));
+export function buildRateOffers(baseNightly: NightRate[], adults: number, adultsExtraSatang: Record<string, number> = {}): RateOffer[] {
+  return [RATE_PLANS.standard, RATE_PLANS.breakfast].map((plan) => {
+    const rate: RateOffer = {
+      ratePlanId: plan.id,
+      ratePlanName: plan.name,
+      baseNightly,
+      supplementSatangPerGuestPerNight: plan.supplementSatangPerGuestPerNight,
+      adultsExtraSatang,
+      totalSatang: 0,
+      pricedForAdults: adults,
+    };
+    return { ...rate, totalSatang: rateTotalForAdults(rate, adults) };
+  });
 }
 
 /** Stay total for a rate at a given number of adults (what a rate row shows). */
 export function rateTotalForAdults(rate: RateOffer, adults: number): number {
   const base = rate.baseNightly.reduce((sum, n) => sum + n.amountSatang, 0);
-  return base + rate.supplementSatangPerGuestPerNight * adults * rate.baseNightly.length;
+  return (
+    base +
+    occupancyExtraSatang(rate.adultsExtraSatang, adults) +
+    rate.supplementSatangPerGuestPerNight * adults * rate.baseNightly.length
+  );
 }
 
 /** Nights of the stay on which an add-on can be served. */
@@ -114,7 +127,8 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
       date: n.date,
       amountSatang: n.amountSatang + rate.supplementSatangPerGuestPerNight * item.adults,
     }));
-    const roomSatang = nightly.reduce((sum, n) => sum + n.amountSatang, 0);
+    const occupancySatang = occupancyExtraSatang(rate.adultsExtraSatang, item.adults);
+    const roomSatang = nightly.reduce((sum, n) => sum + n.amountSatang, 0) + occupancySatang;
 
     const addons: QuoteAddonLine[] = item.addonIds.map((id) => {
       const addon = ADDONS[id];
@@ -137,6 +151,7 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
       adults: item.adults,
       nights,
       nightly,
+      occupancyExtraSatang: occupancySatang,
       roomSatang,
       addons,
       addonsSatang,
@@ -188,8 +203,9 @@ export function averageNightlySatang(line: QuoteLine): number {
 }
 
 /**
- * Validates a promo code. `promoPct` comes from server config. Returns null
- * for an empty code. Only DIRECT (any case) is recognised in this preview.
+ * Validates a promo code. `promoPct` comes from server config (0 = promos
+ * switched off, as in every Beam mode). Returns null for an empty code. Only
+ * DIRECT (any case) is recognised, and only the demo hints at it.
  */
 export function resolvePromo(code: string | null | undefined, promoPct: number, validCode = "DIRECT"): PromoResult | null {
   const normalized = (code ?? "").trim().toUpperCase();
@@ -200,5 +216,6 @@ export function resolvePromo(code: string | null | undefined, promoPct: number, 
   if (normalized === validCode && promoPct > 0) {
     return { code: normalized, valid: true, pct: promoPct, label: `Direct booking discount (${promoPct}%)` };
   }
-  return { code: normalized, valid: false, message: `We don't recognise the code ${normalized}. Try DIRECT for our best direct rate.` };
+  const hint = promoPct > 0 ? ` Try ${validCode} for our best direct rate.` : "";
+  return { code: normalized, valid: false, message: `We don't recognise the code ${normalized}.${hint}` };
 }

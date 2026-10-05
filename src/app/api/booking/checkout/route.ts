@@ -30,10 +30,10 @@ export async function POST(request: Request) {
     return apiError(429, "rate_limited", "Too many attempts - please wait a few minutes and try again.");
   }
   const body = await readJsonBody(request);
-  if (body === undefined) return apiError(400, "invalid_request", "Invalid request body.");
+  if (!body.ok) return body.response;
 
   try {
-    const result = await runCheckout(body, {
+    const result = await runCheckout(body.value, {
       config,
       origin: resolveOrigin(request.headers.get("host"), process.env),
       log: logEvent,

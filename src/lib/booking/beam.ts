@@ -272,16 +272,28 @@ export interface BeamCharge {
   failureCode?: string;
 }
 
+/** How to find a payment link's charges: by link id (the documented join key) or by our booking ref. */
+export type ChargeLookup = { sourceId: string } | { referenceId: string };
+
 /**
- * GET /api/v1/charges?referenceId=..&source_in=PAYMENT_LINK - fallback used
- * when the browser lost the payment link id (e.g. returned in a new tab).
+ * GET /api/v1/charges?source_in=PAYMENT_LINK&sourceId={paymentLinkId}: a
+ * link's charges carry sourceId = paymentLinkId. The `referenceId` form is only
+ * a fallback for when the browser lost the link id (e.g. returned in a new
+ * tab). Beam does not document that it copies order.referenceId onto the
+ * charge, so an empty answer there proves nothing.
  */
 export async function listPaymentLinkCharges(
   creds: BeamCredentials,
-  referenceId: string,
+  lookup: ChargeLookup,
   fetchImpl: typeof fetch = fetch,
 ): Promise<BeamCharge[]> {
-  const q = new URLSearchParams({ referenceId, source_in: "PAYMENT_LINK", limit: "20" });
+  const q = new URLSearchParams({ source_in: "PAYMENT_LINK", limit: "20" });
+  if ("sourceId" in lookup) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(lookup.sourceId)) throw new BeamApiError(400, null, "Invalid payment link id");
+    q.set("sourceId", lookup.sourceId);
+  } else {
+    q.set("referenceId", lookup.referenceId);
+  }
   const res = await fetchImpl(`${creds.apiBase}/api/v1/charges?${q.toString()}`, {
     headers: { authorization: basicAuthHeader(creds.merchantId, creds.apiKey), accept: "application/json" },
     cache: "no-store",

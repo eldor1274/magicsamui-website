@@ -4,6 +4,8 @@
 // Room photo carousel: prev/next arrows (always on touch screens, on hover or
 // focus with a mouse), swipe, and dots (a sliding window of 7 when a room has
 // many photos). Fixed aspect ratio so the card never shifts while loading.
+// Once the guest shows interest (hover, focus, touch) the previous and next
+// photos are mounted invisibly too, so a slide is instant and cross-fades.
 
 import { useRef, useState } from "react";
 import type { ReactNode, TouchEvent } from "react";
@@ -35,15 +37,20 @@ function dotWindow(count: number, active: number): number[] {
 
 export default function PhotoCarousel({ photos, label, sizes, badge, className = "", muted = false }: PhotoCarouselProps) {
   const [index, setIndex] = useState(0);
+  const [warm, setWarm] = useState(false);
   const touchX = useRef<number | null>(null);
   const count = photos.length;
-  const current = photos[Math.min(index, count - 1)];
+  const active = Math.min(index, count - 1);
   const many = count > 1;
+  const warmUp = many && !warm ? () => setWarm(true) : undefined;
+  // The current photo plus, once warm, its neighbours (keyed by src: a neighbour that becomes current is already loaded).
+  const mounted = [...new Set(warm ? [active, (active + 1) % count, (active - 1 + count) % count] : [active])];
 
   const go = (n: number) => setIndex(((n % count) + count) % count);
 
   const onTouchStart = (e: TouchEvent) => {
     touchX.current = e.touches[0]?.clientX ?? null;
+    warmUp?.();
   };
   const onTouchEnd = (e: TouchEvent) => {
     const start = touchX.current;
@@ -54,8 +61,9 @@ export default function PhotoCarousel({ photos, label, sizes, badge, className =
     if (Math.abs(dx) > SWIPE_PX) go(index + (dx < 0 ? 1 : -1));
   };
 
+  // 44px on touch screens, 36px with a mouse.
   const arrow =
-    "absolute top-1/2 z-10 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full bg-(--bk-surface)/90 text-(--bk-text) shadow-(--bk-shadow-card) transition-opacity hover:bg-(--bk-surface) [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-visible:opacity-100";
+    "absolute top-1/2 z-10 inline-flex h-11 w-11 -translate-y-1/2 [@media(hover:hover)]:h-9 [@media(hover:hover)]:w-9 items-center justify-center rounded-full bg-(--bk-surface)/90 text-(--bk-text) shadow-(--bk-shadow-card) transition-opacity hover:bg-(--bk-surface) [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-visible:opacity-100";
 
   return (
     <div
@@ -65,17 +73,25 @@ export default function PhotoCarousel({ photos, label, sizes, badge, className =
       className={`group relative aspect-[4/3] overflow-hidden rounded-(--bk-radius-control) bg-(--bk-surface-sunken) ${className}`}
       onTouchStart={many ? onTouchStart : undefined}
       onTouchEnd={many ? onTouchEnd : undefined}
+      onPointerEnter={warmUp}
+      onFocus={warmUp}
     >
-      {current && (
-        <Image
-          key={current.src}
-          src={current.src}
-          alt={current.alt}
-          fill
-          sizes={sizes}
-          className={`object-cover ${muted ? "opacity-60 saturate-50" : ""}`}
-        />
-      )}
+      {mounted.map((i) => {
+        const photo = photos[i];
+        if (!photo) return null;
+        const shown = i === active;
+        return (
+          <Image
+            key={photo.src}
+            src={photo.src}
+            alt={shown ? photo.alt : ""}
+            aria-hidden={shown ? undefined : true}
+            fill
+            sizes={sizes}
+            className={`object-cover transition-opacity duration-300 ${shown ? (muted ? "opacity-60 saturate-50" : "opacity-100") : "opacity-0"}`}
+          />
+        );
+      })}
 
       {badge && <div className="absolute left-3 top-3 z-10">{badge}</div>}
 
@@ -90,13 +106,16 @@ export default function PhotoCarousel({ photos, label, sizes, badge, className =
           <div className="absolute inset-x-0 bottom-1.5 z-10 flex justify-center">
             <div className="flex items-center rounded-full bg-(--bk-overlay) px-1.5">
               {dotWindow(count, index).map((i) => (
+                // Out of the tab order: Previous / Next already reach every photo (and "Photo N of M" is
+                // announced), so a keyboard user doesn't tab through 7 dots per card. A 44px pointer hit area.
                 <button
                   key={i}
                   type="button"
+                  tabIndex={-1}
                   onClick={() => go(i)}
                   aria-label={`Go to image ${i + 1}`}
                   aria-current={i === index ? "true" : undefined}
-                  className="group/dot inline-flex h-6 w-4 items-center justify-center"
+                  className="group/dot relative inline-flex h-6 w-6 items-center justify-center before:absolute before:-inset-2.5"
                 >
                   <span
                     className={`block h-1.5 rounded-full bg-(--bk-surface) transition-all ${

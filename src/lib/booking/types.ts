@@ -97,7 +97,13 @@ export interface RateOffer {
   baseNightly: NightRate[];
   /** Plan supplement per guest per night (breakfast plan only). */
   supplementSatangPerGuestPerNight: number;
-  /** Total for the stay at `pricedForAdults` guests (base + supplement). */
+  /**
+   * Occupancy pricing: extra charge for the WHOLE stay keyed by adult count
+   * ("3" -> satang), from Cloudbeds adultsExtraCharge. Empty when the room
+   * has no extra-adult charges (always empty for demo data).
+   */
+  adultsExtraSatang: Record<string, number>;
+  /** Total for the stay at `pricedForAdults` guests (base + occupancy extra + supplement). */
   totalSatang: number;
   pricedForAdults: number;
 }
@@ -112,6 +118,11 @@ export interface RoomOffer {
   remaining: number;
   /** True when the room alone can host the searched number of guests. */
   fitsParty: boolean;
+  /**
+   * Most guests bookable online: min(site maxGuests, Cloudbeds maxGuests).
+   * Absent in older answers - fall back to the catalogue's maxGuests.
+   */
+  maxAdults?: number;
   rates: RateOffer[];
 }
 
@@ -142,6 +153,8 @@ export interface PublicBookingConfig extends PricingConfig {
   maxNights: number;
   bookingWindowMonths: number;
   maxSearchAdults: number;
+  /** True when a promo code can be valid (the DIRECT demo discount is off in every Beam mode). */
+  promoEnabled: boolean;
 }
 
 export interface CartItem {
@@ -178,6 +191,8 @@ export interface QuoteLine {
   nights: number;
   /** Per-night room price for this line incl. plan supplement. */
   nightly: NightRate[];
+  /** Extra-adult (occupancy) charge for the stay, included in roomSatang. */
+  occupancyExtraSatang: number;
   roomSatang: number;
   addons: QuoteAddonLine[];
   addonsSatang: number;
@@ -217,8 +232,10 @@ export interface ApiError {
   ok: false;
   error: BookingErrorCode;
   message: string;
-  /** Field-level problems for invalid_request. */
+  /** Field-level problems for invalid_request (guest-facing sentences). */
   issues?: string[];
+  /** invalid_request: the step where the guest can fix it ("addons" = an add-on no longer fits the stay). */
+  fixStep?: "addons";
 }
 
 export type BookingErrorCode =
@@ -259,6 +276,10 @@ export interface CheckoutRequest {
    * answer price_changed with the new quote.
    */
   expectedTotalSatang: number;
+  /** The amount due now (deposit) the guest was shown - what Beam will charge; compared like the total. */
+  expectedDueNowSatang: number;
+  /** Preview theme to keep across the Beam round trip (no PII; validated server-side). */
+  theme?: ThemeName;
 }
 
 export interface CheckoutSuccess {
@@ -284,6 +305,12 @@ export interface CheckoutFailure extends ApiError {
   quote?: Quote;
   /** Present for unavailable: slugs that can no longer be booked. */
   unavailableSlugs?: string[];
+  /**
+   * Present for unavailable: the subset of unavailableSlugs that is still free
+   * but can't be booked online for the cart's party size (Cloudbeds occupancy
+   * limits) - fewer guests may still work.
+   */
+  occupancySlugs?: string[];
 }
 
 export type CheckoutResponse = CheckoutSuccess | CheckoutFailure;
@@ -308,6 +335,8 @@ export interface BookingSummary {
   dueNowSatang: number;
   createdAt: string;
   linkExpiresAt: string;
+  /** Preview theme, so the return/cancel pages keep the look the guest chose. */
+  theme?: ThemeName;
 }
 
 /** GET /api/booking/status?t=token[&p=demoProof][&l=linkToken] */
@@ -345,4 +374,8 @@ export interface RoomInventory {
   remaining: number;
   /** One entry per night of the stay; empty when unavailable. */
   baseNightly: NightRate[];
+  /** Stay extra charge keyed by adult count (Cloudbeds adultsExtraCharge); absent = none. */
+  adultsExtraSatang?: Record<string, number>;
+  /** Cloudbeds' maxGuests for the room type; absent = use the site's rooms.ts figure. */
+  maxGuests?: number;
 }

@@ -12,7 +12,7 @@
 // days past the booking window are disabled; while choosing a check-out,
 // nights beyond maxNights are disabled. Keep DateRangePickerProps stable.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { RefObject } from "react";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { addDays, diffDays, formatDisplayDate, formatNights, parseIsoDate } from "@/lib/booking/dates";
@@ -76,6 +76,7 @@ function OpenDateRangePicker({ onClose, checkIn, checkOut, onChange, minDate, ma
   const [view, setView] = useState<MonthRef>(() => toMonth(startCheckIn ?? minDate));
   const [activeDate, setActiveDate] = useState<IsoDate>(startCheckIn ?? minDate);
   const [hover, setHover] = useState<IsoDate | null>(null);
+  const calendarWrapRef = useRef<HTMLDivElement>(null);
 
   const minMonth = toMonth(minDate);
   const maxMonth = toMonth(maxDate);
@@ -144,6 +145,11 @@ function OpenDateRangePicker({ onClose, checkIn, checkOut, onChange, minDate, ma
     setDraft({ checkIn: null, checkOut: null });
     setHover(null);
     if (!isMobile) onChange(null, null);
+    // "Clear dates" hides itself (nothing left to clear): put focus on the
+    // calendar's active day instead of letting it fall to <body>.
+    window.setTimeout(() => {
+      calendarWrapRef.current?.querySelector<HTMLElement>('button[data-date][tabindex="0"]')?.focus({ preventScroll: true });
+    }, 0);
   };
 
   const nights = draft.checkIn && draft.checkOut ? diffDays(draft.checkIn, draft.checkOut) : null;
@@ -154,7 +160,7 @@ function OpenDateRangePicker({ onClose, checkIn, checkOut, onChange, minDate, ma
       : `${formatDisplayDate(draft.checkIn)} - ${formatDisplayDate(draft.checkOut)}, ${formatNights(nights ?? 0)}`;
 
   const navButton =
-    "inline-flex h-10 w-10 items-center justify-center rounded-(--bk-radius-control) border border-(--bk-border-strong) bg-(--bk-surface) text-(--bk-text) transition-colors hover:border-(--bk-text) disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-(--bk-border-strong)";
+    "inline-flex items-center justify-center rounded-(--bk-radius-control) border border-(--bk-border-strong) bg-(--bk-surface) text-(--bk-text) transition-colors hover:border-(--bk-text) disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-(--bk-border-strong)";
 
   const calendar = (
     <RangeCalendar
@@ -172,6 +178,7 @@ function OpenDateRangePicker({ onClose, checkIn, checkOut, onChange, minDate, ma
       minDate={minDate}
       maxDate={maxDate}
       density={isMobile ? "compact" : "comfortable"}
+      struckBefore={draft.checkIn && !draft.checkOut ? draft.checkIn : null}
     />
   );
 
@@ -213,15 +220,15 @@ function OpenDateRangePicker({ onClose, checkIn, checkOut, onChange, minDate, ma
           </div>
         }
       >
-        <div className="mx-auto max-w-md pt-3">
+        <div ref={calendarWrapRef} className="mx-auto max-w-md pt-3">
           <div className="mb-4 flex items-center justify-between">
-            <button type="button" onClick={() => changeView(shift(view, -1))} disabled={!canPrev} aria-label="Previous month" className={navButton}>
+            <button type="button" onClick={() => changeView(shift(view, -1))} disabled={!canPrev} aria-label="Previous month" className={`${navButton} h-11 w-11`}>
               <ArrowLeft size={18} aria-hidden="true" />
             </button>
             <button type="button" onClick={clear} disabled={!draft.checkIn} className={`${BTN_LINK} text-sm disabled:opacity-0`}>
               Clear dates
             </button>
-            <button type="button" onClick={() => changeView(shift(view, 1))} disabled={!canNext} aria-label="Next month" className={navButton}>
+            <button type="button" onClick={() => changeView(shift(view, 1))} disabled={!canNext} aria-label="Next month" className={`${navButton} h-11 w-11`}>
               <ArrowRight size={18} aria-hidden="true" />
             </button>
           </div>
@@ -237,13 +244,13 @@ function OpenDateRangePicker({ onClose, checkIn, checkOut, onChange, minDate, ma
 
   return (
     <Popover open onClose={onClose} anchorRef={anchorRef} label="Select stay dates" align="start" className="w-max max-w-[calc(100vw-1rem)] p-5">
-      <div className="relative">
+      <div ref={calendarWrapRef} className="relative">
         <button
           type="button"
           onClick={() => changeView(shift(view, -1))}
           disabled={!canPrev}
           aria-label="Previous month"
-          className={`${navButton} absolute left-0 top-[-0.4rem] h-9 w-9`}
+          className={`${navButton} absolute left-0 top-[-0.4rem] h-9 w-9 before:absolute before:-inset-1`}
         >
           <ArrowLeft size={16} aria-hidden="true" />
         </button>
@@ -252,7 +259,7 @@ function OpenDateRangePicker({ onClose, checkIn, checkOut, onChange, minDate, ma
           onClick={() => changeView(shift(view, 1))}
           disabled={!canNext}
           aria-label="Next month"
-          className={`${navButton} absolute right-0 top-[-0.4rem] h-9 w-9`}
+          className={`${navButton} absolute right-0 top-[-0.4rem] h-9 w-9 before:absolute before:-inset-1`}
         >
           <ArrowRight size={16} aria-hidden="true" />
         </button>

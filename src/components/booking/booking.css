@@ -20,12 +20,16 @@
   --bk-surface-muted: #f2ede4;
   --bk-surface-sunken: #f2ede4;
   --bk-border: #e7e0d3;
-  --bk-border-strong: #cfc5b3;
+  --bk-border-strong: #cfc5b3; /* decorative outlines only (pills, dividers) */
+  /* Form field and stepper outlines: >= 3:1 against white and the sunken surface (WCAG 1.4.11). */
+  --bk-field-border: #8c8274;
 
   /* Text */
   --bk-text: #201c16;
   --bk-text-muted: #4a453c;
-  --bk-text-subtle: #7a7366;
+  --bk-text-subtle: #6b6458; /* >= 4.5:1 on white and on --bk-surface-sunken */
+  /* Inline text links on white cards (>= 4.5:1). */
+  --bk-link: #0e6b63;
 
   /* Accent (CTAs, selected states) */
   --bk-accent: #0e6b63;
@@ -34,6 +38,12 @@
   --bk-accent-soft: #e2efed;
   --bk-accent-soft-text: #0a4d47;
   --bk-range: #d3e7e4;
+  /* Calendar state outlines: >= 3:1 against the white popover (WCAG 1.4.11). */
+  --bk-day-selected-ring: #0a4d47;
+  --bk-day-today-ring: #0e6b63;
+  /* "View offers" footer bar on room cards */
+  --bk-offers-bar: #e2efed;
+  --bk-offers-bar-text: #0a4d47;
 
   /* Status */
   --bk-danger: #b42318;
@@ -85,10 +95,12 @@
   --bk-surface-sunken: #edf2f7;
   --bk-border: #e2e8f0;
   --bk-border-strong: #cbd5e0;
+  --bk-field-border: #7b8496; /* 3.8:1 on white, 3.3:1 on --bk-surface-sunken */
 
   --bk-text: #1e2330;
   --bk-text-muted: #4a5568;
-  --bk-text-subtle: #718096;
+  --bk-text-subtle: #5a6578; /* #718096 was 4.0:1 on white - too faint for small text */
+  --bk-link: #19725f; /* the #32c0a0 accent is only 2.3:1 on white - never use it for text */
 
   --bk-accent: #32c0a0;
   --bk-accent-hover: #2aa98c;
@@ -96,19 +108,24 @@
   --bk-accent-soft: #d5f4ec;
   --bk-accent-soft-text: #1e2330;
   --bk-range: #b6ecdf;
+  /* The teal fill (#32c0a0) is only 2.3:1 on white: selected days and "today" get a dark outline that carries the state. */
+  --bk-day-selected-ring: #1e2330;
+  --bk-day-today-ring: #1f8a72;
+  --bk-offers-bar: #6ed8c0; /* Cloudbeds' light-teal "View offers" bar */
+  --bk-offers-bar-text: #1e2330;
 
-  --bk-danger: #e53e3e;
+  --bk-danger: #c53030; /* 5.9:1 on white (#e53e3e was 4.1:1) */
   --bk-danger-soft: #fff5f5;
   --bk-warning: #975a16;
   --bk-warning-soft: #fefcbf;
-  --bk-success: #2f855a;
+  --bk-success: #276749; /* 6.5:1 on --bk-success-soft (#2f855a was 4.4:1) */
   --bk-success-soft: #f0fff4;
 
   --bk-banner-bg: #fefcbf;
   --bk-banner-text: #1e2330;
   --bk-banner-border: #f6e05e;
 
-  --bk-focus: #32c0a0;
+  --bk-focus: #1f8a72; /* darker teal: >= 3:1 against white cards (#32c0a0 was 2.3:1) */
   --bk-overlay: rgba(18, 35, 78, 0.6);
   --bk-shadow-card: 0 1px 3px rgba(18, 35, 78, 0.08), 0 0 0 1px #e2e8f0;
   --bk-shadow-pop: 0 12px 32px rgba(18, 35, 78, 0.22);
@@ -118,8 +135,10 @@
   --bk-radius-control: 0.5rem;
   --bk-radius-day: 0.25rem;
 
-  --bk-font-heading: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
-  --bk-font-price: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  /* Poppins, as on the live Cloudbeds engine (loaded by BookingThemeRoot, only fetched for this theme). */
+  --bk-font-body: var(--font-classic), var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  --bk-font-heading: var(--font-classic), var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  --bk-font-price: var(--font-classic), var(--font-sans), ui-sans-serif, system-ui, sans-serif;
   --bk-heading-weight: 600;
 }
 
@@ -153,11 +172,57 @@
   border: 0;
 }
 
+/*
+ * The simulated Beam checkout stands alone like Beam's real hosted page: no
+ * site header or footer (the WhatsApp button hides itself on that path), on a
+ * neutral payment-page background.
+ */
+body:has(.bk-hosted-page) > header,
+body:has(.bk-hosted-page) > footer {
+  display: none;
+}
+
+.booking-app.bk-hosted-page {
+  --bk-page-bg: #f1f2f4;
+}
+
+/*
+ * Keyboard focus must never land under the sticky site header or the fixed
+ * bottom bars (mobile cart bar + help strip, whose combined height
+ * bottomBars.ts publishes as --bk-fab-lift on <html>). Browsers honour
+ * scroll-padding when they scroll a newly focused element into view, so a
+ * field under the bars is scrolled clear instead of counting as "visible"
+ * (WCAG 2.4.11 Focus Not Obscured).
+ */
+html:has(.booking-app) {
+  scroll-padding-top: 6rem;
+  scroll-padding-bottom: calc(var(--bk-fab-lift, 0px) + 1rem);
+}
+
+/*
+ * Phones, search step: the hero's Search button sits where the site's
+ * floating WhatsApp button is; hide the button there (the help strip and the
+ * results steps still offer WhatsApp). BookingApp sets data-bk-step on <html>.
+ */
+@media (max-width: 767.98px) {
+  html[data-bk-step="search"] .bk-wa-fab {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  html:has(.booking-app) {
+    scroll-behavior: auto !important;
+  }
+
+  /* Stop looping spinners/shimmers outright: a 0.01ms infinite animation
+     would otherwise repaint at random phases and read as flicker. */
   .booking-app *,
   .booking-app *::before,
   .booking-app *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

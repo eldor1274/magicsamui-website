@@ -6,9 +6,12 @@
 // Tokens carry NO personal data (no name, email or phone) because they end up
 // in URLs. A "kind" field stops one token type being replayed as another.
 
-import { createHash, createHmac, randomInt, timingSafeEqual } from "node:crypto";
-import { compactDate } from "./dates.ts";
-import type { BookingSummary, DemoFailureCode, IsoDate } from "./types.ts";
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
+import { ADDONS, getCatalogueRoom, isAddonId, isRatePlanId } from "./catalogue.ts";
+import { MAX_CART_ITEMS, MAX_NIGHTS } from "./config.ts";
+import { compactDate, isIsoDate, nightsBetween } from "./dates.ts";
+import { BOOKING_REF_RE, isBookingRef } from "./ref.ts";
+import type { BookingSummary, DemoFailureCode, IsoDate, PaymentMode } from "./types.ts";
 
 export type TokenKind = "booking" | "demo-proof";
 
@@ -86,7 +89,67 @@ export function createBookingToken(
 }
 
 export function verifyBookingToken(token: unknown, secret: string, nowMs: number = Date.now()): Verified<BookingTokenPayload> {
-  return verifyPayload<BookingTokenPayload>(token, "booking", secret, nowMs);
+  const v = verifyPayload<BookingTokenPayload>(token, "booking", secret, nowMs);
+  if (!v.ok) return v;
+  const linkId = v.payload.paymentLinkId;
+  const linkIdOk = linkId === null || (typeof linkId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(linkId));
+  // A valid signature is not enough: whatever the payload says is rendered on
+  // our own domain, so it must also be a booking this code could have issued.
+  if (!linkIdOk || !isBookingSummary(v.payload.booking)) return { ok: false, reason: "malformed" };
+  return v;
+}
+
+/* ------------------------- payload validation ------------------------- */
+
+const PAYMENT_MODES: PaymentMode[] = ["demo", "beam-playground", "beam-live"];
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+const PROMO_CODE_RE = /^[A-Z0-9_-]{1,32}$/;
+/** Generous ceiling (100M THB) so no absurd amount is ever displayed as a real booking. */
+const MAX_SATANG = 10_000_000_000;
+
+function isSatang(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MAX_SATANG;
+}
+
+function isTimestamp(v: unknown): v is string {
+  return typeof v === "string" && ISO_TIMESTAMP_RE.test(v) && Number.isFinite(Date.parse(v));
+}
+
+/**
+ * Strict shape check of a token's booking facts: known refs, dates, rooms,
+ * plans, add-ons and sane integer amounts only. Anything else (a forged or
+ * stale token) is rejected before it can be rendered.
+ */
+export function isBookingSummary(v: unknown): v is BookingSummary {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const b = v as Record<string, unknown>;
+  if (!isBookingRef(b.ref)) return false;
+  if (!PAYMENT_MODES.includes(b.paymentMode as PaymentMode)) return false;
+  if (!isIsoDate(b.checkIn) || !isIsoDate(b.checkOut)) return false;
+  const nights = nightsBetween(b.checkIn, b.checkOut);
+  if (!Number.isInteger(nights) || nights < 1 || nights > MAX_NIGHTS || b.nights !== nights) return false;
+  if (!isTimestamp(b.createdAt) || !isTimestamp(b.linkExpiresAt)) return false;
+  if (!Array.isArray(b.items) || b.items.length < 1 || b.items.length > MAX_CART_ITEMS) return false;
+  for (const raw of b.items as unknown[]) {
+    if (typeof raw !== "object" || raw === null) return false;
+    const item = raw as Record<string, unknown>;
+    const room = typeof item.slug === "string" ? getCatalogueRoom(item.slug) : undefined;
+    if (!room || !room.bookable || !isRatePlanId(item.ratePlanId)) return false;
+    const adults = item.adults;
+    if (typeof adults !== "number" || !Number.isInteger(adults) || adults < 1 || adults > room.maxGuests) return false;
+    if (!Array.isArray(item.addonIds) || item.addonIds.length > 5) return false;
+    for (const a of item.addonIds as unknown[]) {
+      if (!isAddonId(a) || !ADDONS[a].ratePlans.includes(item.ratePlanId)) return false;
+    }
+  }
+  if (!Array.isArray(b.itemRoomSatang) || b.itemRoomSatang.length !== b.items.length || !b.itemRoomSatang.every(isSatang)) {
+    return false;
+  }
+  if (!isSatang(b.totalSatang) || !isSatang(b.cardFeeSatang) || !isSatang(b.dueNowSatang)) return false;
+  if (b.dueNowSatang > b.totalSatang || b.cardFeeSatang > b.totalSatang) return false;
+  if (!(b.promoCode === null || (typeof b.promoCode === "string" && PROMO_CODE_RE.test(b.promoCode)))) return false;
+  if (b.theme !== undefined && b.theme !== "magic" && b.theme !== "classic") return false;
+  return true;
 }
 
 export function createDemoProof(
@@ -103,13 +166,20 @@ export function createDemoProof(
 }
 
 export function verifyDemoProof(token: unknown, secret: string, nowMs: number = Date.now()): Verified<DemoProofPayload> {
-  return verifyPayload<DemoProofPayload>(token, "demo-proof", secret, nowMs);
+  const v = verifyPayload<DemoProofPayload>(token, "demo-proof", secret, nowMs);
+  if (!v.ok) return v;
+  const p = v.payload;
+  const shapeOk =
+    isBookingRef(p.ref) &&
+    (p.status === "paid" ? p.failureCode === null : p.status === "failed") &&
+    (p.failureCode === null || p.failureCode === "CH_CARD_DECLINED" || p.failureCode === "CH_INSUFFICIENT_FUNDS");
+  return shapeOk ? v : { ok: false, reason: "malformed" };
 }
 
 /* ---------------------------- references ---------------------------- */
 
 const REF_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
-export const BOOKING_REF_RE = /^MSV-\d{8}-[A-HJ-NP-Z2-9]{4}$/;
+export { BOOKING_REF_RE, isBookingRef };
 
 /** "MSV-20261005-7F3K": creation date (Bangkok) + 4 random characters. */
 export function generateBookingRef(today: IsoDate, pick: (max: number) => number = randomInt): string {
@@ -118,16 +188,19 @@ export function generateBookingRef(today: IsoDate, pick: (max: number) => number
   return `MSV-${compactDate(today)}-${suffix}`;
 }
 
-export function isBookingRef(v: unknown): v is string {
-  return typeof v === "string" && BOOKING_REF_RE.test(v);
+/** Random hex salt (server only). */
+export function generateNonce(): string {
+  return randomBytes(12).toString("hex");
 }
 
 /**
- * Stable idempotency key for one booking's Beam payment link, shaped as a
- * UUID v4 (Beam documents uuid v4; max 255 chars). Same ref + mode -> same key.
+ * Idempotency key for one booking attempt's Beam payment link, shaped as a
+ * UUID v4 (Beam documents uuid v4; max 255 chars). Same ref + mode + salt ->
+ * same key; checkout passes a random salt per attempt so two bookings whose
+ * short refs collide can never share a key.
  */
-export function idempotencyKeyFor(ref: string, mode: string): string {
-  const h = createHash("sha256").update(`beam-payment-link|${mode}|${ref}`).digest("hex");
+export function idempotencyKeyFor(ref: string, mode: string, salt = ""): string {
+  const h = createHash("sha256").update(`beam-payment-link|${mode}|${ref}|${salt}`).digest("hex");
   const variant = ((parseInt(h[16], 16) & 0x3) | 0x8).toString(16);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }

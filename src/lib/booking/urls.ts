@@ -3,6 +3,8 @@
 // turn our payment redirect/return URLs into an open redirect.
 
 import type { Env } from "./config.ts";
+import { isBookingRef } from "./ref.ts";
+import type { ThemeName } from "./types.ts";
 
 export const PREVIEW_PATH = "/booking-preview";
 export const RETURN_PATH = "/booking-preview/return";
@@ -11,7 +13,6 @@ export const DEMO_PAY_PATH = "/booking-preview/beam-demo";
 export const CANONICAL_ORIGIN = "https://magicsamui.com";
 const PRODUCTION_HOSTS = new Set(["magicsamui.com", "www.magicsamui.com"]);
 const LOCAL_HOSTS = new Set(["localhost:3000", "127.0.0.1:3000"]);
-const DEFAULT_VERCEL_PROJECT = "magicsamui-website";
 
 function normalizeHost(host: string | null | undefined): string {
   return (host ?? "").trim().toLowerCase().replace(/\.$/, "");
@@ -25,10 +26,15 @@ export function isAllowedHost(host: string, env: Env): boolean {
   // Local development only - never on a Vercel deployment.
   if (LOCAL_HOSTS.has(h)) return !env.VERCEL_ENV;
   if (!/^[a-z0-9-]+\.vercel\.app$/.test(h)) return false;
-  const exact = [env.VERCEL_URL, env.VERCEL_BRANCH_URL, env.VERCEL_PROJECT_PRODUCTION_URL].map(normalizeHost);
+  // Only this deployment's own URLs (set by Vercel at runtime). A bare
+  // "<project>-*" prefix is NOT enough: any Vercel account can name a project
+  // "magicsamui-website-pay" and own that subdomain.
+  const exact = [env.VERCEL_URL, env.VERCEL_BRANCH_URL, env.VERCEL_PROJECT_PRODUCTION_URL].map(normalizeHost).filter(Boolean);
   if (exact.includes(h)) return true;
-  const project = (env.BOOKING_VERCEL_PROJECT ?? DEFAULT_VERCEL_PROJECT).toLowerCase();
-  return h === `${project}.vercel.app` || h.startsWith(`${project}-`);
+  // Optional: other preview URLs of our team. Vercel ends them with
+  // "-<team-slug>.vercel.app", a suffix only our team's projects get.
+  const team = normalizeHost(env.BOOKING_VERCEL_TEAM_SLUG);
+  return /^[a-z0-9-]+$/.test(team) && h.endsWith(`-${team}.vercel.app`);
 }
 
 /** Origin (scheme + host) to build absolute URLs with. Falls back to the canonical site. */
@@ -38,24 +44,68 @@ export function resolveOrigin(host: string | null | undefined, env: Env): string
   return LOCAL_HOSTS.has(h) ? `http://${h}` : `https://${h}`;
 }
 
-export function returnUrl(origin: string, ref: string, token: string): string {
-  const q = new URLSearchParams({ ref, t: token });
+/** Adds ?theme=classic (the default "magic" theme needs no parameter). */
+function withTheme(q: URLSearchParams, theme: ThemeName | undefined): URLSearchParams {
+  if (theme === "classic") q.set("theme", "classic");
+  return q;
+}
+
+export function returnUrl(origin: string, ref: string, token: string, theme?: ThemeName): string {
+  const q = withTheme(new URLSearchParams({ ref, t: token }), theme);
   return `${origin}${RETURN_PATH}?${q.toString()}`;
 }
 
 /** Where Beam's Cancel button (and the demo page's Cancel) sends the guest. */
-export function cancelUrl(origin: string, ref: string, token: string): string {
-  const q = new URLSearchParams({ resume: "payment", ref, t: token });
+export function cancelUrl(origin: string, ref: string, token: string, theme?: ThemeName): string {
+  const q = withTheme(new URLSearchParams({ resume: "payment", ref, t: token }), theme);
   return `${origin}${PREVIEW_PATH}?${q.toString()}`;
 }
 
-export function demoPayUrl(origin: string, token: string): string {
-  const q = new URLSearchParams({ t: token });
+export function demoPayUrl(origin: string, token: string, theme?: ThemeName): string {
+  const q = withTheme(new URLSearchParams({ t: token }), theme);
   return `${origin}${DEMO_PAY_PATH}?${q.toString()}`;
 }
 
 /** Return URL after a successful simulated payment (adds the signed proof). */
-export function demoReturnUrl(origin: string, ref: string, token: string, proof: string): string {
-  const q = new URLSearchParams({ ref, t: token, p: proof });
+export function demoReturnUrl(origin: string, ref: string, token: string, proof: string, theme?: ThemeName): string {
+  const q = withTheme(new URLSearchParams({ ref, t: token, p: proof }), theme);
   return `${origin}${RETURN_PATH}?${q.toString()}`;
+}
+
+/** Query parameters a booking page may keep in the address bar after its one-shot cleanup. */
+const KEEP_PARAMS = new Set(["theme", "staff", "gclid", "gbraid", "wbraid"]);
+
+/**
+ * The address-bar query to keep once a booking page has read its parameters:
+ * an ALLOW-list (theme, the site's ?staff device flag, ad-click ids and utm_*),
+ * so tokens, refs and anything a payment provider appends never reach the
+ * analytics tags' page_location. Returns "" or "?a=b...".
+ */
+export function allowListedSearch(search: string): string {
+  const out = new URLSearchParams();
+  for (const [k, v] of new URLSearchParams(search)) {
+    if (KEEP_PARAMS.has(k) || k.startsWith("utm_")) out.append(k, v);
+  }
+  const q = out.toString();
+  return q ? `?${q}` : "";
+}
+
+/** "unverified": the return page couldn't confirm the payment either way. */
+export type ResumeReason = "cancelled" | "failed" | "expired" | "unverified";
+
+export function parseResumeReason(v: unknown): ResumeReason | null {
+  return v === "cancelled" || v === "failed" || v === "expired" || v === "unverified" ? v : null;
+}
+
+/**
+ * Same-origin path back to the payment step with the cart intact, used by the
+ * return page's "Try again" links. The reason picks the notice copy. The
+ * attempt's booking ref (when known) makes each recovery URL unique per
+ * attempt: the booking page ignores a landing URL it has already applied
+ * (Back/Forward replays), so two attempts must never share one URL.
+ */
+export function resumePaymentPath(reason: ResumeReason, theme?: ThemeName, ref?: string | null): string {
+  const q = new URLSearchParams({ resume: "payment", reason });
+  if (isBookingRef(ref)) q.set("ref", ref);
+  return `${PREVIEW_PATH}?${withTheme(q, theme).toString()}`;
 }

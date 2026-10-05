@@ -88,7 +88,7 @@ export default function PreviewBanner({ paymentMode, paymentStatus, dataSource, 
                 <a
                   key={t}
                   href={themeHref[t]}
-                  className="rounded-(--bk-radius-pill) px-3 py-1 font-medium text-(--bk-text-muted) transition-colors hover:text-(--bk-text)"
+                  className="relative rounded-(--bk-radius-pill) px-3 py-1 before:absolute before:inset-x-0 before:-inset-y-2.5 font-medium text-(--bk-text-muted) transition-colors hover:text-(--bk-text)"
                 >
                   {THEME_LABELS[t]}
                   <span className="bk-sr-only"> theme</span>
@@ -118,7 +118,8 @@ export default function PreviewBanner({ paymentMode, paymentStatus, dataSource, 
           {paymentStatus === "locked" && (
             <span className="inline-flex items-center gap-1.5 rounded-(--bk-radius-pill) bg-(--bk-danger-soft) px-2.5 py-1 font-medium text-(--bk-danger)">
               <Lock size={12} aria-hidden="true" />
-              Payments locked: the Beam settings are incomplete or not allowed here (see docs/booking-beam-preview.md).
+              Payments locked: a payment setting (Beam keys or BOOKING_TOKEN_SECRET) is missing or not allowed here - see
+              docs/booking-beam-preview.md.
             </span>
           )}
         </div>

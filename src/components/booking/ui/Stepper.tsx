@@ -25,7 +25,7 @@ export default function Stepper({ label, value, min, max, onChange, maxReachedLa
   const atMin = value <= min;
   const atMax = value >= max;
   const button =
-    "inline-flex h-9 w-9 items-center justify-center rounded-full text-(--bk-text) transition-colors hover:bg-(--bk-surface-sunken) aria-disabled:cursor-not-allowed aria-disabled:opacity-35 aria-disabled:hover:bg-transparent";
+    "inline-flex h-11 w-11 items-center justify-center rounded-full text-(--bk-text) transition-colors hover:bg-(--bk-surface-sunken) aria-disabled:cursor-not-allowed aria-disabled:opacity-35 aria-disabled:hover:bg-transparent";
 
   return (
     <div className="rounded-(--bk-radius-control) bg-(--bk-surface-sunken) px-4 py-3">
@@ -33,7 +33,7 @@ export default function Stepper({ label, value, min, max, onChange, maxReachedLa
         <span id={labelId} className="text-sm font-medium">
           {label}
         </span>
-        <div role="group" aria-labelledby={labelId} className="inline-flex items-center rounded-(--bk-radius-pill) border border-(--bk-border-strong) bg-(--bk-surface) p-0.5">
+        <div role="group" aria-labelledby={labelId} className="inline-flex items-center rounded-(--bk-radius-pill) border border-(--bk-field-border) bg-(--bk-surface) p-0.5">
           <button
             type="button"
             aria-label={`Decrease ${label}`}
@@ -64,7 +64,7 @@ export default function Stepper({ label, value, min, max, onChange, maxReachedLa
           </button>
         </div>
       </div>
-      {note && <p className="mt-2 text-right text-xs text-(--bk-text-subtle)">{note}</p>}
+      {note && <p className="mt-2 text-right text-xs text-(--bk-text-muted)">{note}</p>}
     </div>
   );
 }

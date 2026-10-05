@@ -30,15 +30,23 @@ async function request<T>(input: string, init?: RequestInit): Promise<T | ApiErr
   }
 }
 
-export function availabilityUrl(search: StaySearch): string {
+export function availabilityUrl(search: StaySearch, options: { fresh?: boolean } = {}): string {
   const q = new URLSearchParams({ checkin: search.checkIn, checkout: search.checkOut, adults: String(search.adults) });
   if (search.promo) q.set("promo", search.promo);
+  if (options.fresh) q.set("fresh", "1");
   return `/api/booking/availability?${q.toString()}`;
 }
 
-/** GET /api/booking/availability. Rejects only with AbortError when `signal` aborts. */
-export function fetchAvailability(search: StaySearch, signal?: AbortSignal): Promise<AvailabilityResponse | ApiError> {
-  return request<AvailabilityResponse>(availabilityUrl(search), { signal });
+/**
+ * GET /api/booking/availability. Rejects only with AbortError when `signal`
+ * aborts. `fresh` bypasses the server's short search cache (after a checkout conflict).
+ */
+export function fetchAvailability(
+  search: StaySearch,
+  signal?: AbortSignal,
+  options: { fresh?: boolean } = {},
+): Promise<AvailabilityResponse | ApiError> {
+  return request<AvailabilityResponse>(availabilityUrl(search, options), { signal });
 }
 
 export function postCheckout(body: CheckoutRequest): Promise<CheckoutResponse> {

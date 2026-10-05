@@ -16,7 +16,7 @@ import { HOUSE_POLICIES, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { formatNights, formatStayRange } from "@/lib/booking/dates";
 import type { AvailabilityResponse, CartItem, RatePlanId, RoomOffer } from "@/lib/booking/types";
 import type { AsyncStatus } from "../state";
-import { BTN_OUTLINE, BTN_PRIMARY } from "../ui/styles";
+import { BTN_OUTLINE, BTN_PRIMARY, TOUCH_TARGET } from "../ui/styles";
 import RoomOfferCard from "./RoomOfferCard";
 
 export interface ResultsListProps {
@@ -28,6 +28,11 @@ export interface ResultsListProps {
   searchAdults: number;
   /** Reason a slug can't be added next to the cart (shared physical unit), or null. */
   blockedReason: (slug: string) => string | null;
+  /**
+   * Most guests the occupancy picker may offer for a room (the offer's limit,
+   * lowered after the checkout refused a party size). Default: the offer's limit.
+   */
+  maxAdultsFor?: (slug: string, offerMax: number | undefined) => number;
   onAdd: (input: { slug: string; ratePlanId: RatePlanId; adults: number }) => void;
   onRetry: () => void;
   /** Opens the date picker / scrolls to the search bar. */
@@ -45,6 +50,7 @@ export default function ResultsList({
   cart,
   searchAdults,
   blockedReason,
+  maxAdultsFor,
   onAdd,
   onRetry,
   onChangeDates,
@@ -53,7 +59,7 @@ export default function ResultsList({
   const soldOutId = useId();
 
   if (!availability) {
-    if (status === "error") return <ErrorCard message={error} onRetry={onRetry} onChangeDates={onChangeDates} />;
+    if (status === "error") return <AvailabilityErrorCard message={error} onRetry={onRetry} onChangeDates={onChangeDates} />;
     return <LoadingList />;
   }
 
@@ -72,16 +78,19 @@ export default function ResultsList({
   const renderCard = (offer: RoomOffer) => {
     const room = getCatalogueRoom(offer.slug);
     if (!room) return null;
+    const maxAdults = maxAdultsFor ? maxAdultsFor(offer.slug, offer.maxAdults) : (offer.maxAdults ?? room.maxGuests);
     return (
       <li key={offer.slug}>
         <RoomOfferCard
           room={room}
           offer={offer}
           nights={nights}
-          defaultAdults={Math.max(1, Math.min(searchAdults, room.maxGuests))}
+          defaultAdults={Math.max(1, Math.min(searchAdults, maxAdults))}
+          maxAdults={maxAdults}
           inCart={cart.some((c) => c.slug === offer.slug)}
           blockedReason={blockedReason(offer.slug)}
           onAdd={(ratePlanId, adults) => onAdd({ slug: offer.slug, ratePlanId, adults })}
+          promo={availability.promo?.valid ? { code: availability.promo.code, pct: availability.promo.pct } : null}
           enquiryHref={
             offer.unavailableReason === "not-bookable"
               ? whatsappHref(
@@ -110,20 +119,23 @@ export default function ResultsList({
         <button
           type="button"
           onClick={onChangeDates}
-          className="rounded-sm text-sm font-medium underline decoration-1 underline-offset-4 hover:no-underline"
+          className={`${TOUCH_TARGET} rounded-sm text-sm font-medium underline decoration-1 underline-offset-4 hover:no-underline`}
         >
           Change search
         </button>
       </div>
 
-      {refreshing && (
-        <p role="status" className="flex items-center gap-2 px-1 text-sm text-(--bk-frame-text)">
-          <Loader2 size={16} className="animate-spin" aria-hidden="true" />
-          Updating availability and prices…
-        </p>
-      )}
+      {/* Always rendered with a fixed height, so the cards don't jump down and back up on every re-search. */}
+      <p role="status" className="flex h-5 items-center gap-2 px-1 text-sm text-(--bk-frame-text)">
+        {refreshing && (
+          <>
+            <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+            Updating availability and prices…
+          </>
+        )}
+      </p>
 
-      {status === "error" && <ErrorCard message={error} onRetry={onRetry} onChangeDates={onChangeDates} />}
+      {status === "error" && <AvailabilityErrorCard message={error} onRetry={onRetry} onChangeDates={onChangeDates} />}
 
       <div className={`space-y-4 transition-opacity ${refreshing ? "pointer-events-none opacity-60" : ""}`}>
         {noneFitsParty && (
@@ -133,7 +145,7 @@ export default function ResultsList({
               href={whatsappHref(`Hi, we're a group of ${search.adults} looking at ${stay}. Can you help?`)}
               target="_blank"
               rel="noopener noreferrer"
-              className="font-medium text-(--bk-accent) underline underline-offset-4"
+              className="font-medium text-(--bk-link) underline underline-offset-4"
             >
               message us on WhatsApp
             </a>{" "}
@@ -166,7 +178,7 @@ export default function ResultsList({
                 onClick={() => setShowSoldOut((v) => !v)}
                 aria-expanded={showSoldOut}
                 aria-controls={soldOutId}
-                className={`${BTN_PRIMARY} h-9 px-4 text-sm`}
+                className={`${BTN_PRIMARY} h-11 px-5 text-sm`}
               >
                 {showSoldOut ? "Hide more options" : "Show more options"}
                 <span className="bk-sr-only"> ({soldOut.length} sold out for these dates)</span>
@@ -230,7 +242,7 @@ function LoadingList() {
   );
 }
 
-function ErrorCard({ message, onRetry, onChangeDates }: { message: string | null; onRetry: () => void; onChangeDates: () => void }) {
+export function AvailabilityErrorCard({ message, onRetry, onChangeDates }: { message: string | null; onRetry: () => void; onChangeDates: () => void }) {
   return (
     <div role="alert" className="rounded-(--bk-radius-card) bg-(--bk-surface) p-5 text-(--bk-text) shadow-(--bk-shadow-card)">
       <div className="flex items-start gap-3">
@@ -239,11 +251,11 @@ function ErrorCard({ message, onRetry, onChangeDates }: { message: string | null
           <p className="font-semibold">We couldn&apos;t load availability</p>
           <p className="mt-1 text-sm text-(--bk-text-muted)">{message || "Something went wrong. Please try again."}</p>
           <div className="mt-4 flex flex-wrap gap-2">
-            <button type="button" onClick={onRetry} className={`${BTN_PRIMARY} h-10 text-sm`}>
+            <button type="button" onClick={onRetry} className={`${BTN_PRIMARY} h-11 text-sm`}>
               <RotateCcw size={16} aria-hidden="true" />
               Retry
             </button>
-            <button type="button" onClick={onChangeDates} className={`${BTN_OUTLINE} h-10 text-sm`}>
+            <button type="button" onClick={onChangeDates} className={`${BTN_OUTLINE} h-11 text-sm`}>
               Change dates
             </button>
           </div>

@@ -9,6 +9,7 @@
 // Guest details are personal data: they stay in the browser in this preview.
 // Keep GuestDetailsStepProps stable.
 
+import { useContext } from "react";
 import type { FormEvent } from "react";
 import { ArrowRight, Clock, Lock, Plane, ShieldCheck, Users } from "lucide-react";
 import { HOUSE_POLICIES } from "@/lib/booking/catalogue";
@@ -16,6 +17,8 @@ import { ARRIVAL_TIME_OPTIONS, GUEST_LIMITS, validateGuest } from "@/lib/booking
 import type { GuestDetails, GuestErrors, GuestField } from "@/lib/booking/guest";
 import CountrySelect from "./CountrySelect";
 import FieldShell, { FIELD_CONTROL_CLASS, describedBy } from "./FormField";
+import { revealAboveBars } from "../bottomBars";
+import { BookingContext } from "../state";
 import PhoneInput from "./PhoneInput";
 import { getCountry } from "./countries";
 
@@ -47,6 +50,9 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
     specialRequests: `${formId}-specialRequests`,
     agreedToPolicy: `${formId}-agreedToPolicy`,
   };
+  // Only a live booking sends a confirmation; the preview modes say what would happen.
+  const live = useContext(BookingContext)?.config.paymentMode === "beam-live";
+  const confirmationHint = live ? "Your booking confirmation is sent here." : "In live mode your booking confirmation is sent here.";
   const err = (field: GuestField): string | null => (showErrors ? (errors[field] ?? null) : null);
   // Code + number share one field and one message.
   const errorCount = showErrors ? Object.keys(errors).filter((k) => !(k === "dialCode" && errors.phone)).length : 0;
@@ -63,7 +69,11 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
     const first = FOCUS_ORDER.find((f) => current[f]);
     if (first) {
       // Wait a frame so the error text exists before the field is announced.
-      requestAnimationFrame(() => document.getElementById(ids[first])?.focus());
+      requestAnimationFrame(() => {
+        const el = document.getElementById(ids[first]);
+        el?.focus();
+        revealAboveBars(el);
+      });
     }
   }
 
@@ -77,9 +87,12 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
   }
 
   return (
+    // data-clarity-mask: names, email, phone and free-text requests are personal data; never rely on the
+    // Clarity dashboard's masking mode for them.
     <form
       id={formId}
       noValidate
+      data-clarity-mask="true"
       onSubmit={handleSubmit}
       aria-describedby={`${formId}-required-note`}
       className="space-y-6 rounded-(--bk-radius-card) bg-(--bk-surface) p-4 shadow-(--bk-shadow-card) sm:p-6"
@@ -156,7 +169,7 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
           />
         </FieldShell>
 
-        <FieldShell id={ids.email} label="Email" required error={err("email")} hint="Your booking confirmation is sent here.">
+        <FieldShell id={ids.email} label="Email" required error={err("email")} hint={confirmationHint}>
           <input
             id={ids.email}
             name="email"

@@ -3,7 +3,7 @@
 // OWNER: ui-search-results
 // Reservation Summary (Cloudbeds card): dates and a "N Nights" chip; empty
 // state; one line per cart item (room, plan, guests, add-ons, price, remove);
-// Subtotal, add-ons, promo discount, the card processing fee with a visible
+// Subtotal, add-ons, promo discount, the payment processing fee with a visible
 // explanation (Cloudbeds hides this fee in a tooltip the site suppresses - we
 // show it), Total "THB x", Due now; the step CTA; "Secure payment by Beam".
 // quote.lines[i] corresponds to cart[i]. "sidebar" is the sticky desktop
@@ -16,11 +16,13 @@ import { FREE_PICKUP_MIN_NIGHTS, getCatalogueRoom } from "@/lib/booking/catalogu
 import { formatDisplayDate, formatNights, nightsBetween } from "@/lib/booking/dates";
 import { formatThb, formatThbWithCode } from "@/lib/booking/format";
 import type { CartItem, IsoDate, Quote } from "@/lib/booking/types";
-import { CHIP } from "../ui/styles";
+import { CHIP, TOUCH_TARGET } from "../ui/styles";
 import SummaryCtaButton from "./SummaryCtaButton";
 
 export interface SummaryCta {
   label: string;
+  /** Shorter label for the narrow mobile bar (e.g. "Pay now"; the bar then shows the amount due now next to it). */
+  barLabel?: string;
   /** Click handler (ignored when submitForm is set). */
   onClick?: () => void;
   /** Render as <button type="submit" form={submitForm}> (guest step). */
@@ -72,6 +74,27 @@ export default function ReservationSummary({
     >
       {text}
     </span>
+  );
+
+  /** Total / Due now / balance. In the sidebar these sit in the pinned footer with the CTA,
+      so the total stays visible however many rooms scroll above it. */
+  const totalRows = quote && (
+    <>
+      <div className="flex items-baseline justify-between gap-3 border-t border-(--bk-border) pt-3">
+        <dt className="text-base font-semibold">Total</dt>
+        <dd>{amount(formatThbWithCode(quote.totalSatang), "text-lg font-semibold sm:text-xl")}</dd>
+      </div>
+      <div className="flex justify-between gap-3 border-t border-(--bk-border) pt-3 font-semibold">
+        <dt>Due now{quote.depositPct < 100 ? ` (${quote.depositPct}% deposit)` : ""}</dt>
+        <dd>{amount(formatThb(quote.dueNowSatang))}</dd>
+      </div>
+      {quote.balanceSatang > 0 && (
+        <div className="flex justify-between gap-3 text-(--bk-text-muted)">
+          <dt>Balance due later</dt>
+          <dd>{amount(formatThb(quote.balanceSatang))}</dd>
+        </div>
+      )}
+    </>
   );
 
   return (
@@ -157,7 +180,7 @@ export default function ReservationSummary({
                         type="button"
                         onClick={() => onRemove(item.id)}
                         aria-label={`Remove ${name}`}
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-(--bk-radius-control) border border-(--bk-danger) text-(--bk-danger) transition-colors hover:bg-(--bk-danger-soft)"
+                        className="inline-flex h-11 w-11 items-center justify-center rounded-(--bk-radius-control) border border-(--bk-danger) text-(--bk-danger) transition-colors hover:bg-(--bk-danger-soft) lg:h-9 lg:w-9"
                       >
                         <Trash2 size={15} aria-hidden="true" />
                       </button>
@@ -184,7 +207,7 @@ export default function ReservationSummary({
               {quote.promo && (
                 <div className="flex justify-between gap-3 text-(--bk-success)">
                   <dt>
-                    {quote.promo.code} <span className="text-xs">({quote.promo.pct}% off rooms)</span>
+                    {quote.promo.label}
                   </dt>
                   <dd>{amount(formatThb(-quote.promo.discountSatang))}</dd>
                 </div>
@@ -192,14 +215,14 @@ export default function ReservationSummary({
               <div>
                 <div className="flex items-center justify-between gap-3">
                   <dt className="flex items-center gap-1">
-                    Card processing fee ({quote.cardFeePct}%)
+                    Payment processing fee ({quote.cardFeePct}%)
                     <button
                       type="button"
                       onClick={() => setFeeInfoOpen((v) => !v)}
                       aria-expanded={feeInfoOpen}
                       aria-controls={feeInfoId}
-                      aria-label="What is the card processing fee?"
-                      className="inline-flex h-6 w-6 items-center justify-center rounded-full text-(--bk-text-muted) hover:bg-(--bk-surface-sunken) hover:text-(--bk-text)"
+                      aria-label="What is the payment processing fee?"
+                      className={`${TOUCH_TARGET} inline-flex h-6 w-6 items-center justify-center rounded-full text-(--bk-text-muted) hover:bg-(--bk-surface-sunken) hover:text-(--bk-text)`}
                     >
                       <Info size={15} aria-hidden="true" />
                     </button>
@@ -211,24 +234,11 @@ export default function ReservationSummary({
                   hidden={!feeInfoOpen}
                   className="mt-1.5 rounded-(--bk-radius-control) bg-(--bk-surface-sunken) px-3 py-2 text-xs leading-relaxed text-(--bk-text-muted)"
                 >
-                  A {quote.cardFeePct}% fee covers the cost of taking your payment securely through Beam (cards and PromptPay). It is
-                  already included in the total below - there are no other charges at checkout.
+                  A {quote.cardFeePct}% fee covers the cost of taking your payment securely through Beam, whether you pay by card or
+                  PromptPay. It is already included in the total below - there are no other charges at checkout.
                 </p>
               </div>
-              <div className="flex items-baseline justify-between gap-3 border-t border-(--bk-border) pt-3">
-                <dt className="text-base font-semibold">Total</dt>
-                <dd>{amount(formatThbWithCode(quote.totalSatang), "text-lg font-semibold sm:text-xl")}</dd>
-              </div>
-              <div className="flex justify-between gap-3 border-t border-(--bk-border) pt-3 font-semibold">
-                <dt>Due now{quote.depositPct < 100 ? ` (${quote.depositPct}% deposit)` : ""}</dt>
-                <dd>{amount(formatThb(quote.dueNowSatang))}</dd>
-              </div>
-              {quote.balanceSatang > 0 && (
-                <div className="flex justify-between gap-3 text-(--bk-text-muted)">
-                  <dt>Balance due later</dt>
-                  <dd>{amount(formatThb(quote.balanceSatang))}</dd>
-                </div>
-              )}
+              {!sidebar && totalRows}
             </dl>
           ) : (
             <p className="mt-3 text-center text-sm text-(--bk-text-muted)">{loading ? "Updating prices…" : "Prices will appear in a moment."}</p>
@@ -241,15 +251,17 @@ export default function ReservationSummary({
             </p>
           )}
 
-          {/* In the sidebar the CTA sticks to the bottom of the (height-capped, scrollable) sticky
-              column, so it stays visible on short screens and with several rooms in the cart. */}
+          {/* In the sidebar the totals and CTA stick to the bottom of the (height-capped, scrollable)
+              sticky column, so Total, Due now and the button stay visible on short screens and with
+              several rooms in the cart; only the line items and breakdown scroll above them. */}
           <div
             className={
               sidebar
-                ? "sticky bottom-0 -mx-5 -mb-5 mt-1 rounded-b-(--bk-radius-card) bg-(--bk-surface) px-5 pb-5 pt-3"
+                ? "sticky bottom-0 -mx-5 -mb-5 mt-1 rounded-b-(--bk-radius-card) bg-(--bk-surface) px-5 pb-5 pt-1 shadow-[0_-8px_12px_-12px_rgb(0_0_0/0.25)]"
                 : "mt-1 pt-3"
             }
           >
+            {sidebar && totalRows && <dl className="mb-4 space-y-2 text-sm">{totalRows}</dl>}
             {cta && <SummaryCtaButton cta={cta} className="h-12 w-full text-base" />}
 
             <p className="mt-3 flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1 text-xs text-(--bk-text-muted)">
@@ -259,7 +271,7 @@ export default function ReservationSummary({
                 type="button"
                 onClick={onLearnMore}
                 aria-haspopup="dialog"
-                className="font-medium text-(--bk-text) underline decoration-1 underline-offset-4 hover:text-(--bk-accent)"
+                className={`${TOUCH_TARGET} font-medium text-(--bk-text) underline decoration-1 underline-offset-4 hover:text-(--bk-accent)`}
               >
                 Learn more
               </button>

@@ -146,6 +146,27 @@ test("promo codes: DIRECT any case, unknown codes get a friendly error", () => {
   assert.equal(bad?.valid, false);
   assert.equal(resolvePromo("", 10), null);
   assert.equal(resolvePromo("DIRECT", 0)?.valid, false);
+  // Only the demo (promo switched on) hints at DIRECT; otherwise the message stays neutral.
+  assert.match(bad && !bad.valid ? bad.message : "", /Try DIRECT/);
+  const off = resolvePromo("SUMMER", 0);
+  assert.equal(off && !off.valid && off.message.includes("DIRECT"), false);
+});
+
+test("occupancy extras are added per stay at the booked party size", () => {
+  const nightly = [{ date: "2026-11-11", amountSatang: 900_000 }, { date: "2026-11-12", amountSatang: 900_000 }];
+  const extra = { "3": 150_000, "4": 300_000 };
+  const [standard, breakfast] = buildRateOffers(nightly, 3, extra);
+  assert.equal(standard.totalSatang, 1_800_000 + 150_000);
+  assert.equal(rateTotalForAdults(standard, 2), 1_800_000);
+  assert.equal(rateTotalForAdults(standard, 4), 2_100_000);
+  assert.equal(rateTotalForAdults(breakfast, 4), 2_100_000 + 100_000 * 4 * 2);
+  const offer = { slug: "seaview-2br", available: true, unavailableReason: null, remaining: 1, fitsParty: true, rates: [standard, breakfast] };
+  const q = computeQuote(
+    { checkIn: "2026-11-11", checkOut: "2026-11-13", items: [{ slug: "seaview-2br", ratePlanId: "standard", adults: 4, addonIds: [] }], promo: null, pricing: { cardFeePct: 0, depositPct: 100 } },
+    [offer],
+  );
+  assert.equal(q.lines[0].occupancyExtraSatang, 300_000);
+  assert.equal(q.lines[0].roomSatang, 2_100_000);
 });
 
 test("money formatting from integers", () => {

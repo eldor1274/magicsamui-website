@@ -76,8 +76,10 @@ export default function PhoneInput({
 
   return (
     <div className="flex items-stretch">
+      {/* min-h-11: a 44px target for the (invisible) select. The select itself can't show a focus
+          outline (opacity-0), so the code chip draws one while the select has keyboard focus. */}
       <div
-        className={`relative flex shrink-0 items-center gap-1 border-r pb-2 pl-3 pr-2 pt-0.5 text-base ${
+        className={`relative flex min-h-11 shrink-0 items-center gap-1 rounded-sm border-r pb-2 pl-3 pr-2 pt-0.5 text-base has-[select:focus-visible]:outline-2 has-[select:focus-visible]:-outline-offset-2 has-[select:focus-visible]:outline-(--bk-focus) ${
           dialInvalid ? "border-(--bk-danger) text-(--bk-danger)" : "border-(--bk-border) text-(--bk-text)"
         }`}
       >
@@ -96,6 +98,8 @@ export default function PhoneInput({
           id={dialId}
           aria-label="Country calling code"
           aria-invalid={dialInvalid || undefined}
+          // Shares the phone field's error/hint, so it is read when the dial code gets focus after a failed submit.
+          aria-describedby={describedBy}
           aria-required={required || undefined}
           autoComplete="tel-country-code"
           value={shown?.code ?? ""}

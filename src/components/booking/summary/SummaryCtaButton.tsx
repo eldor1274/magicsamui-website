@@ -9,8 +9,19 @@ import { Loader2 } from "lucide-react";
 import { BTN_PRIMARY } from "../ui/styles";
 import type { SummaryCta } from "./ReservationSummary";
 
-export default function SummaryCtaButton({ cta, className = "" }: { cta: SummaryCta; className?: string }) {
-  const blocked = Boolean(cta.disabled || cta.busy);
+export default function SummaryCtaButton({
+  cta,
+  className = "",
+  ariaLabel,
+}: {
+  cta: SummaryCta;
+  className?: string;
+  /** Fuller accessible name when the visible label is shortened (must contain the visible text). */
+  ariaLabel?: string;
+}) {
+  // Busy keeps the button focusable (aria-disabled + early return) so keyboard focus isn't dropped;
+  // only a real "can't do this" state uses the disabled attribute.
+  const busy = Boolean(cta.busy);
   return (
     <button
       // A fresh element when the mode flips: the add-ons "Continue" click re-renders this as the guest
@@ -18,9 +29,19 @@ export default function SummaryCtaButton({ cta, className = "" }: { cta: Summary
       key={cta.submitForm ? `submit:${cta.submitForm}` : "action"}
       type={cta.submitForm ? "submit" : "button"}
       form={cta.submitForm}
-      onClick={cta.submitForm ? undefined : cta.onClick}
-      disabled={blocked}
-      aria-busy={cta.busy || undefined}
+      onClick={
+        cta.submitForm
+          ? (e) => {
+              if (busy) e.preventDefault();
+            }
+          : () => {
+              if (!busy) cta.onClick?.();
+            }
+      }
+      disabled={Boolean(cta.disabled)}
+      aria-disabled={busy || undefined}
+      aria-busy={busy || undefined}
+      aria-label={ariaLabel}
       data-summary-cta=""
       className={`${BTN_PRIMARY} ${className}`}
     >

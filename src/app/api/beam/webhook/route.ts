@@ -1,5 +1,5 @@
 import { verifyBeamSignature } from "@/lib/booking/beam";
-import { logEvent } from "@/lib/booking/routeUtils";
+import { logEvent, readCapped } from "@/lib/booking/routeUtils";
 
 // Beam webhook receiver (preview). Verifies X-Beam-Signature over the EXACT
 // raw body (HMAC-SHA256, key = base64-decoded BEAM_WEBHOOK_HMAC_KEY), answers
@@ -20,8 +20,9 @@ export async function POST(request: Request) {
     logEvent("beam_webhook_unconfigured");
     return new Response("webhook not configured", { status: 503 });
   }
-  const raw = new Uint8Array(await request.arrayBuffer());
-  if (raw.byteLength > MAX_BODY_BYTES) return new Response("payload too large", { status: 413 });
+  // Capped read: an oversized body is refused without buffering it.
+  const raw = await readCapped(request, MAX_BODY_BYTES);
+  if (raw === null) return new Response("payload too large", { status: 413 });
   if (!verifyBeamSignature(raw, request.headers.get("x-beam-signature"), key)) {
     logEvent("beam_webhook_bad_signature");
     return new Response("invalid signature", { status: 401 });

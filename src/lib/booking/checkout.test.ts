@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildOffers, getInventory } from "./availability.ts";
+import { buildOffers, getCartInventory, getInventory, InventoryUnavailableError } from "./availability.ts";
 import { runCheckout } from "./checkout.ts";
-import { BEAM_PLAYGROUND_BASE, getBookingConfig } from "./config.ts";
+import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, getBookingConfig } from "./config.ts";
 import { addDays } from "./dates.ts";
 import { runDemoPay } from "./demoPay.ts";
 import { demoInventory } from "./demoProvider.ts";
@@ -12,6 +12,7 @@ import { verifyBookingToken } from "./token.ts";
 import type { CartItemInput, CheckoutRequest, RoomOffer } from "./types.ts";
 import { parseCheckoutRequest, parseSearch } from "./validate.ts";
 
+const TEST_SECRET = "test-only-7f3K9qLm2xVw8RtY4pZn6bHc1dJe5gUa";
 const NOW = Date.parse("2026-10-05T03:00:00Z"); // 10:00 in Bangkok
 const ORIGIN = "https://magicsamui.com";
 const demoConfig = getBookingConfig({});
@@ -32,7 +33,7 @@ function requestFor(slug: string, items?: CartItemInput[]): CheckoutRequest {
   const { checkIn, checkOut, offers } = findStay(slug);
   const cart = items ?? [{ slug, ratePlanId: "standard", adults: 2, addonIds: [] }];
   const quote = computeQuote({ checkIn, checkOut, items: cart, promo: null, pricing: { cardFeePct: demoConfig.cardFeePct, depositPct: demoConfig.depositPct } }, offers);
-  return { checkIn, checkOut, items: cart, expectedTotalSatang: quote.totalSatang };
+  return { checkIn, checkOut, items: cart, expectedTotalSatang: quote.totalSatang, expectedDueNowSatang: quote.dueNowSatang };
 }
 
 test("demo checkout re-quotes on the server and returns the simulated Beam page", async () => {
@@ -67,7 +68,7 @@ test("client-sent prices are ignored: a different expected total -> price_change
 });
 
 test("validation: occupancy, bookable slugs, unit conflicts, add-on rules, dates", () => {
-  const base = { checkIn: "2026-11-11", checkOut: "2026-11-14", expectedTotalSatang: 0 };
+  const base = { checkIn: "2026-11-11", checkOut: "2026-11-14", expectedTotalSatang: 0, expectedDueNowSatang: 0 };
   const bad = (items: unknown[]) => parseCheckoutRequest({ ...base, items }, LIMITS).ok;
   assert.equal(bad([{ slug: "garden-suite", ratePlanId: "standard", adults: 3, addonIds: [] }]), false);
   assert.equal(bad([{ slug: "garden-suite", ratePlanId: "standard", adults: 0, addonIds: [] }]), false);
@@ -84,7 +85,7 @@ test("validation: occupancy, bookable slugs, unit conflicts, add-on rules, dates
   assert.equal(bad([{ slug: "garden-suite", ratePlanId: "breakfast", adults: 2, addonIds: ["breakfast-pp"] }]), false);
   assert.equal(bad([{ slug: "garden-suite", ratePlanId: "standard", adults: 2, addonIds: ["breakfast-pp"] }]), true); // Wed-Fri
   const weekendOnly = parseCheckoutRequest(
-    { checkIn: "2026-11-07", checkOut: "2026-11-09", expectedTotalSatang: 0, items: [{ slug: "garden-suite", ratePlanId: "standard", adults: 2, addonIds: ["breakfast-pp"] }] },
+    { checkIn: "2026-11-07", checkOut: "2026-11-09", expectedTotalSatang: 0, expectedDueNowSatang: 0, items: [{ slug: "garden-suite", ratePlanId: "standard", adults: 2, addonIds: ["breakfast-pp"] }] },
     LIMITS,
   );
   assert.equal(weekendOnly.ok, false);
@@ -109,7 +110,7 @@ test("sold-out rooms are refused at checkout", async () => {
     if (!buildOffers(demoInventory(d, addDays(d, 3)), 2).find((o) => o.slug === "honeymoon-suite")?.available) checkIn = d;
   }
   const res = await runCheckout(
-    { checkIn, checkOut: addDays(checkIn, 3), items: [{ slug: "honeymoon-suite", ratePlanId: "standard", adults: 2, addonIds: [] }], expectedTotalSatang: 1 },
+    { checkIn, checkOut: addDays(checkIn, 3), items: [{ slug: "honeymoon-suite", ratePlanId: "standard", adults: 2, addonIds: [] }], expectedTotalSatang: 1, expectedDueNowSatang: 1 },
     { config: demoConfig, origin: ORIGIN, nowMs: NOW },
   );
   assert.equal(res.status, 409);
@@ -156,12 +157,12 @@ test("demo pay never accepts card data and is 404 outside demo mode", async () =
   const t = new URL(res.body.redirectUrl).searchParams.get("t") as string;
   const withCard = runDemoPay({ t, outcome: "paid", cardNumber: "4111111111111111" }, { config: demoConfig, origin: ORIGIN, nowMs: NOW });
   assert.equal(withCard.status, 400);
-  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k", BOOKING_TOKEN_SECRET: "s".repeat(40) });
+  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k", BOOKING_TOKEN_SECRET: TEST_SECRET });
   assert.equal(runDemoPay({ t, outcome: "paid" }, { config: pg, origin: ORIGIN, nowMs: NOW }).status, 404);
 });
 
 test("beam-playground checkout creates a payment link from the server quote", async () => {
-  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m1", BEAM_API_KEY: "k1", BOOKING_TOKEN_SECRET: "s".repeat(40) });
+  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m1", BEAM_API_KEY: "k1", BOOKING_TOKEN_SECRET: TEST_SECRET });
   const req = requestFor("sunrise-suite");
   let sent: Record<string, unknown> | null = null;
   let headers: Record<string, string> = {};
@@ -200,8 +201,62 @@ test("beam-playground checkout creates a payment link from the server quote", as
   assert.equal(st2.body.ok && st2.body.status, "failed");
 });
 
+test("status: no terminal 'expired' without Beam's own link status; a paid charge on a closed link wins", async () => {
+  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m1", BEAM_API_KEY: "k1", BOOKING_TOKEN_SECRET: TEST_SECRET });
+  const req = requestFor("sunrise-suite");
+  let sent: { redirectUrl: string } | null = null;
+  const create = (async (_url: string, init: RequestInit) => {
+    sent = JSON.parse(String(init.body)) as { redirectUrl: string };
+    return new Response(JSON.stringify({ id: "pl_9", url: "https://playground-pay.beamcheckout.com/m1/pl_9" }), { status: 201 });
+  }) as unknown as typeof fetch;
+  const res = await runCheckout(req, { config: pg, origin: ORIGIN, nowMs: NOW, fetchImpl: create });
+  if (!res.body.ok || !sent) throw new Error("checkout failed");
+  const t = new URL((sent as { redirectUrl: string }).redirectUrl).searchParams.get("t");
+  const ref = res.body.ref;
+  const linkToken = res.body.linkToken;
+  const afterExpiry = NOW + 30 * 60_000 + 1000;
+
+  // Server render of the return page (no link id): the charges list is empty
+  // (not listed yet, or no referenceId on the charge) -> still pending.
+  const asked: string[] = [];
+  const nothing = (async (url: string) => {
+    asked.push(url);
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const fallback = await runStatus({ t, p: null, l: null }, { config: pg, nowMs: afterExpiry, fetchImpl: nothing });
+  assert.equal(fallback.body.ok && fallback.body.status, "pending");
+  assert.match(asked[0], /referenceId=MSV-/);
+
+  // With the link id: Beam says EXPIRED, but a charge on this link succeeded -> paid (looked up by sourceId).
+  const due = req.expectedDueNowSatang;
+  const lookedUp: string[] = [];
+  const closedButPaid = (async (url: string) => {
+    lookedUp.push(url);
+    if (url.includes("/payment-links/")) {
+      return new Response(JSON.stringify({ paymentLinkId: "pl_9", status: "EXPIRED", order: { netAmount: due, currency: "THB", referenceId: ref } }), {
+        status: 200,
+      });
+    }
+    return new Response(
+      JSON.stringify({ data: [{ chargeId: "ch_1", status: "SUCCEEDED", amount: due, currency: "THB", source: "PAYMENT_LINK", sourceId: "pl_9" }] }),
+      { status: 200 },
+    );
+  }) as unknown as typeof fetch;
+  const paid = await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: closedButPaid });
+  assert.equal(paid.body.ok && paid.body.status, "paid");
+  assert.ok(lookedUp.some((u) => u.includes("sourceId=pl_9")));
+
+  // EXPIRED and no successful charge on the link -> expired.
+  const closed = (async (url: string) =>
+    url.includes("/payment-links/")
+      ? new Response(JSON.stringify({ paymentLinkId: "pl_9", status: "EXPIRED", order: { netAmount: due, currency: "THB", referenceId: ref } }), { status: 200 })
+      : new Response(JSON.stringify({ data: [{ chargeId: "ch_2", status: "FAILED", amount: due, currency: "THB" }] }), { status: 200 })) as unknown as typeof fetch;
+  const expired = await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: closed });
+  assert.equal(expired.body.ok && expired.body.status, "expired");
+});
+
 test("Beam outage -> 502 upstream_error, nothing charged", async () => {
-  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m1", BEAM_API_KEY: "k1", BOOKING_TOKEN_SECRET: "s".repeat(40) });
+  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m1", BEAM_API_KEY: "k1", BOOKING_TOKEN_SECRET: TEST_SECRET });
   const down = (async () => {
     throw new TypeError("fetch failed");
   }) as unknown as typeof fetch;
@@ -222,4 +277,235 @@ test("Cloudbeds failure falls back to demo data and says so", async () => {
   assert.equal(result.dataSource, "demo-fallback");
   assert.equal(reported, true);
   assert.deepEqual(result.inventory, demoInventory("2026-11-11", "2026-11-14"));
+});
+
+test("Cloudbeds failure in a Beam mode never falls back and never reaches Beam", async () => {
+  const pg = getBookingConfig({
+    BEAM_API_BASE: BEAM_PLAYGROUND_BASE,
+    BEAM_MERCHANT_ID: "m1",
+    BEAM_API_KEY: "k1",
+    BOOKING_TOKEN_SECRET: TEST_SECRET,
+    CLOUDBEDS_API_KEY: "cbat_x",
+  });
+  const calls: string[] = [];
+  const fetchImpl = (async (url: string) => {
+    calls.push(url);
+    if (url.includes("beamcheckout")) {
+      return new Response(JSON.stringify({ id: "pl_1", url: "https://playground-pay.beamcheckout.com/m1/pl_1" }), { status: 201 });
+    }
+    return new Response("down", { status: 500 });
+  }) as unknown as typeof fetch;
+  const logs: string[] = [];
+  const res = await runCheckout(requestFor("garden-suite"), { config: pg, origin: ORIGIN, nowMs: NOW, fetchImpl, log: (m) => logs.push(m) });
+  assert.equal(res.status, 503);
+  if (!res.body.ok) assert.equal(res.body.error, "payment_unavailable");
+  assert.equal(calls.some((u) => u.includes("beamcheckout")), false, "Beam must not be called");
+  assert.ok(calls.every((u) => u.startsWith("https://api.cloudbeds.com/")));
+  assert.ok(logs.includes("checkout_refused_cloudbeds_down"));
+
+  await assert.rejects(
+    getInventory("2026-11-11", "2026-11-14", pg, { fetchImpl, allowDemoFallback: false }),
+    InventoryUnavailableError,
+  );
+});
+
+test("beam-live refuses simulated inventory at checkout (defence in depth)", async () => {
+  const live = getBookingConfig(
+    {
+      BEAM_API_BASE: BEAM_LIVE_BASE,
+      BEAM_MERCHANT_ID: "m1",
+      BEAM_API_KEY: "k1",
+      BOOKING_TOKEN_SECRET: TEST_SECRET,
+      BOOKING_ALLOW_LIVE_PAYMENTS: "true",
+      VERCEL_ENV: "production",
+      CLOUDBEDS_API_KEY: "cbat_x",
+    },
+    { liveFulfilmentReady: true },
+  );
+  // A config whose data source drifted to demo must still be refused before any call.
+  const drifted = { ...live, dataSource: "demo" as const, cloudbeds: null };
+  let called = false;
+  const fetchImpl = (async () => {
+    called = true;
+    return new Response("{}", { status: 201 });
+  }) as unknown as typeof fetch;
+  const res = await runCheckout(requestFor("garden-suite"), { config: drifted, origin: ORIGIN, nowMs: NOW, fetchImpl });
+  assert.equal(res.status, 503);
+  assert.equal(called, false);
+});
+
+test("checkout asks Cloudbeds once per party size and prices each room at its occupancy", async () => {
+  const cfg = getBookingConfig({ CLOUDBEDS_API_KEY: "cbat_x" });
+  const asked: string[] = [];
+  const nights = ["2026-11-11", "2026-11-12", "2026-11-13"];
+  const fetchImpl = (async (url: string) => {
+    const adults = new URL(url).searchParams.get("adults") ?? "";
+    asked.push(adults);
+    return new Response(
+      JSON.stringify({
+        success: true,
+        data: [
+          {
+            propertyCurrency: [{ currencyCode: "THB" }],
+            propertyRooms: [
+              { roomTypeID: "462960", roomsAvailable: 1, adultsIncluded: 2, adultsExtraCharge: [], roomRateDetailed: nights.map((date) => ({ date, rate: 5000 })) },
+              {
+                roomTypeID: "462964",
+                roomsAvailable: 1,
+                adultsIncluded: 2,
+                adultsExtraCharge: { "3": 1500, "4": 3000 },
+                roomRateDetailed: nights.map((date) => ({ date, rate: 9000 })),
+              },
+            ],
+          },
+        ],
+      }),
+      { status: 200 },
+    );
+  }) as unknown as typeof fetch;
+  const items: CartItemInput[] = [
+    { slug: "sunrise-suite", ratePlanId: "standard", adults: 2, addonIds: [] },
+    { slug: "seaview-2br", ratePlanId: "standard", adults: 4, addonIds: [] },
+  ];
+  const { inventory, dataSource } = await getCartInventory("2026-11-11", "2026-11-14", items, cfg, { fetchImpl });
+  assert.equal(dataSource, "cloudbeds");
+  // adults=1 is the price source (same as search); 2 and 4 only gate availability.
+  assert.deepEqual(asked.sort(), ["1", "2", "4"]);
+  const quote = computeQuote(
+    { checkIn: "2026-11-11", checkOut: "2026-11-14", items, promo: null, pricing: { cardFeePct: 0, depositPct: 100 } },
+    buildOffers(inventory, 1),
+  );
+  assert.equal(quote.lines[0].roomSatang, 15_000_00);
+  assert.equal(quote.lines[1].occupancyExtraSatang, 3_000_00);
+  assert.equal(quote.lines[1].roomSatang, 27_000_00 + 3_000_00);
+});
+
+/** Fake Cloudbeds whose roomRateDetailed DOES vary with the party size (surcharge folded into the rate). */
+function occupancySensitiveCloudbeds(asked: string[], options: { hideAtAdults?: number } = {}): typeof fetch {
+  const nights = ["2026-11-11", "2026-11-12", "2026-11-13"];
+  return (async (url: string) => {
+    const adults = Number(new URL(url).searchParams.get("adults") ?? "1");
+    asked.push(String(adults));
+    const rooms = [
+      { roomTypeID: "462960", roomsAvailable: 1, adultsIncluded: 2, adultsExtraCharge: [], roomRateDetailed: nights.map((date) => ({ date, rate: 5000 })) },
+    ];
+    if (options.hideAtAdults !== adults) {
+      rooms.push({
+        roomTypeID: "462964",
+        roomsAvailable: 1,
+        adultsIncluded: 2,
+        adultsExtraCharge: { "3": 1500, "4": 3000 } as unknown as never[],
+        roomRateDetailed: nights.map((date) => ({ date, rate: 9000 + 500 * Math.max(0, adults - 2) })),
+      });
+    }
+    return new Response(JSON.stringify({ success: true, data: [{ propertyCurrency: [{ currencyCode: "THB" }], propertyRooms: rooms }] }), {
+      status: 200,
+    });
+  }) as unknown as typeof fetch;
+}
+
+test("Cloudbeds rate varying with adults: search and checkout totals agree (no price_changed loop)", async () => {
+  const cfg = getBookingConfig({ CLOUDBEDS_API_KEY: "cbat_x" });
+  const asked: string[] = [];
+  const fetchImpl = occupancySensitiveCloudbeds(asked);
+  // What the browser prices from: the search answer (adults=1).
+  const search = await getInventory("2026-11-11", "2026-11-14", cfg, { fetchImpl });
+  const items: CartItemInput[] = [{ slug: "seaview-2br", ratePlanId: "standard", adults: 4, addonIds: [] }];
+  const clientQuote = computeQuote(
+    { checkIn: "2026-11-11", checkOut: "2026-11-14", items, promo: null, pricing: { cardFeePct: cfg.cardFeePct, depositPct: cfg.depositPct } },
+    buildOffers(search.inventory, 4),
+  );
+  const logs: { message: string; data?: Record<string, unknown> }[] = [];
+  const req: CheckoutRequest = {
+    checkIn: "2026-11-11",
+    checkOut: "2026-11-14",
+    items,
+    expectedTotalSatang: clientQuote.totalSatang,
+    expectedDueNowSatang: clientQuote.dueNowSatang,
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await runCheckout(req, { config: cfg, origin: ORIGIN, nowMs: NOW, fetchImpl, log: (message, data) => logs.push({ message, data }) });
+    assert.equal(res.status, 200, `attempt ${attempt + 1}`);
+    if (res.body.ok) assert.equal(res.body.quote.totalSatang, clientQuote.totalSatang);
+  }
+  // The divergence is reported so the open question gets answered from traffic.
+  const note = logs.find((l) => l.message === "cloudbeds_occupancy_rate_differs");
+  assert.ok(note);
+  assert.equal(note.data?.slug, "seaview-2br");
+  assert.equal(note.data?.base1Satang, 27_000_00);
+  assert.equal(note.data?.baseNSatang, 30_000_00);
+  assert.equal(note.data?.rateIncludesExtra, true);
+});
+
+test("a room Cloudbeds does not offer at the party size is refused at checkout", async () => {
+  const cfg = getBookingConfig({ CLOUDBEDS_API_KEY: "cbat_x" });
+  const asked: string[] = [];
+  const fetchImpl = occupancySensitiveCloudbeds(asked, { hideAtAdults: 4 });
+  const items: CartItemInput[] = [{ slug: "seaview-2br", ratePlanId: "standard", adults: 4, addonIds: [] }];
+  const res = await runCheckout(
+    { checkIn: "2026-11-11", checkOut: "2026-11-14", items, expectedTotalSatang: 1, expectedDueNowSatang: 1 },
+    { config: cfg, origin: ORIGIN, nowMs: NOW, fetchImpl },
+  );
+  assert.equal(res.status, 409);
+  if (!res.body.ok) {
+    assert.equal(res.body.error, "unavailable");
+    assert.deepEqual(res.body.unavailableSlugs, ["seaview-2br"]);
+    // An occupancy limit, not a sale: the guest is told to try fewer guests.
+    assert.deepEqual(res.body.occupancySlugs, ["seaview-2br"]);
+    assert.match(res.body.message, /can't be booked online for 4 guests/);
+  }
+});
+
+test("party-size checks run one after another, and Cloudbeds maxGuests caps the party", async () => {
+  const cfg = getBookingConfig({ CLOUDBEDS_API_KEY: "cbat_x" });
+  const nights = ["2026-11-11", "2026-11-12", "2026-11-13"];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fetchImpl = (async () => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+    const room = (roomTypeID: string, maxGuests: number) => ({
+      roomTypeID,
+      roomsAvailable: 1,
+      maxGuests,
+      adultsIncluded: 2,
+      adultsExtraCharge: [],
+      roomRateDetailed: nights.map((date) => ({ date, rate: 5000 })),
+    });
+    return new Response(
+      JSON.stringify({
+        success: true,
+        data: [{ propertyCurrency: [{ currencyCode: "THB" }], propertyRooms: [room("462958", 2), room("462961", 2), room("464009", 3)] }],
+      }),
+      { status: 200 },
+    );
+  }) as unknown as typeof fetch;
+  const items: CartItemInput[] = [
+    { slug: "honeymoon-suite", ratePlanId: "standard", adults: 1, addonIds: [] },
+    { slug: "garden-suite", ratePlanId: "standard", adults: 2, addonIds: [] },
+    { slug: "tuxedo", ratePlanId: "standard", adults: 4, addonIds: [] },
+  ];
+  const { inventory } = await getCartInventory("2026-11-11", "2026-11-14", items, cfg, { fetchImpl });
+  assert.equal(maxInFlight, 1);
+  assert.equal(buildOffers(inventory, 4).find((o) => o.slug === "tuxedo")?.maxAdults, 3);
+
+  const res = await runCheckout(
+    { checkIn: "2026-11-11", checkOut: "2026-11-14", items: [items[2]], expectedTotalSatang: 1, expectedDueNowSatang: 1 },
+    { config: cfg, origin: ORIGIN, nowMs: NOW, fetchImpl },
+  );
+  assert.equal(res.status, 409);
+  if (!res.body.ok) assert.deepEqual(res.body.occupancySlugs, ["tuxedo"]);
+});
+
+test("a changed amount due now (deposit) is a price change even when the total matches", async () => {
+  const req = requestFor("garden-suite");
+  const res = await runCheckout({ ...req, expectedDueNowSatang: Math.round(req.expectedDueNowSatang * 0.3) }, { config: demoConfig, origin: ORIGIN, nowMs: NOW });
+  assert.equal(res.status, 409);
+  if (!res.body.ok) {
+    assert.equal(res.body.error, "price_changed");
+    assert.equal(res.body.quote?.dueNowSatang, req.expectedDueNowSatang);
+  }
+  assert.equal(parseCheckoutRequest({ ...req, expectedDueNowSatang: undefined }, LIMITS).ok, false);
 });

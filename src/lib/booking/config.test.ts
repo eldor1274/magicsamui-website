@@ -4,16 +4,18 @@ import {
   BEAM_LIVE_BASE,
   BEAM_PLAYGROUND_BASE,
   BookingConfigError,
+  DEFAULT_CARD_FEE_PCT,
   DEMO_TOKEN_SECRET,
+  LIVE_FULFILMENT_READY,
   getBookingConfig,
   getPublicBookingConfig,
   resolveDataSource,
   resolvePaymentMode,
 } from "./config.ts";
-import { isAllowedHost, resolveOrigin } from "./urls.ts";
+import { allowListedSearch, isAllowedHost, resolveOrigin, resumePaymentPath } from "./urls.ts";
 
 const KEYS = { BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k" };
-const SECRET = { BOOKING_TOKEN_SECRET: "x".repeat(40) };
+const SECRET = { BOOKING_TOKEN_SECRET: "test-only-7f3K9qLm2xVw8RtY4pZn6bHc1dJe5gUa" };
 
 test("demo is the default payment mode", () => {
   assert.equal(resolvePaymentMode({}), "demo");
@@ -24,6 +26,7 @@ test("demo is the default payment mode", () => {
   assert.equal(cfg.tokenSecret, DEMO_TOKEN_SECRET);
   assert.equal(cfg.beam, null);
   assert.equal(cfg.cardFeePct, 3);
+  assert.equal(DEFAULT_CARD_FEE_PCT, 3, "owner decision 5 Oct 2026: 3% payment processing fee, not 5%");
   assert.equal(cfg.depositPct, 100);
   assert.equal(cfg.promoPct, 10);
 });
@@ -50,7 +53,34 @@ test("live mode is locked unless every condition holds", () => {
       JSON.stringify(env),
     );
   }
-  assert.equal(resolvePaymentMode({ ...base, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" }), "beam-live");
+  const full = { ...base, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };
+  assert.equal(resolvePaymentMode(full, { liveFulfilmentReady: true }), "beam-live");
+});
+
+test("live mode is hard-stopped in code until fulfilment exists", () => {
+  assert.equal(LIVE_FULFILMENT_READY, false);
+  const full = { ...KEYS, ...SECRET, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production", CLOUDBEDS_API_KEY: "cbat_x" };
+  assert.throws(
+    () => resolvePaymentMode(full),
+    (e: unknown) => e instanceof BookingConfigError && e.code === "live_payments_locked",
+  );
+  assert.throws(() => getBookingConfig(full), BookingConfigError);
+  assert.equal(getPublicBookingConfig(full).paymentStatus, "locked");
+});
+
+test("live mode needs live Cloudbeds data", () => {
+  const full = { ...KEYS, ...SECRET, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };
+  const ready = { liveFulfilmentReady: true };
+  for (const env of [full, { ...full, CLOUDBEDS_API_KEY: "cbat_x", BOOKING_DATA_SOURCE: "demo" }]) {
+    assert.throws(
+      () => getBookingConfig(env, ready),
+      (e: unknown) => e instanceof BookingConfigError && e.code === "live_payments_locked",
+    );
+  }
+  const live = getBookingConfig({ ...full, CLOUDBEDS_API_KEY: "cbat_x" }, ready);
+  assert.equal(live.paymentMode, "beam-live");
+  assert.equal(live.dataSource, "cloudbeds");
+  assert.equal(live.promoPct, 0, "the demo DIRECT promo never applies to real money");
 });
 
 test("unknown Beam base URLs are refused, never treated as live", () => {
@@ -63,7 +93,15 @@ test("beam modes require a real token secret", () => {
     () => getBookingConfig(env),
     (e: unknown) => e instanceof BookingConfigError && e.code === "token_secret_missing",
   );
+  for (const weak of [DEMO_TOKEN_SECRET, "s".repeat(40), "short"]) {
+    assert.throws(
+      () => getBookingConfig({ ...env, BOOKING_TOKEN_SECRET: weak }),
+      (e: unknown) => e instanceof BookingConfigError && e.code === "token_secret_missing",
+      weak,
+    );
+  }
   const cfg = getBookingConfig({ ...env, ...SECRET });
+  assert.equal(cfg.promoPct, 0, "promos are demo-only");
   assert.equal(cfg.paymentMode, "beam-playground");
   assert.equal(cfg.beam?.apiBase, BEAM_PLAYGROUND_BASE);
   assert.equal(cfg.tokenSecretIsDemo, false);
@@ -97,10 +135,56 @@ test("redirect origins come from the allow-list only", () => {
   assert.equal(resolveOrigin("evil.example.com", {}), "https://magicsamui.com");
   assert.equal(resolveOrigin("magicsamui.com.evil.io", {}), "https://magicsamui.com");
   assert.equal(resolveOrigin(null, {}), "https://magicsamui.com");
-  assert.equal(
-    resolveOrigin("magicsamui-website-git-preview-own-booking-beam-eldor.vercel.app", {}),
-    "https://magicsamui-website-git-preview-own-booking-beam-eldor.vercel.app",
-  );
+  const branch = "magicsamui-website-git-preview-own-booking-beam-eldor.vercel.app";
+  assert.equal(resolveOrigin(branch, { VERCEL_BRANCH_URL: branch }), `https://${branch}`);
+  // A project-name prefix alone is not ours: any Vercel account can claim it.
+  assert.equal(resolveOrigin(branch, {}), "https://magicsamui.com");
+  assert.equal(resolveOrigin("magicsamui-website-evil.vercel.app", {}), "https://magicsamui.com");
+  assert.equal(resolveOrigin("magicsamui-website.vercel.app", {}), "https://magicsamui.com");
   assert.equal(isAllowedHost("someone-else.vercel.app", {}), false);
   assert.equal(isAllowedHost("abc123.vercel.app", { VERCEL_URL: "abc123.vercel.app" }), true);
+  // Optional team-slug suffix (only our team's preview URLs end with it).
+  assert.equal(isAllowedHost("magicsamui-website-abc123-eldors-team.vercel.app", { BOOKING_VERCEL_TEAM_SLUG: "eldors-team" }), true);
+  assert.equal(isAllowedHost("eldors-team.vercel.app", { BOOKING_VERCEL_TEAM_SLUG: "eldors-team" }), false);
+  assert.equal(isAllowedHost("x-evil.vercel.app", { BOOKING_VERCEL_TEAM_SLUG: "" }), false);
+});
+
+test("the public demo token secret is refused on production; protected previews may use it in demo mode", () => {
+  assert.equal(getBookingConfig({}).tokenSecretIsDemo, true, "local demo may use the built-in secret");
+  for (const VERCEL_ENV of ["preview", "development"]) {
+    const cfg = getBookingConfig({ VERCEL_ENV });
+    assert.equal(cfg.paymentMode, "demo");
+    assert.equal(cfg.tokenSecretIsDemo, true, `${VERCEL_ENV}: demo preview works without configuring a secret`);
+    assert.equal(getPublicBookingConfig({ VERCEL_ENV }).paymentStatus, "ok");
+    // ...but never once Beam is switched on, even for the playground.
+    assert.throws(
+      () => getBookingConfig({ VERCEL_ENV, ...KEYS, BEAM_API_BASE: BEAM_PLAYGROUND_BASE }),
+      (e: unknown) => e instanceof BookingConfigError && e.code === "token_secret_missing",
+    );
+  }
+  for (const VERCEL_ENV of ["production"]) {
+    assert.throws(
+      () => getBookingConfig({ VERCEL_ENV }),
+      (e: unknown) => e instanceof BookingConfigError && e.code === "token_secret_missing",
+    );
+    assert.throws(
+      () => getBookingConfig({ VERCEL_ENV, BOOKING_TOKEN_SECRET: DEMO_TOKEN_SECRET }),
+      (e: unknown) => e instanceof BookingConfigError && e.code === "token_secret_missing",
+    );
+    const cfg = getBookingConfig({ VERCEL_ENV, ...SECRET });
+    assert.equal(cfg.paymentMode, "demo");
+    assert.equal(cfg.tokenSecretIsDemo, false);
+    assert.equal(getPublicBookingConfig({ VERCEL_ENV }).paymentStatus, "locked");
+  }
+});
+
+test("address-bar cleanup keeps only allow-listed params; recovery links are unique per attempt", () => {
+  assert.equal(allowListedSearch("?t=abc.def&ref=MSV-20261005-ABCD&p=x&theme=classic&paymentLinkId=pl_1&status=PAID"), "?theme=classic");
+  assert.equal(allowListedSearch("?staff=1&utm_source=x&gclid=g&resume=payment"), "?staff=1&utm_source=x&gclid=g");
+  assert.equal(allowListedSearch("?checkin=2026-11-10&checkout=2026-11-13"), "");
+  assert.equal(allowListedSearch(""), "");
+  assert.equal(resumePaymentPath("failed", "classic", "MSV-20261005-ABCD"), "/booking-preview?resume=payment&reason=failed&ref=MSV-20261005-ABCD&theme=classic");
+  assert.notEqual(resumePaymentPath("unverified", undefined, "MSV-20261005-ABCD"), resumePaymentPath("unverified", undefined, "MSV-20261005-EFGH"));
+  // A malformed ref is never echoed into the URL.
+  assert.equal(resumePaymentPath("unverified", undefined, "<script>"), "/booking-preview?resume=payment&reason=unverified");
 });

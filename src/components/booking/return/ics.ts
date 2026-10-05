@@ -5,6 +5,7 @@
 // 15:00 = 08:00Z and check-out 11:00 = 04:00Z.
 
 import { site } from "@/data/site";
+import { isBookingRef } from "@/lib/booking/ref";
 import type { IsoDate } from "@/lib/booking/types";
 
 const BANGKOK_OFFSET_HOURS = 7;
@@ -51,9 +52,12 @@ export interface StayCalendarInput {
   now?: Date;
 }
 
-export function buildStayIcs({ ref, checkIn, checkOut, rooms, now = new Date() }: StayCalendarInput): string {
+export function buildStayIcs({ ref: rawRef, checkIn, checkOut, rooms, now = new Date() }: StayCalendarInput): string {
+  // Only a well-formed reference goes into the file (it is also the UID, a
+  // property that is not TEXT-escaped): never a raw value with line breaks.
+  const ref = isBookingRef(rawRef) ? rawRef : "booking";
   const description = [
-    `Booking reference ${ref}`,
+    ref === "booking" ? "" : `Booking reference ${ref}`,
     rooms.length > 0 ? `Rooms: ${rooms.join(", ")}` : "",
     "Check-in from 3:00 PM, check-out by 11:00 AM.",
     `Questions: WhatsApp ${site.phones[0].number}`,
@@ -68,7 +72,7 @@ export function buildStayIcs({ ref, checkIn, checkOut, rooms, now = new Date() }
     "CALSCALE:GREGORIAN",
     "METHOD:PUBLISH",
     "BEGIN:VEVENT",
-    `UID:${ref}@${site.domain}`,
+    `UID:${ref === "booking" ? `booking-${utcStamp(now)}` : ref}@${site.domain}`,
     `DTSTAMP:${utcStamp(now)}`,
     `DTSTART:${bangkokLocalToUtcStamp(checkIn, 15)}`,
     `DTEND:${bangkokLocalToUtcStamp(checkOut, 11)}`,

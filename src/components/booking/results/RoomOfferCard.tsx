@@ -15,7 +15,7 @@ import { BedDouble, Check, ChevronDown, ChevronRight, Info, MessageCircle, Ruler
 import { RATE_PLANS } from "@/lib/booking/catalogue";
 import { formatNights } from "@/lib/booking/dates";
 import { formatThb } from "@/lib/booking/format";
-import { rateTotalForAdults } from "@/lib/booking/quote";
+import { percentOf, rateTotalForAdults } from "@/lib/booking/quote";
 import type { CatalogueRoom, RateOffer, RatePlanId, RatePlanInfo, RoomOffer } from "@/lib/booking/types";
 import { BTN_LINK, BTN_OUTLINE, BTN_PRIMARY, CHIP } from "../ui/styles";
 import OccupancyPopover from "./OccupancyPopover";
@@ -33,12 +33,28 @@ export interface RoomOfferCardProps {
   inCart: boolean;
   /** Shares a physical unit with a cart item: show this reason, disable Add. */
   blockedReason: string | null;
+  /** Most guests the occupancy picker offers (default: offer.maxAdults, else room.maxGuests). */
+  maxAdults?: number;
   onAdd: (ratePlanId: RatePlanId, adults: number) => void;
   /** WhatsApp link for rooms sold by enquiry only ("not-bookable"). */
   enquiryHref?: string;
+  /** A valid promo from the search: rate rows show the discounted price, as the summary will. */
+  promo?: { code: string; pct: number } | null;
 }
 
-export default function RoomOfferCard({ room, offer, nights, defaultAdults, inCart, blockedReason, onAdd, enquiryHref }: RoomOfferCardProps) {
+export default function RoomOfferCard({
+  room,
+  offer,
+  nights,
+  defaultAdults,
+  inCart,
+  blockedReason,
+  maxAdults: maxAdultsProp,
+  onAdd,
+  enquiryHref,
+  promo = null,
+}: RoomOfferCardProps) {
+  const maxAdults = Math.max(1, maxAdultsProp ?? offer.maxAdults ?? room.maxGuests);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [policyPlan, setPolicyPlan] = useState<RatePlanInfo | null>(null);
   const [showOffers, setShowOffers] = useState(false);
@@ -60,7 +76,7 @@ export default function RoomOfferCard({ room, offer, nights, defaultAdults, inCa
     <span className="rounded-(--bk-radius-pill) bg-(--bk-surface) px-2.5 py-1 text-xs font-semibold text-(--bk-text) shadow-(--bk-shadow-card)">
       On request
     </span>
-  ) : bookable && offer.remaining === 1 && !inCart ? (
+  ) : bookable && offer.remaining === 1 && !inCart && !blockedReason ? (
     <span className="rounded-(--bk-radius-pill) bg-(--bk-surface) px-2.5 py-1 text-xs font-semibold text-(--bk-text) shadow-(--bk-shadow-card)">
       Only 1 left
     </span>
@@ -74,7 +90,7 @@ export default function RoomOfferCard({ room, offer, nights, defaultAdults, inCa
   return (
     <article
       aria-labelledby={titleId}
-      className={`overflow-hidden rounded-(--bk-radius-card) bg-(--bk-surface) text-(--bk-text) shadow-(--bk-shadow-card) ${soldOut ? "opacity-75" : ""}`}
+      className="overflow-hidden rounded-(--bk-radius-card) bg-(--bk-surface) text-(--bk-text) shadow-(--bk-shadow-card)"
     >
       <div className="grid gap-4 p-3 sm:grid-cols-[minmax(0,44%)_minmax(0,1fr)] sm:p-4">
         <PhotoCarousel
@@ -126,20 +142,24 @@ export default function RoomOfferCard({ room, offer, nights, defaultAdults, inCa
 
       {bookable && (
         <>
-          {(addDisabledReason || !offer.fitsParty) && (
+          {(addDisabledReason || !offer.fitsParty || maxAdults < room.maxGuests) && (
             <div className="space-y-1 px-4 pb-3">
               {addDisabledReason && !inCart && (
                 <p className="flex items-start gap-2 rounded-(--bk-radius-control) bg-(--bk-warning-soft) px-3 py-2 text-sm text-(--bk-text)">
                   <Info size={16} className="mt-0.5 shrink-0 text-(--bk-warning)" aria-hidden="true" />
                   <span>
-                    {addDisabledReason}. It can&apos;t be booked together with that room.
+                    {addDisabledReason.startsWith("Shares space")
+                      ? `${addDisabledReason}. It can't be booked together with that room.`
+                      : addDisabledReason}
                   </span>
                 </p>
               )}
-              {!offer.fitsParty && !addDisabledReason && (
+              {!addDisabledReason && (!offer.fitsParty || maxAdults < room.maxGuests) && (
                 <p className="flex items-start gap-2 text-sm text-(--bk-text-muted)">
                   <Info size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-                  Sleeps up to {room.maxGuests}. Add another room for the rest of your group.
+                  {maxAdults < room.maxGuests
+                    ? `Online booking for up to ${maxAdults} ${maxAdults === 1 ? "guest" : "guests"}. Message us for a bigger group.`
+                    : `Sleeps up to ${maxAdults}. Add another room for the rest of your group.`}
                 </p>
               )}
             </div>
@@ -152,8 +172,10 @@ export default function RoomOfferCard({ room, offer, nights, defaultAdults, inCa
                 room={room}
                 rate={rate}
                 nights={nights}
-                defaultAdults={defaultAdults}
+                defaultAdults={Math.min(defaultAdults, maxAdults)}
+                maxAdults={maxAdults}
                 disabledReason={addDisabledReason}
+                promo={promo}
                 onShowPolicy={() => setPolicyPlan(RATE_PLANS[rate.ratePlanId])}
                 onAdd={(adults) => onAdd(rate.ratePlanId, adults)}
               />
@@ -166,7 +188,8 @@ export default function RoomOfferCard({ room, offer, nights, defaultAdults, inCa
               onClick={() => setShowOffers((v) => !v)}
               aria-expanded={showOffers}
               aria-controls={ratesId}
-              className="flex w-full items-center justify-center gap-1.5 bg-(--bk-accent-soft) py-3 text-sm font-medium text-(--bk-accent-soft-text) transition-colors hover:brightness-95"
+              aria-label={`${showOffers ? "Hide" : "View"} offers, ${room.name}`}
+              className="flex w-full items-center justify-center gap-1.5 bg-(--bk-offers-bar) py-3 text-sm font-medium text-(--bk-offers-bar-text) transition-colors hover:brightness-95"
             >
               {showOffers ? "Hide offers" : "View offers"}
               <ChevronDown size={16} className={`transition-transform ${showOffers ? "rotate-180" : ""}`} aria-hidden="true" />
@@ -200,18 +223,22 @@ interface RateRowProps {
   rate: RateOffer;
   nights: number;
   defaultAdults: number;
+  maxAdults: number;
   disabledReason: string | null;
+  promo: { code: string; pct: number } | null;
   onShowPolicy: () => void;
   onAdd: (adults: number) => void;
 }
 
-function RateRow({ room, rate, nights, defaultAdults, disabledReason, onShowPolicy, onAdd }: RateRowProps) {
+function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason, promo, onShowPolicy, onAdd }: RateRowProps) {
   const [picking, setPicking] = useState(false);
   const addRef = useRef<HTMLButtonElement>(null);
   const plan = RATE_PLANS[rate.ratePlanId];
   const hasDetails = plan.image !== null || plan.policy.length > 0;
   const perGuest = rate.supplementSatangPerGuestPerNight > 0;
   const total = rateTotalForAdults(rate, defaultAdults);
+  // Same satang rounding as the quote's promo line (quote.ts), so card, summary and server agree.
+  const discounted = promo ? total - percentOf(total, promo.pct) : total;
 
   return (
     <li className="border-b border-(--bk-border) last:border-b-0">
@@ -246,11 +273,25 @@ function RateRow({ room, rate, nights, defaultAdults, disabledReason, onShowPoli
 
         <div className="col-span-2 flex items-center justify-between gap-4 sm:contents">
           <div className="sm:text-right">
-            <p className="bk-price text-lg font-semibold leading-tight">{formatThb(total)}</p>
+            {promo && (
+              <p className="bk-price text-xs leading-tight text-(--bk-text-subtle) line-through">
+                <span className="bk-sr-only">Was </span>
+                {formatThb(total)}
+              </p>
+            )}
+            <p className="bk-price text-lg font-semibold leading-tight">
+              {promo && <span className="bk-sr-only">Now </span>}
+              {formatThb(discounted)}
+            </p>
             <p className="text-xs text-(--bk-text-muted)">
               {formatNights(nights)}
               {perGuest && ` · ${defaultAdults} ${defaultAdults === 1 ? "guest" : "guests"}`}
             </p>
+            {promo && (
+              <p className="text-xs font-medium text-(--bk-success)">
+                incl. {promo.code} −{promo.pct}%
+              </p>
+            )}
           </div>
           <button
             ref={addRef}
@@ -263,7 +304,7 @@ function RateRow({ room, rate, nights, defaultAdults, disabledReason, onShowPoli
             aria-expanded={picking}
             aria-label={`Add ${rate.ratePlanName}, ${room.name}${disabledReason ? ` (${disabledReason})` : ""}`}
             title={disabledReason ?? undefined}
-            className={`${BTN_PRIMARY} h-10 min-w-20 text-sm`}
+            className={`${BTN_PRIMARY} h-11 min-w-20 text-sm`}
           >
             Add
           </button>
@@ -276,7 +317,7 @@ function RateRow({ room, rate, nights, defaultAdults, disabledReason, onShowPoli
         onConfirm={onAdd}
         roomName={room.name}
         ratePlanName={rate.ratePlanName}
-        maxAdults={room.maxGuests}
+        maxAdults={maxAdults}
         defaultAdults={defaultAdults}
         anchorRef={addRef}
       />

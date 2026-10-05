@@ -44,6 +44,7 @@ const quote: Quote = {
       adults: 2,
       nights: 3,
       nightly: [],
+      occupancyExtraSatang: 0,
       roomSatang: 1_395_000,
       addons: [],
       addonsSatang: 0,

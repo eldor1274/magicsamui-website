@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import type { Metadata } from "next";
 import BookingApp from "@/components/booking/BookingApp";
 import { parseTheme } from "@/lib/booking/theme";
 import type { SearchDraft } from "@/components/booking/state";
+import { parseResumeReason } from "@/lib/booking/urls";
 import { BOOKING_WINDOW_MONTHS, MAX_NIGHTS, MAX_SEARCH_ADULTS, getPublicBookingConfig } from "@/lib/booking/config";
 import { addMonths, todayInBangkok, validateStayDates } from "@/lib/booking/dates";
 import type { ThemeName } from "@/lib/booking/types";
@@ -36,17 +38,30 @@ function prefill(sp: { [key: string]: string | string[] | undefined }, today: st
   return Object.keys(out).length > 0 ? out : null;
 }
 
-function themeLinks(sp: { [key: string]: string | string[] | undefined }): Record<ThemeName, string> {
-  const keep = new URLSearchParams();
-  for (const key of ["checkin", "checkout", "adults", "promo"]) {
-    const v = one(sp[key]);
-    if (v) keep.set(key, v);
-  }
-  const classic = new URLSearchParams(keep);
-  classic.set("theme", "classic");
-  const magicQs = keep.toString();
-  return { magic: `/booking-preview${magicQs ? `?${magicQs}` : ""}`, classic: `/booking-preview?${classic.toString()}` };
+/** Parameters BookingApp applies once (see ONE_SHOT_PARAMS there). */
+const ONE_SHOT_PARAMS = ["checkin", "checkout", "adults", "promo", "resume", "reason", "ref", "t"];
+
+/**
+ * Fingerprint of this load's one-shot parameters (null when there are none).
+ * BookingApp persists it once applied, so the same URL replayed later - the
+ * App Router reuses a cached page on browser Back/Forward even after the
+ * address bar was cleaned - never re-applies a stale prefill or Beam-cancel
+ * notice. Hashed so the booking token never lands in sessionStorage.
+ */
+function landingKey(sp: { [key: string]: string | string[] | undefined }): string | null {
+  const parts = ONE_SHOT_PARAMS.flatMap((k) => {
+    const v = one(sp[k]);
+    return v === undefined ? [] : [`${k}=${v}`];
+  });
+  return parts.length > 0 ? createHash("sha256").update(parts.join("&")).digest("hex").slice(0, 32) : null;
 }
+
+/**
+ * Theme switch links carry ONLY the theme: the guest's dates, rooms and step
+ * come back from sessionStorage, so switching never replays a stale
+ * ?checkin/?checkout prefill over what the guest has since chosen.
+ */
+const THEME_HREF: Record<ThemeName, string> = { magic: "/booking-preview", classic: "/booking-preview?theme=classic" };
 
 export default async function BookingPreviewPage({ searchParams }: { searchParams: SearchParams }) {
   const sp = await searchParams;
@@ -59,10 +74,12 @@ export default async function BookingPreviewPage({ searchParams }: { searchParam
         initialSearch={prefill(sp, today)}
         theme={theme}
         resume={one(sp.resume) === "payment" ? "payment" : null}
+        resumeReason={parseResumeReason(one(sp.reason))}
+        landingKey={landingKey(sp)}
         config={getPublicBookingConfig()}
         today={today}
         maxDate={addMonths(today, BOOKING_WINDOW_MONTHS)}
-        themeHref={themeLinks(sp)}
+        themeHref={THEME_HREF}
       />
     </div>
   );

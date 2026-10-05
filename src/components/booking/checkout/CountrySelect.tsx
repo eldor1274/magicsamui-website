@@ -56,10 +56,27 @@ export default function CountrySelect({ id, name, value, onChange, required, inv
       list.scrollTop = el.offsetTop + el.offsetHeight - list.clientHeight;
   }, [open, active]);
 
+  /**
+   * Once the list is shown, scroll the page just enough that its bottom clears
+   * the fixed bottom bars (--bk-fab-lift: mobile cart bar + help strip), so no
+   * option - or the keyboard-highlighted one - hides underneath them.
+   */
+  function revealList() {
+    window.requestAnimationFrame(() => {
+      const box = listRef.current?.parentElement;
+      if (!box || box.hidden || box.offsetParent === null) return;
+      const lift = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--bk-fab-lift")) || 0;
+      const limit = window.innerHeight - lift - 16;
+      const bottom = box.getBoundingClientRect().bottom;
+      if (bottom > limit) window.scrollBy({ top: bottom - limit, behavior: "auto" });
+    });
+  }
+
   function openList() {
     const idx = selected && query === null ? results.findIndex((c) => c.code === selected.code) : 0;
     setActiveIndex(Math.max(0, idx));
     setOpen(true);
+    revealList();
   }
 
   function commit(country: Country | undefined) {
@@ -98,6 +115,7 @@ export default function CountrySelect({ id, name, value, onChange, required, inv
     }
     setQuery(text);
     setActiveIndex(0);
+    if (!open) revealList();
     setOpen(true);
   }
 
@@ -203,7 +221,8 @@ export default function CountrySelect({ id, name, value, onChange, required, inv
           id={listId}
           role="listbox"
           aria-label="Countries"
-          className="relative max-h-64 overflow-y-auto overscroll-contain py-1"
+          // At most 16rem, and never taller than the room between the sticky header and the bottom bars.
+          className="relative max-h-[max(7rem,min(16rem,calc(100dvh_-_var(--bk-fab-lift,0px)_-_12rem)))] overflow-y-auto overscroll-contain py-1"
         >
           {open &&
             results.map((c) => {
@@ -222,7 +241,7 @@ export default function CountrySelect({ id, name, value, onChange, required, inv
                     const idx = results.indexOf(c);
                     if (idx !== activeIndex) setActiveIndex(idx);
                   }}
-                  className={`flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm ${
+                  className={`flex min-h-11 cursor-pointer items-center justify-between gap-3 px-3 py-3 text-sm ${
                     isActive ? "bg-(--bk-accent-soft) text-(--bk-accent-soft-text)" : "text-(--bk-text)"
                   }`}
                 >

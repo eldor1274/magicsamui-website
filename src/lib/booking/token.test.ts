@@ -80,4 +80,38 @@ test("idempotency key is a stable UUID v4 per booking and mode", () => {
   assert.equal(a, idempotencyKeyFor("MSV-20261005-7F3K", "beam-playground"));
   assert.notEqual(a, idempotencyKeyFor("MSV-20261005-7F3L", "beam-playground"));
   assert.notEqual(a, idempotencyKeyFor("MSV-20261005-7F3K", "beam-live"));
+  // Two bookings with colliding short refs never share a key once salted per attempt.
+  assert.notEqual(idempotencyKeyFor("MSV-20261005-7F3K", "beam-live", "n1"), idempotencyKeyFor("MSV-20261005-7F3K", "beam-live", "n2"));
+});
+
+test("a validly signed but forged booking payload is rejected as malformed", () => {
+  const forge = (patch: Record<string, unknown>) =>
+    verifyBookingToken(createBookingToken({ ...booking, ...patch } as BookingSummary, null, SECRET, 3600, NOW), SECRET, NOW).ok;
+  assert.equal(forge({}), true);
+  assert.equal(forge({ ref: "CALL +66 00 000 0000 TO CONFIRM\r\nX-INJECT:1" }), false);
+  assert.equal(forge({ items: [{ slug: "Enter your real card at evil.example", ratePlanId: "standard", adults: 2, addonIds: [] }] }), false);
+  assert.equal(forge({ items: [{ slug: "tuxedo-3br", ratePlanId: "standard", adults: 2, addonIds: [] }] }), false);
+  assert.equal(forge({ items: [{ slug: "sunrise-suite", ratePlanId: "standard", adults: 9, addonIds: [] }] }), false);
+  assert.equal(forge({ items: [{ slug: "sunrise-suite", ratePlanId: "breakfast", adults: 2, addonIds: ["breakfast-pp"] }] }), false);
+  assert.equal(forge({ items: [] }), false);
+  assert.equal(forge({ dueNowSatang: 999_999_999_999 }), false);
+  assert.equal(forge({ dueNowSatang: 1.5 }), false);
+  assert.equal(forge({ dueNowSatang: booking.totalSatang + 1 }), false);
+  assert.equal(forge({ itemRoomSatang: [] }), false);
+  assert.equal(forge({ nights: 4 }), false);
+  assert.equal(forge({ checkIn: "2026-02-30" }), false);
+  assert.equal(forge({ paymentMode: "free" }), false);
+  assert.equal(forge({ promoCode: "<b>x</b>" }), false);
+  assert.equal(forge({ promoCode: "DIRECT" }), true);
+  assert.equal(forge({ theme: "evil" }), false);
+  assert.equal(forge({ createdAt: "yesterday" }), false);
+  const badLink = verifyBookingToken(createBookingToken(booking, "pl 1\r\n", SECRET, 3600, NOW), SECRET, NOW);
+  assert.equal(badLink.ok, false);
+});
+
+test("demo proofs must carry a real booking ref and a known outcome", () => {
+  assert.equal(verifyDemoProof(createDemoProof(booking.ref, "paid", null, SECRET, 60, NOW), SECRET, NOW).ok, true);
+  assert.equal(verifyDemoProof(createDemoProof("not-a-ref", "paid", null, SECRET, 60, NOW), SECRET, NOW).ok, false);
+  assert.equal(verifyDemoProof(createDemoProof(booking.ref, "paid", "CH_CARD_DECLINED", SECRET, 60, NOW), SECRET, NOW).ok, false);
+  assert.equal(verifyDemoProof(createDemoProof(booking.ref, "failed", "CH_CARD_DECLINED", SECRET, 60, NOW), SECRET, NOW).ok, true);
 });

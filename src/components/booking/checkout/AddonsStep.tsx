@@ -141,12 +141,12 @@ function AddonCard({ addon, item, roomName, checkIn, checkOut, onToggle }: Addon
               )}
             </p>
             {(canAdd || added) && (
+              // An action button (Add / Remove), not a toggle: no aria-pressed, which would read "Remove ..., pressed".
               <button
                 type="button"
                 onClick={onToggle}
-                aria-pressed={added}
                 aria-label={`${added ? "Remove" : "Add"} ${addon.name} for ${roomName}`}
-                className={`inline-flex min-h-10 items-center gap-1.5 rounded-(--bk-radius-pill) border px-5 text-sm font-medium transition-colors ${
+                className={`inline-flex min-h-11 items-center gap-1.5 rounded-(--bk-radius-pill) border px-5 text-sm font-medium transition-colors ${
                   added
                     ? "border-(--bk-border-strong) bg-(--bk-surface) text-(--bk-text) hover:border-(--bk-danger) hover:text-(--bk-danger)"
                     : "border-(--bk-accent) bg-(--bk-surface) text-(--bk-text) hover:bg-(--bk-accent) hover:text-(--bk-accent-contrast)"
@@ -215,7 +215,7 @@ export default function AddonsStep({ cart, checkIn, checkOut, onToggleAddon }: A
               tabIndex={selected ? 0 : -1}
               onClick={() => setSelectedId(item.id)}
               onKeyDown={(e) => onTabKey(e, i)}
-              className={`inline-flex max-w-[min(100%,26rem)] shrink-0 items-center gap-2 border-b-[3px] px-3 py-2.5 text-left text-sm font-semibold transition-colors ${
+              className={`inline-flex min-h-11 max-w-[min(100%,26rem)] shrink-0 items-center gap-2 border-b-[3px] px-3 py-3 text-left text-sm font-semibold transition-colors ${
                 selected ? "border-(--bk-accent) text-(--bk-text)" : "border-transparent text-(--bk-text-muted) hover:text-(--bk-text)"
               }`}
             >

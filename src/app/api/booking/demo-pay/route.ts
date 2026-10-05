@@ -20,7 +20,7 @@ export async function POST(request: Request) {
     return apiError(429, "rate_limited", "Too many attempts - please wait a moment.");
   }
   const body = await readJsonBody(request, 4_096);
-  if (body === undefined) return apiError(400, "invalid_request", "Invalid request body.");
-  const result = runDemoPay(body, { config, origin: resolveOrigin(request.headers.get("host"), process.env) });
+  if (!body.ok) return body.response;
+  const result = runDemoPay(body.value, { config, origin: resolveOrigin(request.headers.get("host"), process.env) });
   return json(result.body, result.status);
 }

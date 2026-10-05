@@ -47,6 +47,12 @@ export interface RangeCalendarProps {
   maxDate: IsoDate;
   /** "compact" = mobile full-width cells. */
   density: "comfortable" | "compact";
+  /**
+   * While choosing the check-out: days before the check-in are struck through
+   * (as Cloudbeds does) so it is clear the next tap sets the check-out. They
+   * stay pickable - picking one starts a new check-in.
+   */
+  struckBefore?: IsoDate | null;
 }
 
 function monthAt(view: MonthRef, offset: number): MonthRef {
@@ -83,6 +89,7 @@ export default function RangeCalendar({
   minDate,
   maxDate,
   density,
+  struckBefore = null,
 }: RangeCalendarProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const keyboardMoved = useRef(false);
@@ -150,7 +157,8 @@ export default function RangeCalendar({
             <p id={labelId} className="mb-3 text-center text-base font-medium" aria-live={i === 0 ? "polite" : undefined}>
               {formatMonthLabel(m.year, m.monthIndex)}
             </p>
-            <table role="grid" aria-labelledby={labelId} className="w-full border-collapse">
+            {/* table-fixed: the 7 columns share the width equally (no squeezed 36px days at 360px). */}
+            <table role="grid" aria-labelledby={labelId} className="w-full table-fixed border-collapse">
               <thead>
                 <tr>
                   {WEEKDAYS_SHORT.map((d, wi) => (
@@ -179,6 +187,7 @@ export default function RangeCalendar({
                             ? "bg-[linear-gradient(to_left,transparent_50%,var(--bk-range)_50%)]"
                             : "";
                       const desc = describeDay(date);
+                      const struck = !disabled && !selected && struckBefore != null && date < struckBefore;
                       return (
                         <td key={date} role="gridcell" aria-selected={selected || inside} className={`p-0 py-0.5 text-center ${strip}`}>
                           <button
@@ -194,11 +203,13 @@ export default function RangeCalendar({
                             onFocus={() => onHover(disabled ? null : date)}
                             className={`mx-auto flex ${cellSize} items-center justify-center rounded-(--bk-radius-day) text-[15px] tabular-nums transition-colors ${
                               selected
-                                ? "bg-(--bk-accent) font-semibold text-(--bk-accent-contrast)"
+                                ? "bg-(--bk-accent) font-semibold text-(--bk-accent-contrast) ring-2 ring-inset ring-(--bk-day-selected-ring)"
                                 : disabled
                                   ? "cursor-not-allowed text-(--bk-text-subtle) opacity-45"
-                                  : "text-(--bk-text) hover:bg-(--bk-surface-sunken)"
-                            } ${date === today && !selected ? "ring-1 ring-inset ring-(--bk-accent)" : ""}`}
+                                  : struck
+                                    ? "text-(--bk-text-subtle) line-through hover:bg-(--bk-surface-sunken)"
+                                    : "text-(--bk-text) hover:bg-(--bk-surface-sunken)"
+                            } ${date === today && !selected ? "ring-2 ring-inset ring-(--bk-day-today-ring)" : ""}`}
                           >
                             {parseIsoDate(date).day}
                           </button>

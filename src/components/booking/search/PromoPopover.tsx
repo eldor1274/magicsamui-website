@@ -24,6 +24,8 @@ export interface PromoPopoverProps {
   /** Apply a code ("" clears it). */
   onApply: (code: string) => void;
   anchorRef: RefObject<HTMLElement | null>;
+  /** False when no code can be valid right now (Beam modes): no DIRECT hint. */
+  promoEnabled?: boolean;
 }
 
 const CODE_RE = /^[A-Z0-9_-]{1,32}$/;
@@ -33,7 +35,7 @@ export default function PromoPopover(props: PromoPopoverProps) {
   return <PromoPicker {...props} />;
 }
 
-function PromoPicker({ onClose, value, result, onApply, anchorRef }: PromoPopoverProps) {
+function PromoPicker({ onClose, value, result, onApply, anchorRef, promoEnabled = true }: PromoPopoverProps) {
   const [code, setCode] = useState(value);
   const [formatError, setFormatError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -81,10 +83,10 @@ function PromoPicker({ onClose, value, result, onApply, anchorRef }: PromoPopove
             </button>
           }
         >
-          <button type="button" onClick={onClose} className={`${BTN_OUTLINE} h-10 text-sm`}>
+          <button type="button" onClick={onClose} className={`${BTN_OUTLINE} h-11 text-sm`}>
             Cancel
           </button>
-          <button type="submit" form={formId} className={`${BTN_PRIMARY} h-10 text-sm`}>
+          <button type="submit" form={formId} className={`${BTN_PRIMARY} h-11 text-sm`}>
             Apply
           </button>
         </PickerActions>
@@ -120,7 +122,7 @@ function PromoPicker({ onClose, value, result, onApply, anchorRef }: PromoPopove
             aria-invalid={isError || undefined}
             aria-describedby={message ? messageId : undefined}
             className={`peer h-14 w-full rounded-(--bk-radius-control) border bg-(--bk-surface) px-3 pb-1.5 pt-5 text-base uppercase tracking-wide text-(--bk-text) outline-none transition-colors focus:border-(--bk-focus) ${
-              isError ? "border-(--bk-danger)" : "border-(--bk-border-strong)"
+              isError ? "border-(--bk-danger)" : "border-(--bk-field-border)"
             }`}
           />
           <label htmlFor={inputId} className="pointer-events-none absolute left-3 top-2 text-xs font-medium text-(--bk-text-muted)">
@@ -141,7 +143,9 @@ function PromoPicker({ onClose, value, result, onApply, anchorRef }: PromoPopove
             <span>{message}</span>
           </p>
         ) : (
-          <p className="mt-2 text-xs text-(--bk-text-subtle)">Booking direct? Use code DIRECT for our best direct rate.</p>
+          <p className="mt-2 text-xs text-(--bk-text-subtle)">
+            {promoEnabled ? "Booking direct? Use code DIRECT for our best direct rate." : "Have a code? Enter it here."}
+          </p>
         )}
       </form>
     </PickerOverlay>

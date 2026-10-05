@@ -43,7 +43,7 @@ function OccupancyPicker({ onClose, onConfirm, roomName, ratePlanName, maxAdults
       popoverClassName="w-80"
       actions={
         <PickerActions>
-          <button type="button" onClick={onClose} className={`${BTN_OUTLINE} h-10 text-sm`}>
+          <button type="button" onClick={onClose} className={`${BTN_OUTLINE} h-11 text-sm`}>
             Cancel
           </button>
           <button
@@ -52,7 +52,7 @@ function OccupancyPicker({ onClose, onConfirm, roomName, ratePlanName, maxAdults
               onConfirm(adults);
               onClose();
             }}
-            className={`${BTN_PRIMARY} h-10 text-sm`}
+            className={`${BTN_PRIMARY} h-11 text-sm`}
           >
             Confirm
           </button>

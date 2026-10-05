@@ -12,9 +12,19 @@
 //  - failed / expired / cancelled / refunded: explains and offers
 //    "Try again" back to the payment step (the cart is still saved).
 // Guest name/email come from this tab's sessionStorage, for display only.
+// The signed token/proof are bearer credentials for the status API: on mount
+// they move from the address bar into this tab's sessionStorage (so Reload
+// and "Check again" still work) before the site's analytics tags load and
+// record the page URL. The cleanup is an allow-list (theme, ?staff, ad-click
+// ids), so whatever Beam might append to the redirect URL never reaches
+// page_location either.
+// The server render cannot see the Beam payment-link id (it lives in this
+// tab's sessionStorage), so before any "Try again" view in a Beam mode the
+// browser asks for the link's own status with it: a payment that just went
+// through must never be offered a second charge.
 // Keep ReturnStatusProps stable.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import {
@@ -37,7 +47,10 @@ import { fetchStatus, recallLinkToken } from "@/lib/booking/apiClient";
 import { createBookingAnalytics } from "@/lib/booking/clientAnalytics";
 import { formatDisplayDateWithWeekday, formatNights } from "@/lib/booking/dates";
 import { formatThbWithCode } from "@/lib/booking/format";
-import type { ApiError, BookingSummary, PaymentMode, PaymentStatus, StatusResponse } from "@/lib/booking/types";
+import { isBookingRef } from "@/lib/booking/ref";
+import type { ApiError, BookingSummary, PaymentMode, PaymentStatus, StatusResponse, ThemeName } from "@/lib/booking/types";
+import { allowListedSearch, resumePaymentPath } from "@/lib/booking/urls";
+import type { ResumeReason } from "@/lib/booking/urls";
 import { useHydrated } from "../hooks";
 import { clearPersistedCart, readPersistedBooking } from "../state";
 import { whatsappHref } from "../checkout/PaymentMethodBadges";
@@ -53,6 +66,8 @@ export interface ReturnStatusProps {
   /** Status verified on the server while rendering the page (null if no token). */
   initial: StatusResponse | ApiError | null;
   paymentMode: PaymentMode;
+  /** Preview theme, kept on the "Try again" links. */
+  theme?: ThemeName;
 }
 
 type Result = StatusResponse | ApiError | null;
@@ -61,13 +76,72 @@ const POLL_FIRST_MS = 1_000;
 const POLL_BASE_MS = 2_000;
 const POLL_CAP_MS = 30_000;
 const POLL_MAX_MS = 120_000;
-const RETRY_PATH = "/booking-preview?resume=payment";
 const RETRYABLE: ApiError["error"][] = ["upstream_error", "payment_unavailable", "network_error", "server_error", "rate_limited"];
 
 const FAILURE_TEXT: Record<string, string> = {
   CH_CARD_DECLINED: "Your card was declined by the bank.",
   CH_INSUFFICIENT_FUNDS: "The card had insufficient funds.",
 };
+
+/** Latest return-page credentials in this tab (signed token + demo proof; no PII). */
+const RETURN_CREDS_KEY = "msv_booking_return_v1";
+const STATUS_TITLE_ID = "return-status-title";
+
+interface ReturnCreds {
+  ref: string | null;
+  t: string;
+  p: string | null;
+}
+
+function saveReturnCreds(creds: ReturnCreds): void {
+  try {
+    sessionStorage.setItem(RETURN_CREDS_KEY, JSON.stringify(creds));
+  } catch {
+    // storage blocked: a reload simply can't recover the status
+  }
+}
+
+function loadReturnCreds(): ReturnCreds | null {
+  try {
+    const raw = sessionStorage.getItem(RETURN_CREDS_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as Partial<ReturnCreds>;
+    if (typeof v.t !== "string" || v.t.length === 0 || v.t.length > 4096) return null;
+    return {
+      t: v.t,
+      p: typeof v.p === "string" && v.p.length <= 4096 ? v.p : null,
+      ref: isBookingRef(v.ref) ? v.ref : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Allow-list cleanup of the address bar (see allowListedSearch): drops the
+ * bearer token, proof and ref, and anything Beam may append to the redirect
+ * URL (undocumented).
+ */
+function stripCredentialParams(): void {
+  const url = new URL(window.location.href);
+  const clean = allowListedSearch(url.search);
+  if (url.search === clean) return;
+  window.history.replaceState(window.history.state, "", url.pathname + clean + url.hash);
+}
+
+/** Short screen-reader message for a status (one persistent live region reads it). */
+function statusAnnouncement(result: Result): string {
+  if (!result) return "";
+  if (!result.ok) return result.error === "invalid_token" ? "This booking link isn't valid." : "We couldn't check your payment.";
+  switch (result.status) {
+    case "paid":
+      return `Payment confirmed. Booking ${result.ref}.`;
+    case "pending":
+      return "Confirming your payment.";
+    default:
+      return `${UNPAID_COPY[result.status].title}. Nothing has been charged.`;
+  }
+}
 
 const PRIMARY =
   "inline-flex min-h-11 items-center justify-center gap-2 rounded-(--bk-radius-pill) bg-(--bk-accent) px-5 text-sm font-semibold text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover) disabled:opacity-(--bk-disabled-opacity)";
@@ -87,12 +161,15 @@ function StatusCard({
   icon,
   eyebrow,
   title,
+  maskTitle = false,
   children,
 }: {
   tone: "success" | "pending" | "danger" | "neutral";
   icon: ReactNode;
   eyebrow?: string;
   title: string;
+  /** The title holds personal data (the guest's name): mask it in session recordings. */
+  maskTitle?: boolean;
   children?: ReactNode;
 }) {
   const ring =
@@ -104,10 +181,17 @@ function StatusCard({
           ? "bg-(--bk-accent-soft) text-(--bk-accent-soft-text)"
           : "bg-(--bk-surface-sunken) text-(--bk-text-muted)";
   return (
-    <section className="rounded-(--bk-radius-card) bg-(--bk-surface) p-5 text-center shadow-(--bk-shadow-card) sm:p-8" aria-live="polite">
+    <section className="rounded-(--bk-radius-card) bg-(--bk-surface) p-5 text-center shadow-(--bk-shadow-card) sm:p-8">
       <span className={`mx-auto inline-flex h-16 w-16 items-center justify-center rounded-full ${ring}`}>{icon}</span>
       {eyebrow && <p className="mt-4 text-xs font-semibold uppercase tracking-[0.25em] text-(--bk-eyebrow)">{eyebrow}</p>}
-      <h1 className="bk-heading mt-2 text-3xl text-(--bk-text)">{title}</h1>
+      <h1
+        id={STATUS_TITLE_ID}
+        tabIndex={-1}
+        className="bk-heading mt-2 text-3xl text-(--bk-text) focus:outline-none"
+        data-clarity-mask={maskTitle ? "true" : undefined}
+      >
+        {title}
+      </h1>
       {children && <div className="mx-auto mt-3 max-w-xl text-(--bk-text-muted)">{children}</div>}
     </section>
   );
@@ -199,7 +283,7 @@ function StaySummary({ booking }: { booking: BookingSummary }) {
         )}
         {booking.cardFeeSatang > 0 && (
           <div className="flex justify-between gap-3 text-(--bk-text-muted)">
-            <dt>Card processing fee (included)</dt>
+            <dt>Payment processing fee (included)</dt>
             <dd className="bk-price">{formatThbWithCode(booking.cardFeeSatang)}</dd>
           </div>
         )}
@@ -242,11 +326,12 @@ function PaidView({ result, guestName, guestEmail }: { result: StatusResponse; g
         icon={<CircleCheck size={34} aria-hidden="true" />}
         eyebrow={live ? "Booking confirmed" : "Payment successful"}
         title={guestName ? `Thank you, ${guestName}!` : "Thank you!"}
+        maskTitle={Boolean(guestName)}
       >
-        <p>
+        <p data-clarity-mask={live && guestEmail ? "true" : undefined}>
           {live
             ? `Your stay is booked and paid.${guestEmail ? ` A confirmation email is on its way to ${guestEmail}.` : ""}`
-            : "Your payment went through and your stay is reserved in this preview."}
+            : "Your test payment went through - in live mode your stay would now be reserved."}
         </p>
         <div className="mt-5">
           <ReferenceBox bookingRef={booking.ref} />
@@ -267,7 +352,7 @@ function PaidView({ result, guestName, guestEmail }: { result: StatusResponse; g
         <ul className="mt-4 space-y-4 text-sm">
           <li className="flex gap-3">
             <Mail size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
-            <p className="text-(--bk-text-muted)">
+            <p className="text-(--bk-text-muted)" data-clarity-mask={live && guestEmail ? "true" : undefined}>
               <span className="font-medium text-(--bk-text)">Confirmation email.</span>{" "}
               {live
                 ? `Your confirmation and receipt are sent${guestEmail ? ` to ${guestEmail}` : " by email"}. Check your spam folder if it hasn't arrived in a few minutes.`
@@ -322,11 +407,13 @@ function PendingView({
   exhausted,
   checking,
   onCheckAgain,
+  theme,
 }: {
   result: StatusResponse;
   exhausted: boolean;
   checking: boolean;
   onCheckAgain: () => void;
+  theme: ThemeName | undefined;
 }) {
   return (
     <div className="space-y-5">
@@ -348,7 +435,17 @@ function PendingView({
           <ReferenceBox bookingRef={result.ref} />
         </div>
         <div className="mt-5 flex flex-wrap justify-center gap-2">
-          <button type="button" onClick={onCheckAgain} disabled={checking || !exhausted} className={exhausted ? PRIMARY : SECONDARY}>
+          {/* While a check runs the button stays focusable (aria-disabled) so keyboard focus isn't dropped. */}
+          <button
+            type="button"
+            onClick={() => {
+              if (!checking) onCheckAgain();
+            }}
+            disabled={!exhausted}
+            aria-disabled={checking || undefined}
+            aria-busy={checking || undefined}
+            className={exhausted ? PRIMARY : SECONDARY}
+          >
             <RefreshCw size={16} aria-hidden="true" className={checking ? "animate-spin" : undefined} />
             {exhausted ? "Check again" : "Checking automatically"}
           </button>
@@ -356,6 +453,12 @@ function PendingView({
             <MessageCircle size={16} aria-hidden="true" />
             WhatsApp us
           </a>
+          {exhausted && (
+            // Never "Try again" here: the payment may have gone through. The booking page warns before paying again.
+            <a href={resumePaymentPath("unverified", theme, result.ref)} className={SECONDARY}>
+              Back to your booking
+            </a>
+          )}
         </div>
       </StatusCard>
       <PreviewModeNote paymentMode={result.paymentMode} />
@@ -373,7 +476,20 @@ const UNPAID_COPY: Record<Exclude<PaymentStatus, "paid" | "pending">, { title: s
   refunded: { title: "Payment refunded", body: "This payment has been refunded. Message us if you weren't expecting this." },
 };
 
-function UnpaidView({ result }: { result: StatusResponse & { status: Exclude<PaymentStatus, "paid" | "pending"> } }) {
+const RESUME_REASON: Record<Exclude<PaymentStatus, "paid" | "pending">, ResumeReason> = {
+  failed: "failed",
+  expired: "expired",
+  cancelled: "cancelled",
+  refunded: "failed",
+};
+
+function UnpaidView({
+  result,
+  theme,
+}: {
+  result: StatusResponse & { status: Exclude<PaymentStatus, "paid" | "pending"> };
+  theme: ThemeName | undefined;
+}) {
   const copy = UNPAID_COPY[result.status];
   const reason = result.failureCode ? FAILURE_TEXT[result.failureCode] : null;
   return (
@@ -385,7 +501,7 @@ function UnpaidView({ result }: { result: StatusResponse & { status: Exclude<Pay
         </p>
         <div className="mt-5 flex flex-wrap justify-center gap-2">
           {result.status !== "refunded" && (
-            <a href={RETRY_PATH} className={PRIMARY}>
+            <a href={resumePaymentPath(RESUME_REASON[result.status], theme, result.ref)} className={PRIMARY}>
               <RefreshCw size={16} aria-hidden="true" />
               Try again
             </a>
@@ -406,11 +522,13 @@ function ErrorView({
   bookingRef,
   checking,
   onCheckAgain,
+  theme,
 }: {
   error: ApiError | null;
   bookingRef: string | null;
   checking: boolean;
   onCheckAgain: (() => void) | null;
+  theme: ThemeName | undefined;
 }) {
   const title = !error
     ? "We couldn't find your booking details"
@@ -419,26 +537,38 @@ function ErrorView({
       : "We couldn't check your payment";
   const body = !error
     ? "This page needs the link Beam sends you back with. If you've just paid, please message us with your booking reference."
-    : error.message;
+    : error.error === "invalid_token"
+      ? "It may be incomplete or older than 2 days. Nothing has been charged - go back to your booking or message us."
+      : error.message;
+  // An unverified ?ref is only echoed when it is a well-formed reference.
+  const ref = isBookingRef(bookingRef) ? bookingRef : null;
   return (
     <StatusCard
       tone="neutral"
       icon={<CircleAlert size={32} aria-hidden="true" />}
-      eyebrow={bookingRef ? `Booking ${bookingRef}` : undefined}
+      eyebrow={ref ? `Booking ${ref}` : undefined}
       title={title}
     >
       <p>{body}</p>
       <div className="mt-5 flex flex-wrap justify-center gap-2">
         {onCheckAgain && (
-          <button type="button" onClick={onCheckAgain} disabled={checking} className={PRIMARY}>
+          <button
+            type="button"
+            onClick={() => {
+              if (!checking) onCheckAgain();
+            }}
+            aria-disabled={checking || undefined}
+            aria-busy={checking || undefined}
+            className={PRIMARY}
+          >
             <RefreshCw size={16} aria-hidden="true" className={checking ? "animate-spin" : undefined} />
             Check again
           </button>
         )}
-        <a href={RETRY_PATH} className={onCheckAgain ? SECONDARY : PRIMARY}>
+        <a href={resumePaymentPath("unverified", theme, ref)} className={onCheckAgain ? SECONDARY : PRIMARY}>
           Back to your booking
         </a>
-        <a href={helpHref(bookingRef)} target="_blank" rel="noopener noreferrer" className={SECONDARY}>
+        <a href={helpHref(ref)} target="_blank" rel="noopener noreferrer" className={SECONDARY}>
           <MessageCircle size={16} aria-hidden="true" />
           WhatsApp us
         </a>
@@ -449,11 +579,72 @@ function ErrorView({
 
 /* ------------------------------- component ------------------------------- */
 
-export default function ReturnStatus({ bookingRef, token, proof, initial, paymentMode }: ReturnStatusProps) {
+export default function ReturnStatus({ bookingRef: urlRef, token: urlToken, proof: urlProof, initial, paymentMode, theme }: ReturnStatusProps) {
   const [result, setResult] = useState<Result>(initial);
   const [exhausted, setExhausted] = useState(false);
   const [checking, setChecking] = useState(false);
   const hydrated = useHydrated();
+
+  // Credentials from the URL, or - after a reload once they left the address
+  // bar - from this tab's sessionStorage.
+  const saved = useMemo(() => (hydrated && !urlToken ? loadReturnCreds() : null), [hydrated, urlToken]);
+  const token = urlToken ?? saved?.t ?? null;
+  const proof = urlToken ? urlProof : (saved?.p ?? null);
+  const bookingRef = urlToken ? urlRef : (saved?.ref ?? urlRef);
+  const recovering = Boolean(saved) && result === null;
+
+  // A terminal unpaid answer from the server render (which can't see the Beam
+  // link id) is confirmed with the link's own status before "Try again" is
+  // offered. Until hydration shows whether this tab holds the link token, and
+  // while that check runs, the page says "Checking your payment...".
+  const needsLinkCheck =
+    initial?.ok === true && initial.paymentMode !== "demo" && initial.status !== "paid" && initial.status !== "pending";
+  const linkToken = useMemo(
+    () => (hydrated && needsLinkCheck && initial?.ok ? recallLinkToken(initial.ref) : null),
+    [hydrated, needsLinkCheck, initial],
+  );
+  const [linkChecked, setLinkChecked] = useState(false);
+  const awaitingLinkCheck = needsLinkCheck && !linkChecked && (!hydrated || linkToken !== null);
+
+  useEffect(() => {
+    if (!linkToken || !urlToken || linkChecked) return;
+    const controller = new AbortController();
+    fetchStatus({ t: urlToken, p: urlProof, l: linkToken }, controller.signal)
+      .then((res) => {
+        // A failed check shows the retryable error (with the "don't pay twice" way back), never the stale terminal view.
+        setResult(res);
+        setLinkChecked(true);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [linkToken, urlToken, urlProof, linkChecked]);
+
+  useEffect(() => {
+    if (urlToken) saveReturnCreds({ t: urlToken, p: urlProof, ref: initial?.ok ? initial.ref : isBookingRef(urlRef) ? urlRef : null });
+    stripCredentialParams();
+    // Once, on mount: the server's values for this load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Reload after the cleanup: re-check the status from the saved credentials.
+  useEffect(() => {
+    if (!saved || result !== null) return;
+    const controller = new AbortController();
+    fetchStatus({ t: saved.t, p: saved.p, l: saved.ref ? recallLinkToken(saved.ref) : null }, controller.signal)
+      .then((res) => setResult(res))
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [saved, result]);
+
+  // Status changes after the first render: move focus to the new heading (the
+  // persistent live region below announces it).
+  const statusKey = result ? (result.ok ? result.status : result.error) : "none";
+  const lastStatusKey = useRef(statusKey);
+  useEffect(() => {
+    if (lastStatusKey.current === statusKey) return;
+    lastStatusKey.current = statusKey;
+    document.getElementById(STATUS_TITLE_ID)?.focus({ preventScroll: false });
+  }, [statusKey]);
 
   const verifiedRef = result?.ok ? result.ref : null;
   const pending = result?.ok === true && result.status === "pending";
@@ -521,22 +712,37 @@ export default function ReturnStatus({ bookingRef, token, proof, initial, paymen
     }
   }
 
-  if (!result || !result.ok) {
+  let view: ReactNode;
+  if (recovering || awaitingLinkCheck) {
+    view = (
+      <StatusCard tone="pending" icon={<LoaderCircle size={30} aria-hidden="true" className="animate-spin" />} title="Checking your payment...">
+        <p>One moment while we look up your booking.</p>
+      </StatusCard>
+    );
+  } else if (!result || !result.ok) {
     const retryable = Boolean(token && result && RETRYABLE.includes(result.error));
-    return (
+    view = (
       <div className="space-y-5">
-        <ErrorView error={result} bookingRef={bookingRef} checking={checking} onCheckAgain={retryable ? checkAgain : null} />
+        <ErrorView error={result} bookingRef={bookingRef} checking={checking} onCheckAgain={retryable ? checkAgain : null} theme={theme} />
         <PreviewModeNote paymentMode={paymentMode} />
       </div>
     );
+  } else if (result.status === "paid") {
+    view = <PaidView result={result} guestName={guestName} guestEmail={guestEmail} />;
+  } else if (result.status === "pending") {
+    view = <PendingView result={result} exhausted={exhausted} checking={checking} onCheckAgain={checkAgain} theme={theme} />;
+  } else {
+    view = <UnpaidView result={{ ...result, status: result.status }} theme={theme} />;
   }
 
-  switch (result.status) {
-    case "paid":
-      return <PaidView result={result} guestName={guestName} guestEmail={guestEmail} />;
-    case "pending":
-      return <PendingView result={result} exhausted={exhausted} checking={checking} onCheckAgain={checkAgain} />;
-    default:
-      return <UnpaidView result={{ ...result, status: result.status }} />;
-  }
+  return (
+    <>
+      {/* One persistent live region: a region that mounts already filled (each view's own card) is often not read. */}
+      {/* "Checking..." while a manual check runs, then the status again, so the result is read out. */}
+      <p role="status" className="bk-sr-only">
+        {recovering || awaitingLinkCheck ? "Checking your payment." : checking ? "Checking..." : statusAnnouncement(result)}
+      </p>
+      {view}
+    </>
+  );
 }

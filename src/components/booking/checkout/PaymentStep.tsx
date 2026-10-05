@@ -30,6 +30,7 @@ import { formatThb, formatThbWithCode } from "@/lib/booking/format";
 import type { GuestDetails } from "@/lib/booking/guest";
 import type { CartItem, IsoDate, PaymentMode, Quote } from "@/lib/booking/types";
 import type { CheckoutErrorView } from "../state";
+import { TOUCH_TARGET } from "../ui/styles";
 import PaymentMethodBadges, { whatsappHref } from "./PaymentMethodBadges";
 import { getCountry } from "./countries";
 
@@ -47,6 +48,8 @@ export interface PaymentStepProps {
   onPay: () => void;
   onEditGuest: () => void;
   onEditRooms: () => void;
+  /** Optional: back to the Add-ons step (offered when an add-on is what the server refused). */
+  onEditAddons?: () => void;
 }
 
 const HELP_MESSAGE = "Hi, I'm trying to book on magicsamui.com but the payment step isn't working - can you help?";
@@ -55,10 +58,9 @@ function roomName(slug: string): string {
   return getCatalogueRoom(slug)?.name ?? slug;
 }
 
-const LINK_BUTTON =
-  "inline-flex items-center gap-1 rounded-(--bk-radius-pill) px-2 py-1 text-sm font-medium text-(--bk-accent-soft-text) underline-offset-2 hover:underline";
+const LINK_BUTTON = `${TOUCH_TARGET} inline-flex items-center gap-1 rounded-(--bk-radius-pill) px-2 py-1 text-sm font-medium text-(--bk-accent-soft-text) underline-offset-2 hover:underline`;
 const SECONDARY_BUTTON =
-  "inline-flex min-h-10 items-center justify-center gap-1.5 rounded-(--bk-radius-pill) border border-(--bk-border-strong) bg-(--bk-surface) px-4 text-sm font-medium text-(--bk-text) transition-colors hover:border-(--bk-accent)";
+  "inline-flex min-h-11 items-center justify-center gap-1.5 rounded-(--bk-radius-pill) border border-(--bk-border-strong) bg-(--bk-surface) px-4 text-sm font-medium text-(--bk-text) transition-colors hover:border-(--bk-accent)";
 
 function ReviewSection({
   icon: Icon,
@@ -68,7 +70,8 @@ function ReviewSection({
 }: {
   icon: typeof User;
   title: string;
-  action?: { label: string; onClick: () => void; disabled?: boolean };
+  /** `ariaLabel` names the target ("Edit rooms") so two "Edit" buttons are distinguishable. */
+  action?: { label: string; ariaLabel?: string; onClick: () => void; disabled?: boolean };
   children: ReactNode;
 }) {
   return (
@@ -83,6 +86,7 @@ function ReviewSection({
             type="button"
             onClick={action.onClick}
             disabled={action.disabled}
+            aria-label={action.ariaLabel}
             className={`${LINK_BUTTON} disabled:opacity-(--bk-disabled-opacity)`}
           >
             <Pencil size={13} aria-hidden="true" />
@@ -101,10 +105,11 @@ interface ErrorPanelProps {
   submitting: boolean;
   onPay: () => void;
   onEditRooms: () => void;
+  onEditAddons?: () => void;
   onShowAmount: () => void;
 }
 
-function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onShowAmount }: ErrorPanelProps) {
+function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onEditAddons, onShowAmount }: ErrorPanelProps) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     ref.current?.focus();
@@ -117,6 +122,19 @@ function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onShowAmount
   switch (error.code) {
     case "unavailable": {
       const names = (error.unavailableSlugs ?? []).map(roomName);
+      const forParty = error.occupancySlugs ?? [];
+      if (forParty.length > 0 && forParty.length === names.length) {
+        // Not sold: Cloudbeds won't take this many guests in that room online.
+        title = "Too many guests for online booking";
+        body = <>{error.message} Nothing has been charged.</>;
+        actions = (
+          <button type="button" onClick={onEditRooms} className={SECONDARY_BUTTON}>
+            <BedDouble size={15} aria-hidden="true" />
+            Choose rooms again
+          </button>
+        );
+        break;
+      }
       title = names.length === 1 ? "This room was just booked" : "Some rooms were just booked";
       body = (
         <>
@@ -139,7 +157,11 @@ function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onShowAmount
       break;
     }
     case "price_changed": {
-      const updated = error.newTotalSatang !== undefined && error.newTotalSatang === quote.totalSatang;
+      const updated =
+        error.newTotalSatang !== undefined &&
+        error.newTotalSatang === quote.totalSatang &&
+        (error.newDueNowSatang === undefined || error.newDueNowSatang === quote.dueNowSatang);
+      const dueNowDiffers = error.newDueNowSatang !== undefined && error.newDueNowSatang !== error.newTotalSatang;
       title = "The price has changed";
       body = (
         <>
@@ -147,7 +169,13 @@ function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onShowAmount
           {error.newTotalSatang !== undefined && (
             <>
               {" "}
-              The new total is <strong className="bk-price">{formatThbWithCode(error.newTotalSatang)}</strong>.
+              The new total is <strong className="bk-price">{formatThbWithCode(error.newTotalSatang)}</strong>
+              {dueNowDiffers && error.newDueNowSatang !== undefined && (
+                <>
+                  , of which <strong className="bk-price">{formatThbWithCode(error.newDueNowSatang)}</strong> is due now
+                </>
+              )}
+              .
             </>
           )}{" "}
           {updated ? "Your summary now shows the new price - please review it and pay again." : "We're refreshing your summary."} Nothing
@@ -171,12 +199,34 @@ function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onShowAmount
       break;
     case "invalid_request":
       title = "Something in your reservation needs a look";
-      actions = (
-        <button type="button" onClick={onEditRooms} className={SECONDARY_BUTTON}>
-          <BedDouble size={15} aria-hidden="true" />
-          Review rooms
-        </button>
-      );
+      if (error.issues && error.issues.length > 0) {
+        body = (
+          <>
+            {error.issues.length === 1 ? (
+              error.issues[0]
+            ) : (
+              <ul className="list-disc pl-5">
+                {error.issues.slice(0, 4).map((issue, i) => (
+                  <li key={i}>{issue}</li>
+                ))}
+              </ul>
+            )}{" "}
+            Nothing has been charged.
+          </>
+        );
+      }
+      actions =
+        error.fixStep === "addons" && onEditAddons ? (
+          <button type="button" onClick={onEditAddons} className={SECONDARY_BUTTON}>
+            <Pencil size={15} aria-hidden="true" />
+            Review add-ons
+          </button>
+        ) : (
+          <button type="button" onClick={onEditRooms} className={SECONDARY_BUTTON}>
+            <BedDouble size={15} aria-hidden="true" />
+            Review rooms
+          </button>
+        );
       break;
     case "live_payments_locked":
     case "payment_unavailable":
@@ -200,9 +250,11 @@ function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onShowAmount
         <>
           <button
             type="button"
-            onClick={onPay}
-            disabled={submitting}
-            className={`${SECONDARY_BUTTON} disabled:opacity-(--bk-disabled-opacity)`}
+            onClick={() => {
+              if (!submitting) onPay();
+            }}
+            aria-disabled={submitting || undefined}
+            className={`${SECONDARY_BUTTON} aria-disabled:opacity-(--bk-disabled-opacity)`}
           >
             <RefreshCw size={15} aria-hidden="true" />
             Try again
@@ -226,7 +278,7 @@ function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onShowAmount
         <CircleAlert size={20} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-danger)" />
         <div className="min-w-0 flex-1">
           <p className="font-semibold text-(--bk-danger)">{title}</p>
-          <p className="mt-1 leading-relaxed">{body}</p>
+          <div className="mt-1 leading-relaxed">{body}</div>
           {actions && <div className="mt-3 flex flex-wrap gap-2">{actions}</div>}
         </div>
       </div>
@@ -247,6 +299,7 @@ export default function PaymentStep({
   onPay,
   onEditGuest,
   onEditRooms,
+  onEditAddons,
 }: PaymentStepProps) {
   const amountRef = useRef<HTMLDivElement>(null);
   const locked = paymentStatus === "locked";
@@ -254,14 +307,23 @@ export default function PaymentStep({
   const dueNow = formatThbWithCode(quote.dueNowSatang);
 
   function showAmount() {
-    amountRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    amountRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
     amountRef.current?.focus({ preventScroll: true });
   }
 
   return (
     <div className="space-y-4">
       {error && (
-        <ErrorPanel error={error} quote={quote} submitting={submitting} onPay={onPay} onEditRooms={onEditRooms} onShowAmount={showAmount} />
+        <ErrorPanel
+          error={error}
+          quote={quote}
+          submitting={submitting}
+          onPay={onPay}
+          onEditRooms={onEditRooms}
+          onEditAddons={onEditAddons}
+          onShowAmount={showAmount}
+        />
       )}
 
       <div className="rounded-(--bk-radius-card) bg-(--bk-surface) p-4 shadow-(--bk-shadow-card) sm:p-6">
@@ -284,7 +346,7 @@ export default function PaymentStep({
         <ReviewSection
           icon={BedDouble}
           title={cart.length === 1 ? "Your room" : "Your rooms"}
-          action={{ label: "Edit", onClick: onEditRooms, disabled: submitting }}
+          action={{ label: "Edit", ariaLabel: cart.length === 1 ? "Edit room" : "Edit rooms", onClick: onEditRooms, disabled: submitting }}
         >
           <ul className="space-y-3">
             {quote.lines.map((line, i) => (
@@ -311,8 +373,13 @@ export default function PaymentStep({
           </ul>
         </ReviewSection>
 
-        <ReviewSection icon={User} title="Lead guest" action={{ label: "Edit", onClick: onEditGuest, disabled: submitting }}>
-          <div className="text-sm">
+        <ReviewSection
+          icon={User}
+          title="Lead guest"
+          action={{ label: "Edit", ariaLabel: "Edit lead guest details", onClick: onEditGuest, disabled: submitting }}
+        >
+          {/* Personal data: masked in Microsoft Clarity session recordings (site-wide script). */}
+          <div className="text-sm" data-clarity-mask="true">
             <p className="font-medium text-(--bk-text)">
               {guest.firstName} {guest.lastName}
             </p>
@@ -348,7 +415,7 @@ export default function PaymentStep({
             )}
             {quote.cardFeeSatang > 0 && (
               <div className="flex justify-between gap-3 text-(--bk-text-muted)">
-                <dt>Card processing fee ({quote.cardFeePct}%)</dt>
+                <dt>Payment processing fee ({quote.cardFeePct}%)</dt>
                 <dd className="bk-price">{formatThb(quote.cardFeeSatang)}</dd>
               </div>
             )}
@@ -399,8 +466,8 @@ export default function PaymentStep({
           <div className="flex items-start gap-3 rounded-(--bk-radius-control) border border-(--bk-banner-border) bg-(--bk-warning-soft) p-4 text-sm text-(--bk-text)">
             <FlaskConical size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-warning)" />
             <p>
-              <strong>Demo mode:</strong> the next page is a <strong>simulated</strong> Beam checkout. Use a Beam test card such as 4111
-              1111 1111 1111 - no real payment is taken and no reservation is made.
+              <strong>Demo mode:</strong> the next page is a <strong>simulated</strong> Beam checkout. Use a Beam test card such as{" "}
+              <span className="whitespace-nowrap">4111 1111 1111 1111</span> - no real payment is taken and no reservation is made.
             </p>
           </div>
         ) : paymentMode === "beam-playground" ? (
@@ -414,26 +481,37 @@ export default function PaymentStep({
           </div>
         ) : null}
 
+        {/* While the checkout runs the button stays focusable (aria-disabled + early return), so keyboard
+            focus isn't dropped to <body>; BookingApp announces "Taking you to Beam". `disabled` only when locked. */}
         <button
           type="button"
-          onClick={onPay}
-          disabled={submitting || locked}
+          onClick={() => {
+            if (!submitting) onPay();
+          }}
+          disabled={locked}
+          aria-disabled={submitting || undefined}
           aria-busy={submitting || undefined}
-          className="inline-flex min-h-13 w-full items-center justify-center gap-2 rounded-(--bk-radius-pill) bg-(--bk-accent) px-6 py-3 text-base font-semibold text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover) disabled:cursor-not-allowed disabled:opacity-(--bk-disabled-opacity) disabled:hover:bg-(--bk-accent)"
+          className="inline-flex min-h-13 w-full items-center justify-center gap-2 rounded-(--bk-radius-pill) bg-(--bk-accent) px-6 py-3 text-base font-semibold text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover) disabled:cursor-not-allowed disabled:opacity-(--bk-disabled-opacity) disabled:hover:bg-(--bk-accent) aria-disabled:cursor-wait aria-disabled:opacity-(--bk-disabled-opacity)"
         >
           {submitting ? (
             <>
-              <LoaderCircle size={20} aria-hidden="true" className="animate-spin" />
+              <LoaderCircle size={20} aria-hidden="true" className="shrink-0 animate-spin" />
               Taking you to Beam...
             </>
           ) : (
             <>
-              <Lock size={18} aria-hidden="true" />
-              Pay {dueNow} securely with Beam
-              <ArrowRight size={18} aria-hidden="true" />
+              <Lock size={18} aria-hidden="true" className="shrink-0" />
+              {/* One line on phones: "Pay THB x" (+ "securely with Beam" under the button); the full label from sm. */}
+              <span className="whitespace-nowrap sm:hidden">Pay {dueNow}</span>
+              <span className="hidden sm:inline">Pay {dueNow} securely with Beam</span>
+              <ArrowRight size={18} aria-hidden="true" className="shrink-0" />
             </>
           )}
         </button>
+        <p className="-mt-2 flex items-center justify-center gap-1 text-xs font-medium text-(--bk-text-muted) sm:hidden" aria-hidden="true">
+          <Lock size={12} className="shrink-0" />
+          Securely with Beam
+        </p>
         <p className="flex items-start gap-1.5 text-xs text-(--bk-text-subtle)">
           <ShieldCheck size={14} aria-hidden="true" className="mt-px shrink-0" />
           <span>

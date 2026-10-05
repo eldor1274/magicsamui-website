@@ -1,11 +1,12 @@
 // Input validation for the booking API. Everything from the browser is
 // untrusted: shapes, ranges, room combinations and add-on rules are all
-// re-checked here before anything is priced or paid.
+// re-checked here before anything is priced or paid. Issue strings are shown
+// to the guest as they are, so each is a short, complete sentence.
 
-import { ADDONS, getCatalogueRoom, hasUnitConflict, isAddonId, isRatePlanId } from "./catalogue.ts";
+import { ADDONS, RATE_PLANS, getCatalogueRoom, hasUnitConflict, isAddonId, isRatePlanId } from "./catalogue.ts";
 import { STAY_DATE_ERROR_MESSAGES, validateStayDates } from "./dates.ts";
 import { addonEligibleNights } from "./quote.ts";
-import type { AddonId, CartItemInput, CheckoutRequest, IsoDate, RoomOffer, StaySearch } from "./types.ts";
+import type { AddonId, CartItemInput, CheckoutRequest, IsoDate, RoomOffer, StaySearch, ThemeName } from "./types.ts";
 
 export interface ValidationLimits {
   today: IsoDate;
@@ -15,7 +16,14 @@ export interface ValidationLimits {
   maxCartItems: number;
 }
 
-export type Parsed<T> = { ok: true; value: T } | { ok: false; issues: string[] };
+/** fixStep: where the guest can fix the problem ("addons" = an add-on no longer fits the stay). */
+export type Parsed<T> = { ok: true; value: T } | { ok: false; issues: string[]; fixStep?: "addons" };
+
+interface IssueSink {
+  issues: string[];
+  /** Set when an add-on is the problem (the guest fixes it on the Add-ons step). */
+  addonIssue: boolean;
+}
 
 function parseIntStrict(v: unknown): number | null {
   if (typeof v === "number") return Number.isInteger(v) ? v : null;
@@ -26,7 +34,7 @@ function parseIntStrict(v: unknown): number | null {
 function parsePromoField(v: unknown, issues: string[]): string | undefined {
   if (v === undefined || v === null || v === "") return undefined;
   if (typeof v !== "string" || v.length > 32) {
-    issues.push("promo must be a short code");
+    issues.push("The promo code is too long.");
     return undefined;
   }
   return v.trim() || undefined;
@@ -42,7 +50,7 @@ export function parseSearch(
   if (dateError) issues.push(STAY_DATE_ERROR_MESSAGES[dateError]);
   const adults = input.adults === undefined || input.adults === null || input.adults === "" ? 2 : parseIntStrict(input.adults);
   if (adults === null || adults < 1 || adults > limits.maxSearchAdults) {
-    issues.push(`adults must be between 1 and ${limits.maxSearchAdults}`);
+    issues.push(`Guests must be between 1 and ${limits.maxSearchAdults}.`);
   }
   const promo = parsePromoField(input.promo, issues);
   if (issues.length > 0) return { ok: false, issues };
@@ -52,47 +60,52 @@ export function parseSearch(
   };
 }
 
-function parseItem(raw: unknown, index: number, checkIn: IsoDate | null, checkOut: IsoDate | null, issues: string[]): CartItemInput | null {
-  const label = `items[${index}]`;
+function parseItem(raw: unknown, index: number, checkIn: IsoDate | null, checkOut: IsoDate | null, sink: IssueSink): CartItemInput | null {
+  const { issues } = sink;
+  const label = `Room ${index + 1}`;
   if (typeof raw !== "object" || raw === null) {
-    issues.push(`${label} must be an object`);
+    issues.push(`${label} in your reservation couldn't be read.`);
     return null;
   }
   const r = raw as Record<string, unknown>;
   const slug = typeof r.slug === "string" ? r.slug : "";
   const room = getCatalogueRoom(slug);
   if (!room || !room.bookable) {
-    issues.push(`${label}.slug is not a bookable room`);
+    issues.push(`${label} in your reservation can't be booked online.`);
     return null;
   }
   if (!isRatePlanId(r.ratePlanId)) {
-    issues.push(`${label}.ratePlanId is invalid`);
+    issues.push(`The rate chosen for ${room.shortName} is no longer offered.`);
     return null;
   }
   const adults = parseIntStrict(r.adults);
   if (adults === null || adults < 1 || adults > room.maxGuests) {
-    issues.push(`${label}.adults must be between 1 and ${room.maxGuests} for ${room.shortName}`);
+    issues.push(`${room.shortName} takes 1 to ${room.maxGuests} guests.`);
     return null;
   }
   const addonIds: AddonId[] = [];
   const rawAddons = r.addonIds === undefined ? [] : r.addonIds;
   if (!Array.isArray(rawAddons) || rawAddons.length > 5) {
-    issues.push(`${label}.addonIds must be a short array`);
+    sink.addonIssue = true;
+    issues.push(`Too many add-ons were chosen for ${room.shortName}.`);
     return null;
   }
   for (const a of rawAddons) {
     if (!isAddonId(a)) {
-      issues.push(`${label}.addonIds contains an unknown add-on`);
+      sink.addonIssue = true;
+      issues.push(`An add-on chosen for ${room.shortName} is no longer offered.`);
       return null;
     }
     if (addonIds.includes(a)) continue;
     const addon = ADDONS[a];
     if (!addon.ratePlans.includes(r.ratePlanId)) {
-      issues.push(`${addon.name} can't be added to the ${r.ratePlanId} rate`);
+      sink.addonIssue = true;
+      issues.push(`${addon.name} can't be added to the ${RATE_PLANS[r.ratePlanId]?.name ?? r.ratePlanId} rate.`);
       return null;
     }
     if (checkIn && checkOut && addonEligibleNights(addon, checkIn, checkOut).length === 0) {
-      issues.push(`${addon.name} isn't available on any night of this stay`);
+      sink.addonIssue = true;
+      issues.push(`${addon.name} isn't available on any night of this stay.`);
       return null;
     }
     addonIds.push(a);
@@ -102,8 +115,9 @@ function parseItem(raw: unknown, index: number, checkIn: IsoDate | null, checkOu
 
 /** Validates the checkout body (shape, dates, rooms, occupancy, combos, add-ons). */
 export function parseCheckoutRequest(body: unknown, limits: ValidationLimits): Parsed<CheckoutRequest> {
-  const issues: string[] = [];
-  if (typeof body !== "object" || body === null) return { ok: false, issues: ["body must be a JSON object"] };
+  const sink: IssueSink = { issues: [], addonIssue: false };
+  const { issues } = sink;
+  if (typeof body !== "object" || body === null) return { ok: false, issues: ["The booking request couldn't be read."] };
   const b = body as Record<string, unknown>;
 
   const dateError = validateStayDates(b.checkIn, b.checkOut, limits);
@@ -114,29 +128,44 @@ export function parseCheckoutRequest(body: unknown, limits: ValidationLimits): P
   const promo = parsePromoField(b.promo, issues);
 
   const expected = b.expectedTotalSatang;
-  if (typeof expected !== "number" || !Number.isInteger(expected) || expected < 0) {
-    issues.push("expectedTotalSatang must be a non-negative integer");
+  const expectedDueNow = b.expectedDueNowSatang;
+  const isAmount = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 0;
+  if (!isAmount(expected) || !isAmount(expectedDueNow)) {
+    issues.push("The price you were shown couldn't be read - please refresh the page and try again.");
   }
 
   const items: CartItemInput[] = [];
   if (!Array.isArray(b.items) || b.items.length === 0) {
-    issues.push("items must contain at least one room");
+    issues.push("Your reservation has no rooms.");
   } else if (b.items.length > limits.maxCartItems) {
-    issues.push(`at most ${limits.maxCartItems} rooms per booking`);
+    issues.push(`At most ${limits.maxCartItems} rooms can be booked together online.`);
   } else {
     b.items.forEach((raw, i) => {
-      const item = parseItem(raw, i, checkIn, checkOut, issues);
+      const item = parseItem(raw, i, checkIn, checkOut, sink);
       if (item) items.push(item);
     });
     if (items.length === b.items.length && hasUnitConflict(items.map((i) => i.slug))) {
-      issues.push("two rooms in this booking share the same physical space");
+      issues.push("Two rooms in your reservation share the same space and can't be booked together.");
     }
   }
 
-  if (issues.length > 0 || !checkIn || !checkOut) return { ok: false, issues };
+  // Cosmetic only (which preview theme to come back to); anything else is ignored.
+  const theme: ThemeName | undefined = b.theme === "classic" || b.theme === "magic" ? b.theme : undefined;
+
+  if (issues.length > 0 || !checkIn || !checkOut) {
+    return { ok: false, issues, ...(sink.addonIssue ? { fixStep: "addons" as const } : {}) };
+  }
   return {
     ok: true,
-    value: { checkIn, checkOut, promo, items, expectedTotalSatang: expected as number },
+    value: {
+      checkIn,
+      checkOut,
+      promo,
+      items,
+      expectedTotalSatang: expected as number,
+      expectedDueNowSatang: expectedDueNow as number,
+      ...(theme ? { theme } : {}),
+    },
   };
 }
 

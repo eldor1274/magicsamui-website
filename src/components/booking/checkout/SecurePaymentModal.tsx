@@ -52,7 +52,7 @@ export default function SecurePaymentModal({ open, onClose }: SecurePaymentModal
             ref={closeRef}
             type="button"
             onClick={onClose}
-            className="rounded-(--bk-radius-pill) bg-(--bk-accent) px-6 py-2.5 text-sm font-medium text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover)"
+            className="inline-flex min-h-11 items-center rounded-(--bk-radius-pill) bg-(--bk-accent) px-6 text-sm font-medium text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover)"
           >
             Got it
           </button>
@@ -85,7 +85,7 @@ export default function SecurePaymentModal({ open, onClose }: SecurePaymentModal
           <PaymentMethodBadges methods={[...CARD_METHODS, "PromptPay"]} />
         </div>
         <p className="text-xs text-(--bk-text-subtle)">
-          Any card processing fee is shown as its own line in your reservation summary before you pay - no hidden charges.
+          The payment processing fee (card or PromptPay) is shown as its own line in your reservation summary before you pay - no hidden charges.
         </p>
       </div>
     </Modal>

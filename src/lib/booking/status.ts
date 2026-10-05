@@ -3,6 +3,7 @@
 // signed demo proof (demo mode) or from Beam itself (beam-* modes).
 
 import { getPaymentLink, listPaymentLinkCharges, mapLinkStatus } from "./beam.ts";
+import type { BeamCharge } from "./beam.ts";
 import type { BookingConfig } from "./config.ts";
 import { verifyBookingToken, verifyDemoProof } from "./token.ts";
 import type { ApiError, BookingSummary, PaymentStatus, StatusResponse } from "./types.ts";
@@ -40,8 +41,14 @@ function ok(booking: BookingSummary, status: PaymentStatus, failureCode: string 
   };
 }
 
+/** Demo mode only (no Beam to ask): the simulated link simply lapses after its 30 minutes. */
 function pendingOrExpired(booking: BookingSummary, nowMs: number): PaymentStatus {
   return Date.parse(booking.linkExpiresAt) <= nowMs ? "expired" : "pending";
+}
+
+/** A charge that pays exactly this booking (amount and currency as quoted). */
+function paysBooking(c: BeamCharge, booking: BookingSummary): boolean {
+  return c.status === "SUCCEEDED" && c.amount === booking.dueNowSatang && c.currency === "THB";
 }
 
 export async function runStatus(params: StatusParams, deps: StatusDeps): Promise<StatusResult> {
@@ -99,15 +106,32 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
         deps.log?.("beam_status_mismatch", { ref: booking.ref, paymentLinkId });
         return ok(booking, "failed", "AMOUNT_OR_REFERENCE_MISMATCH", nowMs);
       }
-      return ok(booking, mapLinkStatus(link.status), null, nowMs);
+      const status = mapLinkStatus(link.status);
+      if (status === "expired" || status === "cancelled") {
+        // These answers offer "Try again", which is a second payment. Beam only
+        // redirects here after a successful payment, so first make sure no
+        // charge on this exact link (sourceId = paymentLinkId) succeeded, e.g.
+        // a PromptPay QR or a slow 3-D Secure step that finished at the deadline.
+        const charges = await listPaymentLinkCharges(config.beam, { sourceId: paymentLinkId }, deps.fetchImpl);
+        if (charges.some((c) => paysBooking(c, booking))) {
+          deps.log?.("beam_status_paid_after_link_closed", { ref: booking.ref, paymentLinkId, linkStatus: link.status });
+          return ok(booking, "paid", null, nowMs);
+        }
+      }
+      return ok(booking, status, null, nowMs);
     }
 
-    // Fallback without the link id: look for a succeeded charge for this ref.
-    const charges = await listPaymentLinkCharges(config.beam, booking.ref, deps.fetchImpl);
-    const paid = charges.some(
-      (c) => c.status === "SUCCEEDED" && c.amount === booking.dueNowSatang && c.currency === "THB" && c.referenceId === booking.ref,
-    );
-    return ok(booking, paid ? "paid" : pendingOrExpired(booking, nowMs), null, nowMs);
+    // Fallback without the link id (the server render of the return page, or
+    // a new tab): look for a succeeded charge for this ref. Whether Beam copies
+    // order.referenceId onto the charge is undocumented and the list may lag,
+    // so "nothing found" is NOT proof of non-payment. Never answer "expired"
+    // from here: it offers "Try again", which could charge the guest twice.
+    // Only the payment link's own status can say EXPIRED. Until the browser
+    // supplies the link id the guest sees "pending" and, after the polling
+    // budget, "please don't pay again - message us".
+    const charges = await listPaymentLinkCharges(config.beam, { referenceId: booking.ref }, deps.fetchImpl);
+    const paid = charges.some((c) => paysBooking(c, booking) && c.referenceId === booking.ref);
+    return ok(booking, paid ? "paid" : "pending", null, nowMs);
   } catch (e) {
     deps.log?.("beam_status_failed", { ref: booking.ref, message: e instanceof Error ? e.message : String(e) });
     return { status: 502, body: { ok: false, error: "upstream_error", message: "We couldn't check the payment just now." } };
