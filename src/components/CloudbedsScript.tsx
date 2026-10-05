@@ -22,6 +22,8 @@ export default function CloudbedsScript() {
     );
   }, [pathname]);
 
+  // The own-booking-engine preview never uses the Cloudbeds bundle.
+  if (pathname?.startsWith("/booking-preview")) return null;
   if (!interacted && !bookingEager) return null;
 
   return <Script src={site.cloudbedsImmersiveScript} strategy="afterInteractive" />;

@@ -13,7 +13,9 @@ const HREF = `${site.whatsapp}?text=${encodeURIComponent(
 export default function WhatsAppFab() {
   const pathname = usePathname();
   // On /booking the help strip can pin itself to the bottom edge; sit above it.
-  const offset = pathname === "/booking" ? "bottom-24" : "bottom-5";
+  // The /booking-preview pages also have sticky bottom bars (cart, help strip).
+  const lifted = pathname === "/booking" || pathname?.startsWith("/booking-preview");
+  const offset = lifted ? "bottom-24" : "bottom-5";
 
   return (
     <a

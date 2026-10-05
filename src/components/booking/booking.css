@@ -1,0 +1,163 @@
+/*
+ * Booking preview theme tokens. Scoped to .booking-app so nothing leaks into
+ * the rest of the site. Components must use these variables (e.g. Tailwind
+ * `bg-(--bk-accent)`, `text-(--bk-text-muted)`, `border-(--bk-border)`,
+ * `rounded-(--bk-radius-card)`) and never hard-coded colours.
+ *
+ *   data-theme="magic"   site brand: cream, pool green, Fraunces + Inter
+ *   data-theme="classic" Cloudbeds look: navy frame, teal accent, white cards
+ */
+
+.booking-app {
+  /* Page frame behind the cards */
+  --bk-page-bg: #faf8f4;
+  --bk-frame-text: #201c16;
+  --bk-frame-text-muted: #4a453c;
+  --bk-eyebrow: #0e6b63;
+
+  /* Surfaces */
+  --bk-surface: #ffffff;
+  --bk-surface-muted: #f2ede4;
+  --bk-surface-sunken: #f2ede4;
+  --bk-border: #e7e0d3;
+  --bk-border-strong: #cfc5b3;
+
+  /* Text */
+  --bk-text: #201c16;
+  --bk-text-muted: #4a453c;
+  --bk-text-subtle: #7a7366;
+
+  /* Accent (CTAs, selected states) */
+  --bk-accent: #0e6b63;
+  --bk-accent-hover: #0a4d47;
+  --bk-accent-contrast: #ffffff;
+  --bk-accent-soft: #e2efed;
+  --bk-accent-soft-text: #0a4d47;
+  --bk-range: #d3e7e4;
+
+  /* Status */
+  --bk-danger: #b42318;
+  --bk-danger-soft: #fdecea;
+  --bk-warning: #8a5a12;
+  --bk-warning-soft: #f4ead7;
+  --bk-success: #0e6b63;
+  --bk-success-soft: #e2efed;
+
+  /* Preview banner */
+  --bk-banner-bg: #f4ead7;
+  --bk-banner-text: #201c16;
+  --bk-banner-border: #e4d2ae;
+
+  /* Focus, overlays, elevation */
+  --bk-focus: #0e6b63;
+  --bk-overlay: rgba(20, 18, 14, 0.55);
+  --bk-shadow-card: 0 1px 2px rgba(32, 28, 22, 0.06), 0 0 0 1px rgba(32, 28, 22, 0.05);
+  --bk-shadow-pop: 0 12px 32px rgba(32, 28, 22, 0.18);
+  --bk-shadow-bar: 0 -4px 16px rgba(32, 28, 22, 0.08);
+
+  /* Shape */
+  --bk-radius-card: 1rem;
+  --bk-radius-control: 0.75rem;
+  --bk-radius-pill: 9999px;
+  --bk-radius-day: 0.5rem;
+
+  /* Type */
+  --bk-font-body: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  --bk-font-heading: var(--font-serif), Georgia, serif;
+  --bk-font-price: var(--font-serif), Georgia, serif;
+  --bk-heading-weight: 500;
+
+  --bk-disabled-opacity: 0.4;
+
+  background: var(--bk-page-bg);
+  color: var(--bk-text);
+  font-family: var(--bk-font-body);
+}
+
+.booking-app[data-theme="classic"] {
+  --bk-page-bg: #12234e;
+  --bk-frame-text: #ffffff;
+  --bk-frame-text-muted: #c9d1e4;
+  --bk-eyebrow: #32c0a0;
+
+  --bk-surface: #ffffff;
+  --bk-surface-muted: #f7fafc;
+  --bk-surface-sunken: #edf2f7;
+  --bk-border: #e2e8f0;
+  --bk-border-strong: #cbd5e0;
+
+  --bk-text: #1e2330;
+  --bk-text-muted: #4a5568;
+  --bk-text-subtle: #718096;
+
+  --bk-accent: #32c0a0;
+  --bk-accent-hover: #2aa98c;
+  --bk-accent-contrast: #1e2330;
+  --bk-accent-soft: #d5f4ec;
+  --bk-accent-soft-text: #1e2330;
+  --bk-range: #b6ecdf;
+
+  --bk-danger: #e53e3e;
+  --bk-danger-soft: #fff5f5;
+  --bk-warning: #975a16;
+  --bk-warning-soft: #fefcbf;
+  --bk-success: #2f855a;
+  --bk-success-soft: #f0fff4;
+
+  --bk-banner-bg: #fefcbf;
+  --bk-banner-text: #1e2330;
+  --bk-banner-border: #f6e05e;
+
+  --bk-focus: #32c0a0;
+  --bk-overlay: rgba(18, 35, 78, 0.6);
+  --bk-shadow-card: 0 1px 3px rgba(18, 35, 78, 0.08), 0 0 0 1px #e2e8f0;
+  --bk-shadow-pop: 0 12px 32px rgba(18, 35, 78, 0.22);
+  --bk-shadow-bar: 0 4px 16px 4px rgba(0, 0, 0, 0.06);
+
+  --bk-radius-card: 1rem;
+  --bk-radius-control: 0.5rem;
+  --bk-radius-day: 0.25rem;
+
+  --bk-font-heading: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  --bk-font-price: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  --bk-heading-weight: 600;
+}
+
+/* Overlays (modals, sheets, popovers) portal to <body>; they render inside a
+   .booking-app[data-theme] wrapper too so the same tokens apply there. */
+
+.booking-app .bk-heading {
+  font-family: var(--bk-font-heading);
+  font-weight: var(--bk-heading-weight);
+}
+
+.booking-app .bk-price {
+  font-family: var(--bk-font-price);
+  font-variant-numeric: tabular-nums;
+}
+
+.booking-app :focus-visible {
+  outline: 2px solid var(--bk-focus);
+  outline-offset: 2px;
+}
+
+.booking-app .bk-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .booking-app *,
+  .booking-app *::before,
+  .booking-app *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
