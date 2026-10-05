@@ -66,7 +66,7 @@ export const landings: Record<string, Landing> = {
     label: "עברית",
     title: "וילות יוקרה עם בריכה פרטית בקוסמוי | Magic Suites",
     description:
-      "וילות וסוויטות על צלע הר בקוסמוי, לכל אחת בריכה פרטית ונוף לים. ציון 9.8 בבוקינג. 5 דקות מהחוף — הזמינו ישירות וקבלו את המחיר הטוב ביותר.",
+      "וילות וסוויטות על צלע הר בקוסמוי, לכל אחת בריכה פרטית ונוף לים. ציון 9.9 בבוקינג. 5 דקות מהחוף — הזמינו ישירות וקבלו את המחיר הטוב ביותר.",
     eyebrow: "קוסמוי, תאילנד",
     h1: "וילות עם בריכה פרטית בקוסמוי",
     sub: "2 וילות ו־5 סוויטות פרטיות — רובן עם בריכה משלה, על צלע הר מעל מפרץ תאילנד, 5 דקות מהחוף.",
@@ -83,7 +83,7 @@ export const landings: Record<string, Landing> = {
       { title: "קשר ישיר עם המארח", text: "וואטסאפ איתנו לפני, במהלך ואחרי השהייה." },
       { title: "הגעה גמישה", text: "אפשר להשאיר מזוודות בכל שעה — רק תעדכנו מראש." },
     ],
-    reviewsLine: "ציון 9.8 ״יוצא מן הכלל״ בבוקינג · 4.96 ב־Airbnb",
+    reviewsLine: "ציון 9.9 ״יוצא מן הכלל״ בבוקינג · 4.96 ב־Airbnb",
     locationTitle: "המיקום",
     locationText:
       "אנחנו בצ׳ונג מון (פלאי לאם) — פינה שקטה ויוקרתית של קוסמוי: 3 ק״מ משדה התעופה, ליד הבודהה הגדול, ו־7 דקות נסיעה מצ׳אוונג ומכפר הדייגים.",
@@ -100,7 +100,7 @@ export const landings: Record<string, Landing> = {
     label: "Русский",
     title: "Виллы с частным бассейном на Самуи | Magic Suites",
     description:
-      "Виллы и люксы на холме с видом на море на Ко Самуи — у каждой собственный бассейн. 9,8 на Booking.com. 5 минут до пляжа. Бронируйте напрямую по лучшей цене.",
+      "Виллы и люксы на холме с видом на море на Ко Самуи — у каждой собственный бассейн. 9,9 на Booking.com. 5 минут до пляжа. Бронируйте напрямую по лучшей цене.",
     eyebrow: "Ко Самуи, Таиланд",
     h1: "Виллы с частным бассейном на Самуи",
     sub: "2 виллы и 5 люксов — большинство со своим бассейном, на холме над Сиамским заливом, всего в 5 минутах от пляжа.",
@@ -117,7 +117,7 @@ export const landings: Record<string, Landing> = {
       { title: "Прямая связь с хозяином", text: "WhatsApp до, во время и после поездки." },
       { title: "Гибкое заселение", text: "Оставьте багаж в любое время — просто предупредите нас." },
     ],
-    reviewsLine: "9,8 «Исключительно» на Booking.com · 4,96 на Airbnb",
+    reviewsLine: "9,9 «Исключительно» на Booking.com · 4,96 на Airbnb",
     locationTitle: "Расположение",
     locationText:
       "Мы в районе Чонг Мон (Плай Лаем) — тихом и престижном уголке Самуи: 3 км от аэропорта, рядом Биг Будда, 7 минут на машине до Чавенга и Рыбацкой деревни.",
@@ -134,7 +134,7 @@ export const landings: Record<string, Landing> = {
     label: "Français",
     title: "Villas avec piscine privée à Koh Samui | Magic Suites",
     description:
-      "Villas et suites à flanc de colline avec vue mer à Koh Samui, chacune avec piscine privée. Note 9,8 sur Booking.com. Plage à 5 minutes — réservez en direct au meilleur tarif.",
+      "Villas et suites à flanc de colline avec vue mer à Koh Samui, chacune avec piscine privée. Note 9,9 sur Booking.com. Plage à 5 minutes — réservez en direct au meilleur tarif.",
     eyebrow: "Koh Samui, Thaïlande",
     h1: "Villas avec piscine privée à Koh Samui",
     sub: "2 villas et 5 suites privées — la plupart avec piscine privée, à flanc de colline au-dessus du golfe de Thaïlande, à 5 minutes de la plage.",
@@ -151,7 +151,7 @@ export const landings: Record<string, Landing> = {
       { title: "Contact direct avec l’hôte", text: "WhatsApp avant, pendant et après votre séjour." },
       { title: "Arrivée flexible", text: "Déposez vos bagages à toute heure — prévenez-nous simplement." },
     ],
-    reviewsLine: "9,8 « Exceptionnel » sur Booking.com · 4,96 sur Airbnb",
+    reviewsLine: "9,9 « Exceptionnel » sur Booking.com · 4,96 sur Airbnb",
     locationTitle: "Emplacement",
     locationText:
       "Nous sommes à Choeng Mon (Plai Laem), un coin calme et résidentiel de Koh Samui : aéroport à 3 km, Big Bouddha tout proche, Chaweng et le Fisherman's Village à 7 minutes en voiture.",
@@ -168,7 +168,7 @@ export const landings: Record<string, Landing> = {
     label: "Deutsch",
     title: "Villen mit privatem Pool auf Koh Samui | Magic Suites",
     description:
-      "Villen und Suiten am Hang mit Meerblick auf Koh Samui, fast alle mit eigenem Pool. 9,8 auf Booking.com. Strand in 5 Minuten – direkt buchen zum besten Preis.",
+      "Villen und Suiten am Hang mit Meerblick auf Koh Samui, fast alle mit eigenem Pool. 9,9 auf Booking.com. Strand in 5 Minuten – direkt buchen zum besten Preis.",
     eyebrow: "Koh Samui, Thailand",
     h1: "Villen mit privatem Pool auf Koh Samui",
     sub: "2 Villen und 5 private Suiten – die meisten mit eigenem Pool – am Hang über dem Golf von Thailand, nur 5 Minuten vom Strand.",
@@ -185,7 +185,7 @@ export const landings: Record<string, Landing> = {
       { title: "Direkter Draht zum Gastgeber", text: "WhatsApp vor, während und nach Ihrem Aufenthalt." },
       { title: "Flexible Anreise", text: "Gepäck jederzeit abstellen – sagen Sie uns einfach Bescheid." },
     ],
-    reviewsLine: "9,8 „Außergewöhnlich“ auf Booking.com · 4,96 auf Airbnb",
+    reviewsLine: "9,9 „Außergewöhnlich“ auf Booking.com · 4,96 auf Airbnb",
     locationTitle: "Lage",
     locationText:
       "Wir liegen in Choeng Mon (Plai Laem), einer ruhigen, gehobenen Ecke von Koh Samui: 3 km vom Flughafen, nahe dem Big Buddha, 7 Autominuten von Chaweng und dem Fisherman's Village.",
@@ -202,7 +202,7 @@ export const landings: Record<string, Landing> = {
     label: "中文",
     title: "苏梅岛私人泳池别墅 | Magic Suites",
     description:
-      "苏梅岛山坡海景别墅与套房，每间均配私人泳池。Booking.com 评分 9.8。距海滩仅 5 分钟——直接预订享最优价格。",
+      "苏梅岛山坡海景别墅与套房，每间均配私人泳池。Booking.com 评分 9.9。距海滩仅 5 分钟——直接预订享最优价格。",
     eyebrow: "泰国 · 苏梅岛",
     h1: "苏梅岛私人泳池别墅",
     sub: "2 栋别墅与 5 间私享套房——大多配有专属泳池，坐落于俯瞰泰国湾的山坡上，距海滩仅 5 分钟。",
@@ -219,7 +219,7 @@ export const landings: Record<string, Landing> = {
       { title: "直连房东", text: "入住前后随时通过 WhatsApp 联系我们。" },
       { title: "灵活抵达", text: "任何时间都可寄存行李——提前告知即可。" },
     ],
-    reviewsLine: "Booking.com 9.8 分「超棒」 · Airbnb 4.96 分",
+    reviewsLine: "Booking.com 9.9 分「超棒」 · Airbnb 4.96 分",
     locationTitle: "位置",
     locationText:
       "我们位于苏梅岛安静高档的乔蒙区（Plai Laem）：距机场 3 公里，紧邻大佛寺，驱车 7 分钟即达查汶海滩和渔人村。",
@@ -235,7 +235,7 @@ export const landings: Record<string, Landing> = {
     label: "Español",
     title: "Villas con piscina privada en Koh Samui | Magic Suites",
     description:
-      "Villas y suites en la ladera con vistas al mar en Koh Samui, cada una con piscina privada. 9,8 en Booking.com. Playa a 5 minutos: reserva directa al mejor precio.",
+      "Villas y suites en la ladera con vistas al mar en Koh Samui, cada una con piscina privada. 9,9 en Booking.com. Playa a 5 minutos: reserva directa al mejor precio.",
     eyebrow: "Koh Samui, Tailandia",
     h1: "Villas con piscina privada en Koh Samui",
     sub: "2 villas y 5 suites privadas, la mayoría con piscina propia, en una ladera sobre el golfo de Tailandia, a solo 5 minutos de la playa.",
@@ -252,7 +252,7 @@ export const landings: Record<string, Landing> = {
       { title: "Línea directa con el anfitrión", text: "WhatsApp antes, durante y después de tu estancia." },
       { title: "Llegada flexible", text: "Deja tu equipaje a cualquier hora; solo avísanos." },
     ],
-    reviewsLine: "9,8 «Excepcional» en Booking.com · 4,96 en Airbnb",
+    reviewsLine: "9,9 «Excepcional» en Booking.com · 4,96 en Airbnb",
     locationTitle: "Ubicación",
     locationText:
       "Estamos en Choeng Mon (Plai Laem), un rincón tranquilo y exclusivo de Koh Samui: a 3 km del aeropuerto, junto al Gran Buda y a 7 minutos en coche de Chaweng y el Fisherman's Village.",
@@ -269,7 +269,7 @@ export const landings: Record<string, Landing> = {
     label: "ไทย",
     title: "พูลวิลล่าส่วนตัว เกาะสมุย | Magic Suites",
     description:
-      "วิลล่าและห้องสวีทวิวทะเลบนเนินเขาเกาะสมุย ทุกหลังมีสระว่ายน้ำส่วนตัว คะแนน 9.8 บน Booking.com ห่างหาด 5 นาที จองตรงราคาดีที่สุด",
+      "วิลล่าและห้องสวีทวิวทะเลบนเนินเขาเกาะสมุย ทุกหลังมีสระว่ายน้ำส่วนตัว คะแนน 9.9 บน Booking.com ห่างหาด 5 นาที จองตรงราคาดีที่สุด",
     eyebrow: "เกาะสมุย ประเทศไทย",
     h1: "พูลวิลล่าส่วนตัวบนเกาะสมุย",
     sub: "วิลล่า 2 หลังและสวีทส่วนตัว 5 ห้อง ส่วนใหญ่มีสระส่วนตัว ตั้งอยู่บนเนินเขามองเห็นอ่าวไทย ห่างจากหาดเพียง 5 นาที",
@@ -286,7 +286,7 @@ export const landings: Record<string, Landing> = {
       { title: "ติดต่อเจ้าของโดยตรง", text: "WhatsApp ได้ทั้งก่อน ระหว่าง และหลังเข้าพัก" },
       { title: "เช็คอินยืดหยุ่น", text: "ฝากกระเป๋าได้ทุกเวลา เพียงแจ้งล่วงหน้า" },
     ],
-    reviewsLine: "9.8 “ยอดเยี่ยม” บน Booking.com · 4.96 บน Airbnb",
+    reviewsLine: "9.9 “ยอดเยี่ยม” บน Booking.com · 4.96 บน Airbnb",
     locationTitle: "ทำเลที่ตั้ง",
     locationText:
       "เราอยู่ที่เชิงมน (พลายแหลม) มุมเงียบสงบของเกาะสมุย ห่างสนามบิน 3 กม. ใกล้พระใหญ่ ขับรถ 7 นาทีถึงเฉวงและฟิชเชอร์แมนวิลเลจ",

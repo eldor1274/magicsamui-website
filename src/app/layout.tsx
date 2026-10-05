@@ -24,7 +24,7 @@ const serif = Fraunces({
 export const metadata: Metadata = {
   title: "Luxury Private Pool Villas in Koh Samui | Magic Suites",
   description:
-    "Hillside villas and suites in Koh Samui, each with its own private pool and sea view. Rated 9.8 on Booking.com. 5 min to the beach — book direct for our best rate.",
+    "Hillside villas and suites in Koh Samui, each with its own private pool and sea view. Rated 9.9 on Booking.com. 5 min to the beach — book direct for our best rate.",
   metadataBase: new URL(`https://${site.domain}`),
   openGraph: {
     type: "website",

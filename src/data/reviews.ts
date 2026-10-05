@@ -9,9 +9,9 @@ export interface Review {
 
 export const reviewStats = {
   booking: {
-    score: "9.8",
+    score: "9.9",
     label: "Exceptional",
-    count: 64,
+    count: 70,
     url: "https://www.booking.com/hotel/th/magic-one-suites.en-gb.html",
   },
   airbnb: {
