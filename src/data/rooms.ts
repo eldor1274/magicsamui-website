@@ -33,10 +33,10 @@ export interface Room {
 }
 
 const STANDARD_INFO = {
-  checkIn: "15:00-23:00",
+  checkIn: "15:00-23:00 (later by arrangement)",
   checkOut: "11:00",
   pets: "No",
-  children: "Under 12 on request",
+  children: "Under 12 on request, with an adult",
   smoking: "Not inside (terrace is fine) - 2,000 THB fee",
   party: "No",
 };

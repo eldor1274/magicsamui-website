@@ -249,11 +249,11 @@ test("runbook: Cloudbeds' confirmation email replaces the terms on the paid retu
 
 /* ---------------------------- public pages ----------------------------- */
 
-test("public room pages: check-in 15:00-23:00, children under 12 on request, smoking not inside (terrace fine), one free-transfer wording (airport or pier, 2+ nights)", () => {
+test("public room pages: check-in 15:00-23:00 (later by arrangement), children under 12 on request with an adult, smoking not inside (terrace fine), one free-transfer wording (airport or pier, 2+ nights)", () => {
   const transferLines = new Set<string>();
   for (const room of rooms) {
-    assert.equal(room.importantInfo.checkIn, "15:00-23:00", room.slug);
-    assert.equal(room.importantInfo.children, "Under 12 on request", room.slug);
+    assert.equal(room.importantInfo.checkIn, "15:00-23:00 (later by arrangement)", room.slug);
+    assert.equal(room.importantInfo.children, "Under 12 on request, with an adult", room.slug);
     assert.equal(room.importantInfo.smoking, "Not inside (terrace is fine) - 2,000 THB fee", room.slug);
     for (const line of [...room.amenities, ...(room.guestAccess ?? []), ...(room.notes ?? [])]) {
       if (/transfer|shuttle|pick ?up/i.test(line)) transferLines.add(line);
