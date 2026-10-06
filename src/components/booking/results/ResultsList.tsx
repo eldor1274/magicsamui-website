@@ -92,7 +92,9 @@ export default function ResultsList({
           inCart={cart.some((c) => c.slug === offer.slug)}
           blockedReason={blockedReason(offer.slug)}
           onAdd={(ratePlanId, adults) => onAdd({ slug: offer.slug, ratePlanId, adults })}
-          promo={availability.promo?.valid ? { code: availability.promo.code, pct: availability.promo.pct } : null}
+          // The demo's site-side %; Cloudbeds' Direct rate (pct 0) is already in the rates (RateOffer.list).
+          promo={availability.promo?.valid && availability.promo.pct > 0 ? { code: availability.promo.code, pct: availability.promo.pct } : null}
+          directCode={availability.promo?.valid && availability.promo.pct === 0 ? availability.promo.code : null}
           feePct={feePct}
           enquiryHref={
             offer.unavailableReason === "not-bookable"
@@ -304,12 +306,12 @@ function HousePolicies() {
         <div>
           <dt className="font-medium">Check-in / check-out</dt>
           <dd className="text-(--bk-text-muted)">
-            {HOUSE_POLICIES.checkIn} · {HOUSE_POLICIES.checkOut}
+            {HOUSE_POLICIES.checkIn} · {HOUSE_POLICIES.checkOut}. {HOUSE_POLICIES.lateArrival}
           </dd>
         </div>
         <div>
-          <dt className="font-medium">Airport pickup</dt>
-          <dd className="text-(--bk-text-muted)">{HOUSE_POLICIES.airportPickup}</dd>
+          <dt className="font-medium">{HOUSE_POLICIES.transferTitle}</dt>
+          <dd className="text-(--bk-text-muted)">{HOUSE_POLICIES.transfer}</dd>
         </div>
         <div>
           <dt className="font-medium">Cancellation</dt>
@@ -318,6 +320,14 @@ function HousePolicies() {
         <div>
           <dt className="font-medium">Children</dt>
           <dd className="text-(--bk-text-muted)">{HOUSE_POLICIES.children}</dd>
+        </div>
+        <div>
+          <dt className="font-medium">Deposit</dt>
+          <dd className="text-(--bk-text-muted)">{HOUSE_POLICIES.deposit}</dd>
+        </div>
+        <div>
+          <dt className="font-medium">House rules</dt>
+          <dd className="text-(--bk-text-muted)">{HOUSE_POLICIES.houseRules.join(" ")}</dd>
         </div>
       </dl>
     </section>

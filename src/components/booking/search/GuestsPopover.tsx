@@ -1,9 +1,10 @@
 "use client";
 
 // OWNER: ui-search-results
-// Guests picker: one "Guests" stepper (adults only - children are not
-// accommodated) with Cancel / Apply. Popover on desktop, bottom sheet on
-// phones. The draft resets every time it opens. Keep GuestsPopoverProps stable.
+// Guests picker: one "Guests" stepper (guests 12 and over count as adults;
+// children under 12 on request) with Cancel / Apply. Popover on desktop,
+// bottom sheet on phones. The draft resets every time it opens. Keep
+// GuestsPopoverProps stable.
 
 import { useState } from "react";
 import type { RefObject } from "react";
@@ -67,7 +68,7 @@ function GuestsPicker({ onClose, value, min, max, onApply, anchorRef }: GuestsPo
         onChange={setDraft}
         maxReachedLabel={`Add guest, maximum of ${max} reached`}
       />
-      <p className="text-xs leading-relaxed text-(--bk-text-subtle)">{HOUSE_POLICIES.children}</p>
+      <p className="text-xs leading-relaxed text-(--bk-text-subtle)">{HOUSE_POLICIES.childrenShort}</p>
     </PickerOverlay>
   );
 }

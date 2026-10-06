@@ -513,7 +513,7 @@ test("the preview is tracked only while it takes real payments (stripe-live on p
   assert.equal(getPublicBookingConfig({ ...STRIPE_LIVE_ENV, VERCEL_ENV: "preview" }).live, false);
 });
 
-test("landing descriptions drop the best-rate promise only while the own engine serves /booking", async () => {
+test("landing descriptions drop the best-rate promise only while the own engine serves /booking without the Direct rate", async () => {
   const { descriptionForEngine, landings } = await import("../../data/landings.ts");
   for (const t of Object.values(landings)) {
     assert.equal(descriptionForEngine(t, false), t.description);

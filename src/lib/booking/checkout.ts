@@ -7,7 +7,7 @@
 
 import { InventoryUnavailableError, buildOffers, getCartInventory } from "./availability.ts";
 import { createPaymentLink, buildPaymentLinkRequest, BeamApiError } from "./beam.ts";
-import { getCatalogueRoom } from "./catalogue.ts";
+import { POLICY_VERSION, getCatalogueRoom } from "./catalogue.ts";
 import {
   BOOKING_WINDOW_MONTHS,
   MAX_CART_ITEMS,
@@ -15,18 +15,17 @@ import {
   MAX_SEARCH_ADULTS,
   MERCHANT_NAME,
   PAYMENT_LINK_TTL_MINUTES,
-  PROMO_CODE,
   TOKEN_TTL_HOURS,
 } from "./config.ts";
 import type { BookingConfig } from "./config.ts";
 import { todayInBangkok } from "./dates.ts";
-import { MIN_CHARGE_SATANG, QuoteError, computeQuote, resolvePromo } from "./quote.ts";
+import { MIN_CHARGE_SATANG, QuoteError, computeQuote, resolvePromo, resolvePromoFor } from "./quote.ts";
 import { createBookingToken, generateBookingRef, generateNonce, idempotencyKeyFor } from "./token.ts";
 import { providerOf } from "./payments/provider.ts";
 import { STRIPE_MAX_CHARGE_SATANG } from "./payments/stripe.ts";
 import { noteCheckoutReadFailure, startStripeCheckout } from "./stripeCheckout.ts";
 import type { StripeDeps } from "./stripeDeps.ts";
-import type { BookingSummary, CheckoutFailure, CheckoutResponse, DataSource, Quote } from "./types.ts";
+import type { BookingSummary, CheckoutFailure, CheckoutResponse, DataSource, PromoResult, Quote } from "./types.ts";
 import { cancelUrl, demoPayUrl, returnUrl } from "./urls.ts";
 import { parseCheckoutRequest, parseGuestInput, unavailableCartSlugs } from "./validate.ts";
 import type { ValidationLimits } from "./validate.ts";
@@ -77,6 +76,8 @@ function fail(status: number, body: Omit<CheckoutFailure, "ok">): CheckoutResult
 }
 
 const LIVE_AVAILABILITY_UNCONFIRMED = "We could not confirm live availability. Nothing has been charged - please try again in a moment.";
+export const TERMS_CHANGED =
+  "Our booking terms were just updated. Nothing has been reserved or charged - please refresh the page, review the terms and tick the box again.";
 
 /**
  * Whether real money may be taken at prices from this data source. Simulated
@@ -121,12 +122,29 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
         issues: ["Only the Standard Rate can be booked online right now (breakfast can be arranged with us after booking)."],
       });
     }
+    // The terms version goes on the payment (msv_terms) and the PAID note as what the guest agreed to: it must be
+    // the one their page showed. A tab opened before a terms change (or one that sent no version) is refused
+    // before anything is held, and the guest reviews the new terms and ticks the box again.
+    if (req.termsVersion !== POLICY_VERSION) {
+      deps.log?.("checkout_refused_terms_version", { sent: req.termsVersion ?? null, current: POLICY_VERSION });
+      return fail(409, { error: "terms_changed", message: TERMS_CHANGED });
+    }
   }
 
-  // Promo codes only exist while payments are simulated (demo). Elsewhere a
-  // code (e.g. ?promo=DIRECT from an old ad link) is ignored, never an error.
-  const promo = config.promoPct > 0 || provider !== "stripe" ? resolvePromo(req.promo, config.promoPct, PROMO_CODE) : null;
-  if (promo && !promo.valid) return fail(400, { error: "promo_invalid", message: promo.message });
+  // Demo / Beam: the site-side % (an unknown code is refused, as before). Stripe: the guest's code
+  // sells Cloudbeds' own Direct rate (direct-rate), re-quoted from Cloudbeds below like every price -
+  // the browser sends only the code, never a rate. Any other code (or a Stripe page that can't apply
+  // it, e.g. ?promo=DIRECT from an old ad link) is ignored, never an error.
+  let promo: PromoResult | null;
+  if (provider === "stripe") {
+    const r = config.promo.mode === "direct-rate" ? resolvePromoFor(req.promo, config.promo, "") : null;
+    promo = r?.valid ? r : null;
+  } else {
+    promo = resolvePromo(req.promo, config.promoPct, config.promo.code);
+    if (promo && !promo.valid) return fail(400, { error: "promo_invalid", message: promo.message });
+  }
+  /** Cloudbeds is asked with its promo code (and its Direct rows are sold) only for a valid code on a direct-rate deployment. */
+  const cloudbedsPromo = provider === "stripe" && promo?.valid ? { cloudbedsCode: config.promo.cloudbedsCode } : undefined;
 
   if (!dataSourceAllowsPayment(config.paymentMode, config.dataSource)) {
     deps.log?.("checkout_refused_data_source", { mode: config.paymentMode, dataSource: config.dataSource });
@@ -141,6 +159,7 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
       allowDemoFallback: config.paymentMode === "demo" || config.paymentMode === "stripe-mock",
       onFallback: (e) => deps.log?.("cloudbeds_fallback", { error: e instanceof Error ? e.message : String(e) }),
       onOccupancyPricing: (note) => deps.log?.("cloudbeds_occupancy_rate_differs", { ...note }),
+      ...(cloudbedsPromo ? { promo: cloudbedsPromo } : {}),
     });
   } catch (e) {
     if (!(e instanceof InventoryUnavailableError)) throw e;
@@ -232,16 +251,26 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
       });
     }
     // Re-read under the unit lock just before the hold: another checkout may have taken the unit since.
+    // With the code it reuses the re-quote's promo-rate index (no second getRatePlans read before the hold):
+    // it only tests availability, and the stay-rule read under the same lock (restrictions with the
+    // promo) re-confirms the Direct row - its promo code and its base row - on fresh data.
+    const recheckPromo = cloudbedsPromo ? { ...cloudbedsPromo, ...(inventoryResult.promoRates ? { rates: inventoryResult.promoRates } : {}) } : undefined;
     const recheckAvailability =
       dataSource === "cloudbeds"
         ? async (): Promise<string[]> => {
-            const fresh = await getCartInventory(req.checkIn, req.checkOut, req.items, config, { fetchImpl: deps.fetchImpl, allowDemoFallback: false });
+            const fresh = await getCartInventory(req.checkIn, req.checkOut, req.items, config, {
+              fetchImpl: deps.fetchImpl,
+              allowDemoFallback: false,
+              ...(recheckPromo ? { promo: recheckPromo } : {}),
+            });
             if (fresh.dataSource !== "cloudbeds") throw new Error("live availability unavailable");
             return unavailableCartSlugs(req.items, buildOffers(fresh.inventory, 1, config.ratePlans));
           }
         : undefined;
+    // The Direct rate is held only where the server's own re-quote put a room on it.
+    const directPromo = quote.directRate && cloudbedsPromo ? { code: quote.directRate.code, cloudbedsCode: cloudbedsPromo.cloudbedsCode } : null;
     return startStripeCheckout(
-      { checkIn: req.checkIn, checkOut: req.checkOut, items: req.items, guest, quote, inventory, dataSource, theme: req.theme, today, recheckAvailability },
+      { checkIn: req.checkIn, checkOut: req.checkOut, items: req.items, guest, quote, inventory, dataSource, theme: req.theme, today, recheckAvailability, promo: directPromo },
       {
         deps: deps.stripe,
         origin: deps.origin,

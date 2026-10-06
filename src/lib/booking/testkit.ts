@@ -3,6 +3,7 @@
 // SDK, the real Cloudbeds writer and the real fulfil/release code paths.
 
 import { createAlerter } from "./alerts.ts";
+import { POLICY_VERSION } from "./catalogue.ts";
 import { runCheckout } from "./checkout.ts";
 import type { CheckoutDeps } from "./checkout.ts";
 import { cloudbedsRestrictions } from "./cloudbedsProvider.ts";
@@ -144,8 +145,8 @@ export function makeKit(options: { env?: Env; cb?: FakeCloudbedsOptions; livemod
     kv,
     alert,
     log,
-    restrictions: (roomTypeId, rateId, checkIn, checkOut, adults) =>
-      cloudbedsRestrictions(roomTypeId, rateId, checkIn, checkOut, adults, { apiKey: "cbat_read_testkit", propertyId: "235064", fetchImpl: fakeCb.fetch }),
+    restrictions: (roomTypeId, rateId, checkIn, checkOut, adults, promo) =>
+      cloudbedsRestrictions(roomTypeId, rateId, checkIn, checkOut, adults, { apiKey: "cbat_read_testkit", propertyId: "235064", fetchImpl: fakeCb.fetch }, promo ?? null),
     now: () => now.ms,
   };
   return {
@@ -180,6 +181,8 @@ export function request(items: CartItemInput[], extra: Partial<CheckoutRequest> 
     items,
     expectedTotalSatang: 0,
     expectedDueNowSatang: 0,
+    // The terms version the booking page showed (Stripe modes refuse any other).
+    termsVersion: POLICY_VERSION,
     guest: GUEST,
     ...extra,
   } as CheckoutRequest & { guest: GuestDetails };

@@ -162,7 +162,8 @@ function RoomDetailsView({
             {HOUSE_POLICIES.checkIn} · {HOUSE_POLICIES.checkOut}
           </li>
           <li>{HOUSE_POLICIES.children}</li>
-          <li>{HOUSE_POLICIES.airportPickup}</li>
+          <li>{HOUSE_POLICIES.transfer}</li>
+          <li>{HOUSE_POLICIES.deposit}</li>
         </ul>
       </section>
     </div>

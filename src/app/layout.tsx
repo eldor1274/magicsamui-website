@@ -8,7 +8,7 @@ import Footer from "@/components/Footer";
 import WhatsAppFab from "@/components/WhatsAppFab";
 import { site } from "@/data/site";
 import { GOOGLE_ADS_ID } from "@/lib/analytics";
-import { finishesLiveStripePayments, getPublicBookingConfig, resolveBookingEngine } from "@/lib/booking/config";
+import { directCopySwapped, finishesLiveStripePayments, getPublicBookingConfig, resolveBookingEngine } from "@/lib/booking/config";
 import "./globals.css";
 
 const sans = Inter({
@@ -24,9 +24,9 @@ const serif = Fraunces({
 
 export const metadata: Metadata = {
   title: "Luxury Private Pool Villas in Koh Samui | Magic Suites",
-  // No best-rate promise while our own engine (fee shown openly, no DIRECT code) serves /booking.
+  // No best-rate promise while our own engine (fee shown openly) serves /booking without the DIRECT code (BOOKING_DIRECT_PROMO=off).
   description:
-    resolveBookingEngine() === "own"
+    directCopySwapped()
       ? "Hillside villas and suites in Koh Samui, each with its own private pool and sea view. Rated 9.9 on Booking.com. 5 min to the beach — book direct with live availability."
       : "Hillside villas and suites in Koh Samui, each with its own private pool and sea view. Rated 9.9 on Booking.com. 5 min to the beach — book direct for our best rate.",
   metadataBase: new URL(`https://${site.domain}`),

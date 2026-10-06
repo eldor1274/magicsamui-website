@@ -334,12 +334,14 @@ function StaySummary({ booking }: { booking: BookingSummary }) {
         <div>
           <dt className="text-(--bk-text-subtle)">Check-in</dt>
           <dd className="font-medium text-(--bk-text)">{formatDisplayDateWithWeekday(booking.checkIn)}</dd>
-          <dd className="text-xs text-(--bk-text-muted)">From 3:00 PM</dd>
+          <dd className="text-xs text-(--bk-text-muted)">
+            {HOUSE_POLICIES.checkInTime} - {HOUSE_POLICIES.checkInEndTime}
+          </dd>
         </div>
         <div>
           <dt className="text-(--bk-text-subtle)">Check-out</dt>
           <dd className="font-medium text-(--bk-text)">{formatDisplayDateWithWeekday(booking.checkOut)}</dd>
-          <dd className="text-xs text-(--bk-text-muted)">By 11:00 AM</dd>
+          <dd className="text-xs text-(--bk-text-muted)">By {HOUSE_POLICIES.checkOutTime}</dd>
         </div>
       </dl>
       <p className="mt-2 text-sm text-(--bk-text-muted)">{formatNights(booking.nights)}</p>
@@ -424,7 +426,7 @@ function BookingTerms({ booking }: { booking: BookingSummary }) {
         <div>
           <dt className="font-medium text-(--bk-text)">Check-in and check-out</dt>
           <dd className="text-(--bk-text-muted)">
-            {HOUSE_POLICIES.checkIn}. {HOUSE_POLICIES.checkOut}.
+            {HOUSE_POLICIES.checkIn}. {HOUSE_POLICIES.checkOut}. {HOUSE_POLICIES.lateArrival}
           </dd>
         </div>
         <div>
@@ -432,8 +434,26 @@ function BookingTerms({ booking }: { booking: BookingSummary }) {
           <dd className="text-(--bk-text-muted)">{HOUSE_POLICIES.cancellation}</dd>
         </div>
         <div>
+          <dt className="font-medium text-(--bk-text)">Damage deposit</dt>
+          <dd className="text-(--bk-text-muted)">{HOUSE_POLICIES.deposit}</dd>
+        </div>
+        <div>
           <dt className="font-medium text-(--bk-text)">Children</dt>
           <dd className="text-(--bk-text-muted)">{HOUSE_POLICIES.children}</dd>
+        </div>
+        <div>
+          <dt className="font-medium text-(--bk-text)">{HOUSE_POLICIES.transferTitle}</dt>
+          <dd className="text-(--bk-text-muted)">{HOUSE_POLICIES.transfer}</dd>
+        </div>
+        <div>
+          <dt className="font-medium text-(--bk-text)">House rules</dt>
+          <dd className="text-(--bk-text-muted)">
+            <ul className="list-disc space-y-0.5 pl-5">
+              {HOUSE_POLICIES.houseRules.map((rule) => (
+                <li key={rule}>{rule}</li>
+              ))}
+            </ul>
+          </dd>
         </div>
         {booking.cardFeeSatang > 0 && (
           <div>
@@ -552,17 +572,14 @@ function PaidView({
             <li className="flex gap-3">
               <Plane size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
               <p className="text-(--bk-text-muted)">
-                <span className="font-medium text-(--bk-text)">Free airport pickup.</span>{" "}
-                Send us your flight number and arrival time on
-                WhatsApp and we&apos;ll meet you at Samui airport.
+                <span className="font-medium text-(--bk-text)">{HOUSE_POLICIES.transferTitle}.</span> {HOUSE_POLICIES.transferHowTo}
               </p>
             </li>
           )}
           <li className="flex gap-3">
             <Clock size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
             <p className="text-(--bk-text-muted)">
-              <span className="font-medium text-(--bk-text)">Arrival.</span> {HOUSE_POLICIES.checkIn},{" "}
-              {HOUSE_POLICIES.checkOut.replace(/^Check-out/, "check-out")}. Arriving late? Just let us know.
+              <span className="font-medium text-(--bk-text)">Arrival.</span> {HOUSE_POLICIES.arrivalHint} {HOUSE_POLICIES.checkOut}.
             </p>
           </li>
           <li className="flex gap-3">

@@ -23,7 +23,7 @@ export interface GuestDetails {
    * Older saved sessions may lack it - treat undefined as "".
    */
   postcode?: string;
-  /** "" or a slot value such as "15:00" ("late" = after midnight). */
+  /** "" or a slot value such as "15:00" ("late" = after 11 PM, by arrangement only). */
   arrivalTime: string;
   specialRequests: string;
   agreedToPolicy: boolean;
@@ -52,14 +52,18 @@ export const GUEST_LIMITS = {
   specialRequests: 1000,
 } as const;
 
-/** Arrival time options: 15:00 .. 23:00 hourly plus "After midnight" (value "late"). */
+/**
+ * Arrival time options: 15:00 .. 23:00 hourly (check-in is 3 PM - 11 PM) plus
+ * "After 11 PM" (value "late", kept from when it meant after midnight: saved
+ * sessions and the msv_arrival_late flag still use it).
+ */
 export const ARRIVAL_TIME_OPTIONS: { value: string; label: string }[] = [
   ...Array.from({ length: 9 }, (_, i) => {
     const h = 15 + i;
     const label = h === 12 ? "12:00 PM" : h > 12 ? `${h - 12}:00 PM` : `${h}:00 AM`;
     return { value: `${h}:00`, label };
   }),
-  { value: "late", label: "After midnight" },
+  { value: "late", label: "After 11 PM (message us first)" },
 ];
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -113,7 +117,8 @@ export function validateGuest(g: GuestDetails): GuestErrors {
   }
   if (g.arrivalTime && !ARRIVAL_TIME_OPTIONS.some((o) => o.value === g.arrivalTime)) e.arrivalTime = "Please choose an arrival time.";
   if (g.specialRequests.length > GUEST_LIMITS.specialRequests) e.specialRequests = "Please keep requests under 1,000 characters.";
-  if (!g.agreedToPolicy) e.agreedToPolicy = "Please agree to the booking and cancellation policy.";
+  // Same wording as the checkbox (HOUSE_POLICIES.agreement; catalogue.test.ts checks they match).
+  if (!g.agreedToPolicy) e.agreedToPolicy = "Please agree to the house rules, the deposit and the booking and cancellation policy.";
   return e;
 }
 

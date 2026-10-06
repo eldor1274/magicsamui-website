@@ -22,13 +22,29 @@ export interface FakeRoomType {
   maxGuests?: number;
   /** roomRateID of the derived "Breakfast" row (default `${rateId}-breakfast`). */
   breakfastRateId?: string;
+  /**
+   * roomRateID of this room type's derived "Direct booking rate" (promo code FAKE_DIRECT_PROMO_CODE,
+   * DIRECT_PCT_OF_BASE of the base rate, its own id per room type as live). Absent = no Direct plan.
+   */
+  directRateId?: string;
+  /** The Direct plan's own minLos / closed to arrival (getRatePlans); default 0 / false. */
+  directMinLos?: number;
+  directClosedToArrival?: boolean;
 }
 
 /** The live Breakfast plan: derived, fixed +2,000 THB per night on the base rate (2026-10-06). */
 export const BREAKFAST_FIXED_BAHT = 2000;
+/** The live "Direct booking rate": promo code "Direct", 20% off the base rate, not synced to OTAs (2026-10-06). */
+export const FAKE_DIRECT_PROMO_CODE = "Direct";
+export const DIRECT_PCT_OF_BASE = 80;
 
 function breakfastRateId(rt: FakeRoomType): string {
   return rt.breakfastRateId ?? `${rt.rateId}-breakfast`;
+}
+
+/** The Direct rate per night in baht (to the satang). */
+export function fakeDirectRate(rt: FakeRoomType): number {
+  return Math.round(rt.rate * DIRECT_PCT_OF_BASE) / 100;
 }
 
 export interface FakeReservation {
@@ -87,6 +103,11 @@ export interface FakeCloudbedsOptions {
   paymentMethods?: FakePaymentMethod[];
   /** getRatePlans rows leave roomTypeID out when the request filters by it (the v1.3 spec: "if not specified in request"). */
   ratePlansWithoutRoomTypeId?: boolean;
+  /**
+   * postReservation prices a Direct roomRateID at the BASE rate: what the Cloudbeds Reservation FAQ says
+   * (postReservation ignores rate plans and promos) - unconfirmed until Stage B; the engine must refuse it.
+   */
+  directPricedAtBase?: boolean;
   now?: () => number;
 }
 
@@ -289,10 +310,19 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         const hint = hintRaw === null ? NaN : Number(hintRaw);
         const nights = eachNight(start, end);
         const ratesKnown = !options.pricer && options.roomTypes !== undefined;
+        // Priced by roomRateID, like a Cloudbeds that honours the rate sent: the Direct rate (unless
+        // directPricedAtBase), the Breakfast package, else the base rate.
+        const rateFor = (r: FakeReservation["rooms"][number]): number => {
+          const rt = options.roomTypes?.[r.roomTypeID];
+          if (!rt) return 0;
+          if (rt.directRateId && r.roomRateID === rt.directRateId) return options.directPricedAtBase ? rt.rate : fakeDirectRate(rt);
+          if (r.roomRateID === breakfastRateId(rt) && r.roomRateID !== rt.rateId) return rt.rate + BREAKFAST_FIXED_BAHT;
+          return rt.rate;
+        };
         const roomsTotal = options.pricer
           ? options.pricer({ rooms: resRooms, startDate: start, endDate: end, hintSatang: Number.isFinite(hint) ? hint : null })
           : ratesKnown
-            ? resRooms.reduce((sum, r) => sum + (options.roomTypes?.[r.roomTypeID]?.rate ?? 0) * nights.length, 0)
+            ? resRooms.reduce((sum, r) => sum + rateFor(r) * nights.length, 0)
             : Number.isFinite(hint)
               ? hint / 100
               : 0;
@@ -300,11 +330,7 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         const totalSatang = Math.round(roomsTotal * 100);
         const cells = Math.max(1, resRooms.length * nights.length);
         const nightly = resRooms.map((r, i) =>
-          nights.map((_, n) =>
-            ratesKnown
-              ? Math.round((options.roomTypes?.[r.roomTypeID]?.rate ?? 0) * 100)
-              : Math.floor(totalSatang / cells) + (i === 0 && n === 0 ? totalSatang % cells : 0),
-          ),
+          nights.map((_, n) => (ratesKnown ? Math.round(rateFor(r) * 100) : Math.floor(totalSatang / cells) + (i === 0 && n === 0 ? totalSatang % cells : 0))),
         );
         // Taxes/fees come with the SOURCE: a % of each night's rate, half-up to the satang (basis points keep it exact).
         const sourceID = params.get("sourceID");
@@ -420,6 +446,9 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         const nights = eachNight(start, end);
         // Like the live answer (2026-10-06): per room type the base (BAR) row, named "default", and a derived
         // "Breakfast" row (+2,000 THB per night, its own roomRateID); propertyCurrency is a single object.
+        // Asked with the promo code, a room type with a Direct plan also gets its derived Direct row (no promo
+        // code or plan id on the row, as live: only its roomRateID tells it apart).
+        const promoAsked = (params.get("promoCode") ?? "").trim().toLowerCase() === FAKE_DIRECT_PROMO_CODE.toLowerCase();
         const rooms = Object.entries(options.roomTypes ?? {})
           .filter(([id]) => freeUnits(id, start, end) > 0)
           .flatMap(([id, rt]) => {
@@ -435,7 +464,11 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
               derivedType,
               ratePlanNamePublic,
             });
-            return [row(rt.rateId, rt.rate, "default", null), row(breakfastRateId(rt), rt.rate + BREAKFAST_FIXED_BAHT, "Breakfast", "fixed")];
+            return [
+              row(rt.rateId, rt.rate, "default", null),
+              row(breakfastRateId(rt), rt.rate + BREAKFAST_FIXED_BAHT, "Breakfast", "fixed"),
+              ...(promoAsked && rt.directRateId ? [row(rt.directRateId, fakeDirectRate(rt), "Direct booking rate", "percentage")] : []),
+            ];
           });
         return reply({
           success: true,
@@ -445,32 +478,50 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
       case "getRatePlans": {
         const start = params.get("startDate") ?? "";
         const end = params.get("endDate") ?? "";
-        const id = params.get("roomTypeID") ?? "";
-        const rt = options.roomTypes?.[id];
-        if (!rt) return reply({ success: true, data: [] });
-        // Like the real API as we read it: one row per date in [startDate, endDate) - the caller asks one day past check-out.
-        const days = (rate: number) =>
-          eachNight(start, end).map((date, i) => ({
-            date,
-            rateBase: rate,
-            totalRate: rate,
-            roomsAvailable: freeUnits(id, date, addDays(date, 1)),
-            closedToArrival: i === 0 ? rt.closedToArrival === true : false,
-            closedToDeparture: false,
-            blocked: false,
-            minLos: rt.minLos ?? 0,
-            maxLos: 0,
-          }));
-        // The derived Breakfast row first, so the restriction check must pick its row by rateID, not by order. The
-        // base row has no plan name here (live: null), unlike in getAvailableRoomTypes.
-        const typeOf = options.ratePlansWithoutRoomTypeId ? {} : { roomTypeID: id };
-        return reply({
-          success: true,
-          data: [
-            { rateID: breakfastRateId(rt), ...typeOf, isDerived: true, ratePlanID: "fake-plan-breakfast", ratePlanNamePublic: "Breakfast", roomRateDetailed: days(rt.rate + BREAKFAST_FIXED_BAHT) },
-            { rateID: rt.rateId, ...typeOf, isDerived: false, ratePlanID: null, ratePlanNamePublic: null, roomRateDetailed: days(rt.rate) },
-          ],
-        });
+        const filter = params.get("roomTypeID");
+        // Filtered by one room type (the restriction check), or every room type (the promo-rate lookup).
+        const ids = filter === null ? Object.keys(options.roomTypes ?? {}) : options.roomTypes?.[filter] ? [filter] : [];
+        const rowsFor = (id: string, rt: FakeRoomType) => {
+          // Like the real API as we read it: one row per date in [startDate, endDate) - the caller asks one day past check-out.
+          const days = (rate: number, minLos: number, closedToArrival: boolean) =>
+            eachNight(start, end).map((date, i) => ({
+              date,
+              rateBase: rate,
+              totalRate: rate,
+              roomsAvailable: freeUnits(id, date, addDays(date, 1)),
+              closedToArrival: i === 0 ? closedToArrival : false,
+              closedToDeparture: false,
+              blocked: false,
+              minLos,
+              maxLos: 0,
+            }));
+          // The spec sends roomTypeID only "if not specified in request".
+          const typeOf = options.ratePlansWithoutRoomTypeId && filter !== null ? {} : { roomTypeID: id };
+          const baseDays = days(rt.rate, rt.minLos ?? 0, rt.closedToArrival === true);
+          // The derived rows first, so the restriction check must pick its row by rateID, not by order. The base row has
+          // no plan name here (live: null), unlike in getAvailableRoomTypes. Only the Direct row carries a promo code.
+          return [
+            { rateID: breakfastRateId(rt), ...typeOf, isDerived: true, ratePlanID: "fake-plan-breakfast", ratePlanNamePublic: "Breakfast", promoCode: null, parentRateID: rt.rateId, roomRateDetailed: days(rt.rate + BREAKFAST_FIXED_BAHT, rt.minLos ?? 0, rt.closedToArrival === true) },
+            ...(rt.directRateId
+              ? [
+                  {
+                    rateID: rt.directRateId,
+                    ...typeOf,
+                    isDerived: true,
+                    ratePlanID: "fake-plan-direct",
+                    ratePlanNamePublic: "Direct booking rate",
+                    promoCode: FAKE_DIRECT_PROMO_CODE,
+                    derivedType: "percentage",
+                    derivedValue: DIRECT_PCT_OF_BASE - 100,
+                    parentRateID: rt.rateId,
+                    roomRateDetailed: days(fakeDirectRate(rt), rt.directMinLos ?? 0, rt.directClosedToArrival === true),
+                  },
+                ]
+              : []),
+            { rateID: rt.rateId, ...typeOf, isDerived: false, ratePlanID: null, ratePlanNamePublic: null, promoCode: null, parentRateID: null, roomRateDetailed: baseDays },
+          ];
+        };
+        return reply({ success: true, data: ids.flatMap((id) => rowsFor(id, (options.roomTypes ?? {})[id])) });
       }
       case "getReservations": {
         // Like the real API as we read it: the window is property-local (Bangkok) creation time.

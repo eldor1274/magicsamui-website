@@ -63,8 +63,9 @@ export default function RatePolicyModal({ room, ratePlan, open, onClose }: RateP
           </h3>
           <p className="mt-1 text-sm leading-relaxed text-(--bk-text-muted)">{HOUSE_POLICIES.cancellation}</p>
           <p className="mt-2 text-sm text-(--bk-text-muted)">
-            {HOUSE_POLICIES.checkIn} · {HOUSE_POLICIES.checkOut}
+            {HOUSE_POLICIES.checkIn} · {HOUSE_POLICIES.checkOut}. {HOUSE_POLICIES.lateArrival}
           </p>
+          <p className="mt-2 text-sm text-(--bk-text-muted)">{HOUSE_POLICIES.deposit}</p>
         </section>
       </div>
     </Modal>

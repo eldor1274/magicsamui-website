@@ -813,7 +813,7 @@ test("late arrival + requests whose pre-payment note failed: flags in the metada
   assert.equal((await fulfilSession(sessionId, kit.deps)).state, "confirmed");
   const notes = kit.fakeCb.reservations.get(body.holdReservationId!)!.notes;
   const paidNote = notes.find((n) => n.includes("PAID via Stripe"));
-  assert.match(paidNote ?? "", /\nEstimated arrival: after midnight\.$/);
+  assert.match(paidNote ?? "", /\nEstimated arrival: after 11 PM\.$/);
   assert.equal(missing().length, 1);
   assert.equal(missing()[0].severity, "warning");
   assert.equal(
@@ -827,11 +827,11 @@ test("late arrival + requests whose pre-payment note failed: flags in the metada
   assert.equal(missing().length, 1, "once");
 });
 
-test("the note failed with only ONE of the two: requests alone get the alert; after midnight alone is on the PAID note (no alert) unless that note fails too", async () => {
+test("the note failed with only ONE of the two: requests alone get the alert; after 11 PM alone is on the PAID note (no alert) unless that note fails too", async () => {
   const late = { ...GUEST, arrivalTime: "late", specialRequests: "" };
   for (const { name, guest, flags, paidNoteFails, line, lateLine } of [
     { name: "late, PAID note saved", guest: late, flags: ["1", "0", "0"], paidNoteFails: false, line: null, lateLine: true },
-    { name: "late, PAID note failed", guest: late, flags: ["1", "0", "0"], paidNoteFails: true, line: "Missing: arrival after midnight.", lateLine: false },
+    { name: "late, PAID note failed", guest: late, flags: ["1", "0", "0"], paidNoteFails: true, line: "Missing: arrival after 11 PM.", lateLine: false },
     { name: "requests", guest: GUEST, flags: ["0", "1", "0"], paidNoteFails: false, line: "Missing: special requests.", lateLine: false },
   ]) {
     const kit = makeKit();
@@ -848,7 +848,7 @@ test("the note failed with only ONE of the two: requests alone get the alert; af
     const missing = kit.alerts.filter((a) => a.subject === `Booking ${body.ref}: the guest's arrival time / requests are missing in Cloudbeds`);
     assert.deepEqual(missing.map((a) => a.lines[1]), line === null ? [] : [line], name);
     const paidNote = kit.fakeCb.reservations.get(body.holdReservationId!)!.notes.find((n) => n.includes("PAID via Stripe")) ?? "";
-    assert.equal(paidNote.endsWith("\nEstimated arrival: after midnight."), lateLine, name);
+    assert.equal(paidNote.endsWith("\nEstimated arrival: after 11 PM."), lateLine, name);
   }
 });
 
@@ -866,9 +866,13 @@ test("note saved -> no alert; an OLD session without the flags -> no alert and n
   const body = res.body as CheckoutSuccess;
   const sessionId = sessionIdOf(body);
   const old = kit2.fakeStripe.session(sessionId)!;
-  for (const k of ["msv_arrival_late", "msv_has_requests", "msv_note_saved"]) delete old.metadata[k];
+  // A session from before the flags is also from before msv_terms.
+  for (const k of ["msv_arrival_late", "msv_has_requests", "msv_note_saved", "msv_terms"]) delete old.metadata[k];
   kit2.fakeStripe.complete(sessionId);
   assert.equal((await fulfilSession(sessionId, kit2.deps)).state, "confirmed");
   assert.equal(kit2.alerts.some((a) => a.subject.includes("missing in Cloudbeds")), false);
-  assert.doesNotMatch(kit2.fakeCb.reservations.get(body.holdReservationId!)!.notes.join("\n"), /PAID via Stripe.*\n.*after midnight/);
+  // Checked on the PAID note itself: nothing may follow its last sentence (no arrival line, no terms line).
+  const paid = kit2.fakeCb.reservations.get(body.holdReservationId!)!.notes.find((n) => n.includes("PAID via Stripe")) ?? "";
+  assert.doesNotMatch(paid, /Estimated arrival/);
+  assert.ok(paid.endsWith("no longer applies."), paid);
 });

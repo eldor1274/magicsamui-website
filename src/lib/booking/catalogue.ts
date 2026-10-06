@@ -137,6 +137,66 @@ export function hasUnitConflict(slugs: string[]): boolean {
   return false;
 }
 
+/* ------------------------------- policies ----------------------------- */
+
+/**
+ * Version of the booking terms below (house rules, deposit, check-in,
+ * children, transfer, cancellation). Change it whenever what a guest agrees
+ * to changes: it is carried in the Stripe session metadata (msv_terms) and
+ * the "PAID via Stripe" Cloudbeds note, so a dispute can be judged against
+ * the terms the guest actually saw. bookingTerms.test.ts pins a fingerprint of
+ * HOUSE_POLICIES per version, so a text change without a new version fails.
+ */
+export const POLICY_VERSION = "2026-10-06";
+
+/** Free transfer on arrival for stays of at least this many nights. */
+export const FREE_PICKUP_MIN_NIGHTS = 2;
+
+const CHECK_IN_TIME = "3:00 PM";
+const CHECK_IN_END_TIME = "11:00 PM";
+const CHECK_OUT_TIME = "11:00 AM";
+
+/**
+ * The booking terms and house rules: the one source for every place the
+ * booking engine shows them (and for what the guest ticks to agree to).
+ */
+export const HOUSE_POLICIES = {
+  checkInTime: CHECK_IN_TIME,
+  /** Latest check-in; later arrivals only by arrangement. */
+  checkInEndTime: CHECK_IN_END_TIME,
+  checkOutTime: CHECK_OUT_TIME,
+  checkIn: `Check-in ${CHECK_IN_TIME} - ${CHECK_IN_END_TIME}`,
+  checkOut: `Check-out by ${CHECK_OUT_TIME}`,
+  lateArrival: `Arrivals after ${CHECK_IN_END_TIME} only by arrangement - message us on WhatsApp first.`,
+  /** Under the arrival-time choice and on the confirmation page. */
+  arrivalHint: `Check-in is ${CHECK_IN_TIME} - ${CHECK_IN_END_TIME}. Arriving later? Message us on WhatsApp first so we can arrange it.`,
+  cancellation:
+    "Cancel 60 days or more before arrival: full refund. Less than 60 days before arrival: 50% of the stay is refunded. The payment processing fee is refunded only when the whole stay is refunded.",
+  children:
+    "Guests aged 12 and over count as adults. Children under 12 on request - please message us before booking. Children must be accompanied by an adult.",
+  /** For small popovers (guest pickers). */
+  childrenShort: "Ages 12 and over count as adults. Under 12 on request - message us first.",
+  /** Arrival only (decision 4): "pickup", never "transfer", which reads as both ways. */
+  transferTitle: "Free airport or pier pickup",
+  transfer: `Free transfer on arrival from Samui Airport or a nearby pier (such as Bangrak Pier) on stays of ${FREE_PICKUP_MIN_NIGHTS} nights or more.`,
+  transferShort: `On arrival at Samui Airport or a nearby pier, for stays of ${FREE_PICKUP_MIN_NIGHTS} nights or more.`,
+  /** Once the stay qualifies (after booking). */
+  transferHowTo: "Send us your flight or ferry and arrival time on WhatsApp and we'll meet you at Samui Airport or the pier.",
+  deposit: "A damage deposit of 8,000 THB per unit is paid in cash on arrival and refunded at check-out after inspection.",
+  houseRules: [
+    "No pets.",
+    "No parties.",
+    "No smoking inside (the terrace is fine) - 2,000 THB fee.",
+    "No toilet paper or sanitary items in the toilet - 2,000 THB fee.",
+    "Photo ID is required at check-in.",
+    "Late check-out is not available.",
+    "Cleaning during your stay: 300 THB per suite (sheets and towels are changed free every 3 days).",
+    "A lost key or access card is 500 THB; damage or missing items are charged.",
+  ],
+  /** What the guest agrees to (the checkbox and the payment fine print). */
+  agreement: "the house rules, the deposit and the booking and cancellation policy",
+};
+
 /* ----------------------------- rate plans ----------------------------- */
 
 export const BREAKFAST_SATANG_PER_GUEST_PER_NIGHT = 100_000; // 1,000.00 THB
@@ -169,7 +229,7 @@ export const RATE_PLANS: Record<RatePlanId, RatePlanInfo> = {
     name: "Standard Rate",
     supplementSatangPerGuestPerNight: 0,
     packageId: "0",
-    shortDescription: "Room only. Free airport pickup on stays of 2 nights or more.",
+    shortDescription: `Room only. ${HOUSE_POLICIES.transferTitle} on stays of ${FREE_PICKUP_MIN_NIGHTS} nights or more.`,
     image: null,
     policy: [],
   },
@@ -212,21 +272,3 @@ export const ADDON_IDS: AddonId[] = ["breakfast-pp"];
 export function isAddonId(v: unknown): v is AddonId {
   return v === "breakfast-pp";
 }
-
-/* ------------------------------- policies ----------------------------- */
-
-const CHECK_IN_TIME = "3:00 PM";
-const CHECK_OUT_TIME = "11:00 AM";
-
-export const HOUSE_POLICIES = {
-  checkInTime: CHECK_IN_TIME,
-  checkOutTime: CHECK_OUT_TIME,
-  checkIn: `Check-in from ${CHECK_IN_TIME}`,
-  checkOut: `Check-out by ${CHECK_OUT_TIME}`,
-  cancellation:
-    "Full charge (100% of stay) if cancelled within 60 days of arrival; 50% of stay if cancelled within 90 days of arrival. The payment processing fee is refunded only when the whole stay is refunded.",
-  children: "Children are not accommodated - all guests are counted as adults.",
-  airportPickup: "Free airport pickup on stays of 2 nights or more.",
-};
-
-export const FREE_PICKUP_MIN_NIGHTS = 2;

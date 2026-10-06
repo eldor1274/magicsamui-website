@@ -65,6 +65,12 @@ export interface HoldInput {
   /** postReservation sourceID (config.cloudbedsSourceId); null/absent = not sent (Cloudbeds' default source). */
   sourceId?: string | null;
   /**
+   * postReservation promoCode: Cloudbeds' code of the Direct rate (config CLOUDBEDS_PROMO_CODE), sent when a
+   * room is held on a Direct roomRateID (v1.3: "Required for specials and packages that uses it. 'rateID'
+   * parameter required for using 'promoCode'"). null/absent = not sent.
+   */
+  promoCode?: string | null;
+  /**
    * The room subtotal we quoted (satang). Never sent to the real Cloudbeds;
    * only the mock writer passes it to the in-repo fake, which prices the hold
    * at this amount unless a test overrides it.
@@ -432,6 +438,7 @@ export function createCloudbedsWriter(options: CloudbedsWriterOptions): Cloudbed
         children: input.rooms.map((r) => ({ roomTypeID: r.roomTypeId, quantity: 0 })),
         paymentMethod: input.paymentMethod,
         sourceID: input.sourceId ?? null,
+        promoCode: input.promoCode ?? null,
         thirdPartyIdentifier: input.identifier ?? input.ref,
         sendEmailConfirmation: false,
         estimatedArrivalTime: input.estimatedArrivalTime,

@@ -305,6 +305,18 @@ function ErrorPanel({
           </>
         );
       break;
+    case "terms_changed":
+      // The terms on this page are out of date (changed by an update since it loaded): only a reload shows the
+      // new ones. The tick was cleared, so the reloaded page asks for it again on the guest step. Never retried by itself.
+      title = "Our booking terms were just updated";
+      body = error.message; // the server message already says nothing was reserved or charged
+      actions = (
+        <button type="button" onClick={() => window.location.reload()} className={PRIMARY_BUTTON}>
+          <RefreshCw size={15} aria-hidden="true" />
+          Refresh page
+        </button>
+      );
+      break;
     case "test_mode_restricted":
       // Stripe test mode with real Cloudbeds writes: holds only far ahead and for the owner's test email.
       title = "Test booking not allowed";
@@ -484,7 +496,9 @@ export default function PaymentStep({
             <div>
               <dt className="text-(--bk-text-subtle)">Check-in</dt>
               <dd className="font-medium text-(--bk-text)">{formatDisplayDateWithWeekday(checkIn)}</dd>
-              <dd className="text-xs text-(--bk-text-muted)">From {HOUSE_POLICIES.checkInTime}</dd>
+              <dd className="text-xs text-(--bk-text-muted)">
+                {HOUSE_POLICIES.checkInTime} - {HOUSE_POLICIES.checkInEndTime}
+              </dd>
             </div>
             <div>
               <dt className="text-(--bk-text-subtle)">Check-out</dt>
@@ -509,8 +523,23 @@ export default function PaymentStep({
                     <p className="text-(--bk-text-muted)">
                       {line.ratePlanName} · {line.adults} {line.adults === 1 ? "guest" : "guests"} · {formatNights(line.nights)}
                     </p>
+                    {line.listRoomSatang !== undefined && quote.directRate && (
+                      <p className="font-medium text-(--bk-success)">{quote.directRate.label}</p>
+                    )}
                   </div>
-                  <p className="bk-price shrink-0 font-medium text-(--bk-text)">{formatThb(line.roomSatang)}</p>
+                  <div className="shrink-0 text-right">
+                    {/* Cloudbeds' Direct rate: the base price struck through above the price held and charged. */}
+                    {line.listRoomSatang !== undefined && (
+                      <p className="bk-price text-xs text-(--bk-text-subtle) line-through">
+                        <span className="bk-sr-only">Was </span>
+                        {formatThb(line.listRoomSatang)}
+                      </p>
+                    )}
+                    <p className="bk-price font-medium text-(--bk-text)">
+                      {line.listRoomSatang !== undefined && <span className="bk-sr-only">Now </span>}
+                      {formatThb(line.roomSatang)}
+                    </p>
+                  </div>
                 </div>
                 {line.addons.map((a) => (
                   <div key={a.addonId} className="mt-1 flex items-start justify-between gap-3 pl-3 text-(--bk-text-muted)">
@@ -699,8 +728,8 @@ export default function PaymentStep({
         <p className="flex items-start gap-1.5 text-xs text-(--bk-text-subtle)">
           <ShieldCheck size={14} aria-hidden="true" className="mt-px shrink-0" />
           <span>
-            By paying you agree to the booking and cancellation policy. {HOUSE_POLICIES.cancellation} Prices are in Thai baht; your bank may
-            convert them.
+            By paying you agree to {HOUSE_POLICIES.agreement}. {HOUSE_POLICIES.cancellation} {HOUSE_POLICIES.deposit} Prices are in Thai
+            baht; your bank may convert them.
           </span>
         </p>
         {/* Phones: the floating WhatsApp button is hidden on this step (it would cover Pay), so the link lives here. */}

@@ -267,7 +267,7 @@ test("StatusResponse fields the return page reads stay in the contract", () => {
   assert.equal(returnViewKind(sample), "paid");
 });
 
-test("own engine: the DIRECT-code perk is swapped out (promos are off there); default pages keep it", async () => {
+test("own engine without the Direct rate (directCopySwapped): the DIRECT-code perk is swapped out; otherwise pages keep it", async () => {
   const { landings, perksForEngine, OWN_ENGINE_PERK } = await import("../../data/landings.ts");
   for (const t of Object.values(landings)) {
     assert.ok(t.perks.some((p) => p.text.includes("DIRECT")), `${t.code} has the DIRECT perk today`);

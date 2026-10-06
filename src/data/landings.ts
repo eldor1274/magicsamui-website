@@ -10,8 +10,10 @@ export interface LandingPerk {
 
 /**
  * Replaces the "Code DIRECT at checkout" perk while our own booking engine
- * serves /booking (BOOKING_ENGINE=own): promo codes are off there until DIRECT
- * maps to a real Cloudbeds rate plan, so the page must not promise a code.
+ * serves /booking (BOOKING_ENGINE=own) WITHOUT honouring DIRECT
+ * (BOOKING_DIRECT_PROMO=off: see directCopySwapped in lib/booking/config), so
+ * the page never promises a code that page can't apply. While the own engine
+ * sells Cloudbeds' Direct rate for the code, the DIRECT perk stays.
  */
 export const OWN_ENGINE_PERK: Record<string, LandingPerk> = {
   en: { title: "Book direct, instantly", text: "Live availability and secure card or PromptPay payment, confirmed on the spot." },
@@ -26,9 +28,10 @@ export const OWN_ENGINE_PERK: Record<string, LandingPerk> = {
 
 /**
  * The "best rate when you book direct" clause of each landing description,
- * and its neutral replacement while our own engine serves /booking: it adds an
- * openly shown payment processing fee and DIRECT is off there, so the site
- * must not promise the best price (consumer law, Google Ads misrepresentation).
+ * and its neutral replacement while our own engine serves /booking without
+ * DIRECT (BOOKING_DIRECT_PROMO=off): it adds an openly shown payment processing
+ * fee, so without the Direct rate the site must not promise the best price
+ * (consumer law, Google Ads misrepresentation).
  */
 export const OWN_ENGINE_DESCRIPTION_CLAUSE: Record<string, [string, string]> = {
   he: ["הזמינו ישירות וקבלו את המחיר הטוב ביותר.", "הזמינו ישירות עם זמינות בזמן אמת."],
@@ -40,16 +43,19 @@ export const OWN_ENGINE_DESCRIPTION_CLAUSE: Record<string, [string, string]> = {
   th: ["จองตรงราคาดีที่สุด", "จองตรงพร้อมดูห้องว่างแบบเรียลไทม์"],
 };
 
-/** A landing's meta description, without the best-rate promise while the own engine serves /booking. */
-export function descriptionForEngine(t: Pick<Landing, "code" | "description">, ownEngine: boolean): string {
+/**
+ * A landing's meta description, without the best-rate promise while `swapDirectCopy`
+ * (directCopySwapped(): the own engine serves /booking without the Direct rate).
+ */
+export function descriptionForEngine(t: Pick<Landing, "code" | "description">, swapDirectCopy: boolean): string {
   const clause = OWN_ENGINE_DESCRIPTION_CLAUSE[t.code];
-  if (!ownEngine || !clause) return t.description;
+  if (!swapDirectCopy || !clause) return t.description;
   return t.description.replace(clause[0], clause[1]);
 }
 
-/** The perks to show: the DIRECT-code perk is swapped out while the own engine is live. */
-export function perksForEngine(perks: LandingPerk[], code: string, ownEngine: boolean): LandingPerk[] {
-  if (!ownEngine) return perks;
+/** The perks to show: the DIRECT-code perk is swapped out while `swapDirectCopy` (directCopySwapped()). */
+export function perksForEngine(perks: LandingPerk[], code: string, swapDirectCopy: boolean): LandingPerk[] {
+  if (!swapDirectCopy) return perks;
   return perks.map((p) => (/DIRECT/.test(p.text) ? (OWN_ENGINE_PERK[code] ?? OWN_ENGINE_PERK.en) : p));
 }
 
@@ -124,7 +130,7 @@ export const landings: Record<string, Landing> = {
     perksTitle: "למה להזמין ישירות?",
     perks: [
       { title: "המחיר הטוב ביותר, תמיד", text: "קוד DIRECT בתשלום — זול יותר מכל אתר הזמנות." },
-      { title: "הסעה חינם משדה התעופה", text: "טרנספר חינם בשהייה של שני לילות ומעלה." },
+      { title: "הסעה חינם משדה התעופה או מהמזח", text: "טרנספר חינם משדה התעופה בקוסמוי או ממזח סמוך, בשהייה של שני לילות ומעלה." },
       { title: "קשר ישיר עם המארח", text: "וואטסאפ איתנו לפני, במהלך ואחרי השהייה." },
       { title: "הגעה גמישה", text: "אפשר להשאיר מזוודות בכל שעה — רק תעדכנו מראש." },
     ],
@@ -158,9 +164,9 @@ export const landings: Record<string, Landing> = {
     perksTitle: "Почему бронировать напрямую",
     perks: [
       { title: "Лучшая цена — всегда", text: "Промокод DIRECT при оформлении дешевле любого сайта бронирования." },
-      { title: "Бесплатный трансфер из аэропорта", text: "Для проживания от 2 ночей." },
+      { title: "Бесплатный трансфер из аэропорта или с пирса", text: "Из аэропорта Самуи или с ближайшего пирса — для проживания от 2 ночей." },
       { title: "Прямая связь с хозяином", text: "WhatsApp до, во время и после поездки." },
-      { title: "Гибкое заселение", text: "Оставьте багаж в любое время — просто предупредите нас." },
+      { title: "Гибкое прибытие", text: "Оставьте багаж в любое время — просто предупредите нас." },
     ],
     reviewsLine: "9,9 «Исключительно» на Booking.com · 4,96 на Airbnb",
     locationTitle: "Расположение",
@@ -192,7 +198,7 @@ export const landings: Record<string, Landing> = {
     perksTitle: "Pourquoi réserver en direct ?",
     perks: [
       { title: "Le meilleur tarif, toujours", text: "Le code DIRECT au paiement bat tous les sites de réservation." },
-      { title: "Transfert aéroport offert", text: "Navette gratuite dès 2 nuits." },
+      { title: "Transfert aéroport ou embarcadère offert", text: "Navette gratuite depuis l’aéroport de Samui ou un embarcadère proche, dès 2 nuits." },
       { title: "Contact direct avec l’hôte", text: "WhatsApp avant, pendant et après votre séjour." },
       { title: "Arrivée flexible", text: "Déposez vos bagages à toute heure — prévenez-nous simplement." },
     ],
@@ -226,7 +232,7 @@ export const landings: Record<string, Landing> = {
     perksTitle: "Warum direkt buchen?",
     perks: [
       { title: "Immer der beste Preis", text: "Mit dem Code DIRECT an der Kasse günstiger als auf jedem Buchungsportal." },
-      { title: "Kostenloser Flughafentransfer", text: "Gratis ab 2 Übernachtungen." },
+      { title: "Kostenloser Transfer ab Flughafen oder Pier", text: "Gratis vom Flughafen Samui oder einem nahe gelegenen Pier – ab 2 Übernachtungen." },
       { title: "Direkter Draht zum Gastgeber", text: "WhatsApp vor, während und nach Ihrem Aufenthalt." },
       { title: "Flexible Anreise", text: "Gepäck jederzeit abstellen – sagen Sie uns einfach Bescheid." },
     ],
@@ -260,7 +266,7 @@ export const landings: Record<string, Landing> = {
     perksTitle: "为什么直接预订",
     perks: [
       { title: "始终最优价", text: "结账时使用 DIRECT 优惠码，比任何预订网站都划算。" },
-      { title: "免费机场接送", text: "入住 2 晚及以上免费接送。" },
+      { title: "抵达时免费机场或码头接驳", text: "入住 2 晚及以上，免费从苏梅机场或附近码头接您。" },
       { title: "直连房东", text: "入住前后随时通过 WhatsApp 联系我们。" },
       { title: "灵活抵达", text: "任何时间都可寄存行李——提前告知即可。" },
     ],
@@ -293,7 +299,7 @@ export const landings: Record<string, Landing> = {
     perksTitle: "Por qué reservar directo",
     perks: [
       { title: "El mejor precio, siempre", text: "El código DIRECT al pagar supera a cualquier web de reservas." },
-      { title: "Traslado gratis desde el aeropuerto", text: "Gratuito en estancias de 2 noches o más." },
+      { title: "Traslado gratis desde el aeropuerto o el muelle", text: "Desde el aeropuerto de Samui o un muelle cercano, en estancias de 2 noches o más." },
       { title: "Línea directa con el anfitrión", text: "WhatsApp antes, durante y después de tu estancia." },
       { title: "Llegada flexible", text: "Deja tu equipaje a cualquier hora; solo avísanos." },
     ],
@@ -327,9 +333,9 @@ export const landings: Record<string, Landing> = {
     perksTitle: "ทำไมต้องจองตรง",
     perks: [
       { title: "ราคาดีที่สุดเสมอ", text: "ใส่โค้ด DIRECT ตอนชำระเงิน ถูกกว่าทุกเว็บจอง" },
-      { title: "รับส่งสนามบินฟรี", text: "ฟรีเมื่อเข้าพัก 2 คืนขึ้นไป" },
+      { title: "รับฟรีจากสนามบินหรือท่าเรือ", text: "รับจากสนามบินสมุยหรือท่าเรือใกล้เคียง ฟรีเมื่อเข้าพัก 2 คืนขึ้นไป" },
       { title: "ติดต่อเจ้าของโดยตรง", text: "WhatsApp ได้ทั้งก่อน ระหว่าง และหลังเข้าพัก" },
-      { title: "เช็คอินยืดหยุ่น", text: "ฝากกระเป๋าได้ทุกเวลา เพียงแจ้งล่วงหน้า" },
+      { title: "การมาถึงที่ยืดหยุ่น", text: "ฝากกระเป๋าได้ทุกเวลา เพียงแจ้งล่วงหน้า" },
     ],
     reviewsLine: "9.9 “ยอดเยี่ยม” บน Booking.com · 4.96 บน Airbnb",
     locationTitle: "ทำเลที่ตั้ง",

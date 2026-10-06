@@ -260,7 +260,7 @@ export default function AddonsStep({ cart, checkIn, checkOut, onToggleAddon }: A
         </span>
         <div className="text-sm">
           <p className="font-semibold text-(--bk-text)">
-            Free airport pickup{" "}
+            {HOUSE_POLICIES.transferTitle}{" "}
             {pickupIncluded && (
               <span className="ml-1 rounded-(--bk-radius-pill) bg-(--bk-success-soft) px-2 py-0.5 text-xs font-medium text-(--bk-success)">
                 Included
@@ -268,9 +268,7 @@ export default function AddonsStep({ cart, checkIn, checkOut, onToggleAddon }: A
             )}
           </p>
           <p className="mt-0.5 text-(--bk-text-muted)">
-            {pickupIncluded
-              ? "Included with your stay - send us your flight details on WhatsApp after booking and we'll meet you at Samui airport."
-              : HOUSE_POLICIES.airportPickup}
+            {pickupIncluded ? `Included with your stay. ${HOUSE_POLICIES.transferHowTo}` : HOUSE_POLICIES.transfer}
           </p>
         </div>
       </div>

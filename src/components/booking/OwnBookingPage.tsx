@@ -3,6 +3,7 @@ import BookingApp from "@/components/booking/BookingAppLazy";
 import type { SearchDraft } from "@/components/booking/state";
 import { BOOKING_WINDOW_MONTHS, MAX_NIGHTS, MAX_SEARCH_ADULTS, getPublicBookingConfig } from "@/lib/booking/config";
 import { addMonths, todayInBangkok, validateStayDates } from "@/lib/booking/dates";
+import { promoInputOffered } from "@/lib/booking/quote";
 import { isBookingRef } from "@/lib/booking/ref";
 import { parseTheme } from "@/lib/booking/theme";
 import type { ThemeName } from "@/lib/booking/types";
@@ -29,8 +30,9 @@ function prefill(sp: BookingSearchParams, today: string, promoEnabled: boolean):
   }
   const adults = Number(one(sp.adults));
   if (Number.isInteger(adults) && adults >= 1 && adults <= MAX_SEARCH_ADULTS) out.adults = adults;
-  // When promos are off (every Beam/Stripe mode) a ?promo= from an ad link (e.g. ?promo=DIRECT) is
-  // dropped quietly: the page works as normal and never shows a code that wouldn't apply.
+  // Where no code input is offered (Beam modes) a ?promo= from an ad link (e.g. ?promo=DIRECT) is dropped
+  // quietly. On the own engine it is applied (Cloudbeds' Direct rate) or, where the Direct rate can't be sold,
+  // answered with a note linking the classic booking page.
   const promo = one(sp.promo);
   if (promoEnabled && promo && /^[A-Za-z0-9_-]{1,32}$/.test(promo)) out.promo = promo.toUpperCase();
   return Object.keys(out).length > 0 ? out : null;
@@ -82,7 +84,7 @@ export default function OwnBookingPage({
   return (
     <div className="mx-auto max-w-6xl px-3 py-6 sm:px-5 sm:py-10">
       <BookingApp
-        initialSearch={prefill(sp, today, config.promoEnabled)}
+        initialSearch={prefill(sp, today, promoInputOffered(config))}
         theme={theme}
         resume={resume}
         resumeReason={parseResumeReason(one(sp.reason))}

@@ -13,7 +13,7 @@
 
 import { useContext, useId, useState } from "react";
 import { ArrowRight, BedDouble, Car, Info, Moon, ShieldCheck, Trash2, User } from "lucide-react";
-import { FREE_PICKUP_MIN_NIGHTS, getCatalogueRoom } from "@/lib/booking/catalogue";
+import { FREE_PICKUP_MIN_NIGHTS, HOUSE_POLICIES, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { formatDisplayDate, formatNights, nightsBetween } from "@/lib/booking/dates";
 import { formatThb, formatThbWithCode } from "@/lib/booking/format";
 import { DEMO_COPY_CONFIG, providerCopy } from "@/lib/booking/paymentCopy";
@@ -157,9 +157,24 @@ export default function ReservationSummary({
                     <div className="min-w-0">
                       <p className="text-sm font-medium leading-snug">{name}</p>
                       <p className="mt-0.5 text-xs text-(--bk-text-muted)">{planName}</p>
+                      {line?.listRoomSatang !== undefined && quote?.directRate && (
+                        <p className="mt-0.5 text-xs font-medium text-(--bk-success)">{quote.directRate.label}</p>
+                      )}
                     </div>
                     {line ? (
-                      amount(formatThb(line.roomSatang), "shrink-0 text-sm")
+                      line.listRoomSatang !== undefined ? (
+                        // Cloudbeds' Direct rate: the base price struck through above the price held and charged.
+                        <span className="shrink-0 text-right text-sm">
+                          <span className="bk-price block text-xs text-(--bk-text-subtle) line-through">
+                            <span className="bk-sr-only">Was </span>
+                            {formatThb(line.listRoomSatang)}
+                          </span>
+                          <span className="bk-sr-only">Now </span>
+                          {amount(formatThb(line.roomSatang))}
+                        </span>
+                      ) : (
+                        amount(formatThb(line.roomSatang), "shrink-0 text-sm")
+                      )
                     ) : (
                       <span className="mt-0.5 h-4 w-16 shrink-0 animate-pulse rounded bg-(--bk-surface-sunken)" aria-hidden="true" />
                     )}
@@ -252,7 +267,7 @@ export default function ReservationSummary({
           {quote && quote.nights >= FREE_PICKUP_MIN_NIGHTS && (
             <p className="mt-3 flex items-center gap-2 rounded-(--bk-radius-control) bg-(--bk-success-soft) px-3 py-2 text-xs text-(--bk-text)">
               <Car size={15} className="shrink-0 text-(--bk-success)" aria-hidden="true" />
-              Free airport pickup included with your stay
+              {HOUSE_POLICIES.transferTitle} included with your stay
             </p>
           )}
 

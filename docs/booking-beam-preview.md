@@ -204,7 +204,7 @@ Personal data shown or typed on screen (the whole guest details form, lead guest
 
 1. **Beam onboarding**
    - Confirm that villa / hotel stays are eligible.
-   - Confirm the legal entity (KaSem Co., Ltd. vs Pakwan Samui LP), payout account, per-transaction maximum (stays can exceed 100k THB), and whether overseas cards are enabled.
+   - Confirm the legal entity (Pakwan Samui LP, the Stripe account holder named on `/legal` since 2026-10-06), payout account, per-transaction maximum (stays can exceed 100k THB), and whether overseas cards are enabled.
 2. **Playground run**
    - Set the playground env vars and `BOOKING_TOKEN_SECRET`.
    - Create a Lighthouse webhook to `https://<host>/api/beam/webhook` (events: `payment_link.paid`, `charge.succeeded`, `charge.failed`, `refund.*`) and set `BEAM_WEBHOOK_HMAC_KEY`.

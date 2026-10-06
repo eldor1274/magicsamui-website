@@ -4,7 +4,8 @@
 // "Add" picker on a rate row: Adults stepper capped at the room's maximum,
 // "Max: N per room", Cancel / Confirm. Popover under the Add button on
 // desktop, bottom sheet on phones. Quantity is always 1 (every room type is a
-// single unit) and children are not offered (house rule).
+// single unit). There is no children stepper: guests 12 and over count as
+// adults and children under 12 are on request (HOUSE_POLICIES.childrenShort).
 // Keep OccupancyPopoverProps stable.
 
 import { useState } from "react";
@@ -73,7 +74,7 @@ function OccupancyPicker({ onClose, onConfirm, roomName, ratePlanName, maxAdults
         maxReachedLabel="Add guest, maximum occupancy reached"
         note={`Max: ${max} per room`}
       />
-      <p className="text-xs leading-relaxed text-(--bk-text-subtle)">{HOUSE_POLICIES.children}</p>
+      <p className="text-xs leading-relaxed text-(--bk-text-subtle)">{HOUSE_POLICIES.childrenShort}</p>
     </PickerOverlay>
   );
 }

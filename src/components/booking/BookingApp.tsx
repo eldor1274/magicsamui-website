@@ -10,12 +10,12 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { fetchAvailability, isAllowedPaymentRedirect, postAbandon, postCheckout, recallLinkToken, rememberLinkToken } from "@/lib/booking/apiClient";
-import { getCatalogueRoom } from "@/lib/booking/catalogue";
+import { POLICY_VERSION, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { createBookingAnalytics } from "@/lib/booking/clientAnalytics";
 import { formatThbWithCode } from "@/lib/booking/format";
 import { isGuestValid, normalizePostcode, validateGuest } from "@/lib/booking/guest";
 import { providerCopy } from "@/lib/booking/paymentCopy";
-import { computeQuote } from "@/lib/booking/quote";
+import { computeQuote, promoCodeHint, promoInputOffered } from "@/lib/booking/quote";
 import type { AbandonResponse, AddonId, AvailabilityResponse, CartItem, IsoDate, PublicBookingConfig, ThemeName } from "@/lib/booking/types";
 import { allowListedSearch, returnPagePath } from "@/lib/booking/urls";
 import type { ResumeReason } from "@/lib/booking/urls";
@@ -307,6 +307,7 @@ export default function BookingApp({
 
   /* ------------------------------ search ------------------------------- */
 
+  const sendsPromo = promoInputOffered(config);
   const runSearch = useCallback((draft: SearchDraft, options: { fresh?: boolean } = {}) => {
     if (!draft.checkIn || !draft.checkOut) return;
     const key = searchKey(draft);
@@ -314,8 +315,8 @@ export default function BookingApp({
     const controller = new AbortController();
     abortRef.current = controller;
     dispatch({ type: "searchStarted", key });
-    // Promos off (Beam/Stripe): never send a code left over in the saved search; the code pill is hidden.
-    const promo = config.promoEnabled ? draft.promo.trim() : "";
+    // No code input here (Beam): never send a code left over in the saved search; the code pill is hidden.
+    const promo = sendsPromo ? draft.promo.trim() : "";
     fetchAvailability(
       { checkIn: draft.checkIn, checkOut: draft.checkOut, adults: draft.adults, promo: promo || undefined },
       controller.signal,
@@ -331,7 +332,7 @@ export default function BookingApp({
         if (e instanceof DOMException && e.name === "AbortError") return;
         dispatch({ type: "searchFailed", key, message: "Something went wrong. Please try again." });
       });
-  }, [announce, config.promoEnabled]);
+  }, [announce, sendsPromo]);
 
   // After hydration (reload, URL prefill, return from Beam) fetch fresh prices.
   const needsInitialSearch =
@@ -523,6 +524,8 @@ export default function BookingApp({
       // What the guest was shown (the server's own quote after a price change); compared, never charged.
       expectedTotalSatang: q.totalSatang,
       expectedDueNowSatang: q.dueNowSatang,
+      // The terms version this page showed next to the box the guest ticked (Stripe refuses any other: terms_changed).
+      termsVersion: POLICY_VERSION,
       theme,
       // Stripe: the reservation is created in Cloudbeds before payment, so the server needs the lead guest.
       // Sent only in the request body (never in a URL); demo/Beam modes keep the details in the browser.
@@ -549,7 +552,9 @@ export default function BookingApp({
         ? `The price has changed. New total ${formatThbWithCode(res.quote.totalSatang)}.`
         : res.error === "live_payments_locked"
           ? "Online payment is paused. Nothing was charged."
-          : "Payment could not be started. Nothing was charged.",
+          : res.error === "terms_changed"
+            ? "Our booking terms were just updated. Nothing was charged. Please refresh the page and review them."
+            : "Payment could not be started. Nothing was charged.",
     );
     // price_changed WITHOUT a quote (Stripe: Cloudbeds priced the hold differently and it was cancelled):
     // refresh once past the cache; the guest decides whether to pay again (never an automatic retry).
@@ -709,7 +714,8 @@ export default function BookingApp({
     maxDate,
     maxNights: config.maxNights,
     maxAdults: config.maxSearchAdults,
-    promoEnabled: config.promoEnabled,
+    promoEnabled: sendsPromo,
+    promoCodeHint: promoCodeHint(config),
   };
 
   const summary = (variant: "sidebar" | "sheet") => (

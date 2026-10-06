@@ -40,15 +40,15 @@ test("every room sold online occupies at least one physical unit (else it would 
 });
 
 test("booking UI copy for check-in/out times and children comes from HOUSE_POLICIES", () => {
-  assert.equal(HOUSE_POLICIES.checkIn, `Check-in from ${HOUSE_POLICIES.checkInTime}`);
+  assert.equal(HOUSE_POLICIES.checkIn, `Check-in ${HOUSE_POLICIES.checkInTime} - ${HOUSE_POLICIES.checkInEndTime}`);
   assert.equal(HOUSE_POLICIES.checkOut, `Check-out by ${HOUSE_POLICIES.checkOutTime}`);
   const source = (path: string) => readFileSync(new URL(`../../components/booking/${path}`, import.meta.url), "utf8");
   const occupancy = source("results/OccupancyPopover.tsx");
-  assert.ok(occupancy.includes("{HOUSE_POLICIES.children}"));
-  assert.ok(!occupancy.includes(HOUSE_POLICIES.children), "no hard-coded copy of the children rule");
+  assert.ok(occupancy.includes("{HOUSE_POLICIES.childrenShort}"));
+  assert.ok(!occupancy.includes(HOUSE_POLICIES.childrenShort), "no hard-coded copy of the children rule");
   const payment = source("checkout/PaymentStep.tsx");
-  assert.ok(payment.includes("From {HOUSE_POLICIES.checkInTime}") && payment.includes("By {HOUSE_POLICIES.checkOutTime}"));
-  assert.ok(!payment.includes(`From ${HOUSE_POLICIES.checkInTime}`) && !payment.includes(`By ${HOUSE_POLICIES.checkOutTime}`), "no hard-coded times");
+  assert.ok(payment.includes("{HOUSE_POLICIES.checkInTime} - {HOUSE_POLICIES.checkInEndTime}") && payment.includes("By {HOUSE_POLICIES.checkOutTime}"));
+  assert.ok(!payment.includes(HOUSE_POLICIES.checkInTime) && !payment.includes(`By ${HOUSE_POLICIES.checkOutTime}`), "no hard-coded times");
 });
 
 test("cartConflict explains why a room can't be added", () => {

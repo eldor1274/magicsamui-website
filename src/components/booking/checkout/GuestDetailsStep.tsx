@@ -2,10 +2,11 @@
 
 // OWNER: ui-checkout
 // "Add Guests" step: the lead guest's details, arrival time, special
-// requests, the policy summary and the required policy checkbox. Inline
-// errors (aria-invalid + aria-describedby) appear after the first submit and
-// focus moves to the first invalid field. The <form id={formId}> is also
-// submitted by the summary CTA / mobile bar (form="guest-form").
+// requests, the booking terms and house rules (HOUSE_POLICIES) and the
+// required policy checkbox. Inline errors (aria-invalid + aria-describedby)
+// appear after the first submit and focus moves to the first invalid field.
+// The <form id={formId}> is also submitted by the summary CTA / mobile bar
+// (form="guest-form").
 // Guest details are personal data. Demo/Beam modes keep them in the browser;
 // Stripe modes (config.requiresGuestDetails) send them in the checkout request
 // body only - to Cloudbeds for the reservation and to Stripe for the receipt -
@@ -273,7 +274,7 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
           id={ids.arrivalTime}
           label="Estimated arrival time"
           error={err("arrivalTime")}
-          hint={`${HOUSE_POLICIES.checkIn}. Arriving late is fine - just let us know.`}
+          hint={HOUSE_POLICIES.arrivalHint}
         >
           <select
             id={ids.arrivalTime}
@@ -331,20 +332,33 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
       >
         <h3 id={`${formId}-policies`} className="bk-heading flex items-center gap-2 text-base text-(--bk-text)">
           <ShieldCheck size={18} aria-hidden="true" className="text-(--bk-accent)" />
-          Booking and cancellation policy
+          House rules and booking policy
         </h3>
         <ul className="space-y-1.5 text-(--bk-text-muted)">
           <li>
             <span className="font-medium text-(--bk-text)">{HOUSE_POLICIES.checkIn}</span>,{" "}
-            {HOUSE_POLICIES.checkOut.replace(/^Check-out/, "check-out")}.
+            {HOUSE_POLICIES.checkOut.replace(/^Check-out/, "check-out")}. {HOUSE_POLICIES.lateArrival}
           </li>
           <li>
             <span className="font-medium text-(--bk-text)">Cancellation:</span> {HOUSE_POLICIES.cancellation}
           </li>
-          <li>{HOUSE_POLICIES.children}</li>
+          <li>
+            <span className="font-medium text-(--bk-text)">Deposit:</span> {HOUSE_POLICIES.deposit}
+          </li>
+          <li>
+            <span className="font-medium text-(--bk-text)">Children:</span> {HOUSE_POLICIES.children}
+          </li>
           <li className="flex items-start gap-1.5">
             <Plane size={14} aria-hidden="true" className="mt-0.5 shrink-0" />
-            {HOUSE_POLICIES.airportPickup}
+            {HOUSE_POLICIES.transfer}
+          </li>
+          <li>
+            <span className="font-medium text-(--bk-text)">House rules:</span>
+            <ul className="mt-1 list-disc space-y-0.5 pl-5">
+              {HOUSE_POLICIES.houseRules.map((rule) => (
+                <li key={rule}>{rule}</li>
+              ))}
+            </ul>
           </li>
         </ul>
 
@@ -363,7 +377,7 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
               className="mt-0.5 h-5 w-5 shrink-0 cursor-pointer accent-(--bk-accent)"
             />
             <span className="text-(--bk-text)">
-              I agree to the booking and cancellation policy
+              I agree to {HOUSE_POLICIES.agreement}
               <span aria-hidden="true" className="text-(--bk-danger)">
                 {" "}
                 *

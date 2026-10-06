@@ -17,7 +17,7 @@ import { resortJsonLd } from "@/lib/structuredData";
 import BookNowButton from "@/components/BookNowButton";
 import CloudbedsDatePicker from "@/components/CloudbedsDatePicker";
 import OwnDatePicker from "@/components/OwnDatePickerLazy";
-import { BOOKING_WINDOW_MONTHS, MAX_NIGHTS, resolveBookingEngine } from "@/lib/booking/config";
+import { BOOKING_WINDOW_MONTHS, MAX_NIGHTS, directCopySwapped, resolveBookingEngine } from "@/lib/booking/config";
 import DesktopVideo from "@/components/DesktopVideo";
 import ReviewsSection from "@/components/ReviewsSection";
 import RoomCard from "@/components/RoomCard";
@@ -47,8 +47,8 @@ const directPerks = [
   },
   {
     icon: PlaneLanding,
-    title: "Free airport pickup",
-    text: "Complimentary transfer on stays of 2+ nights.",
+    title: "Free airport or pier pickup",
+    text: "Complimentary transfer from Samui Airport or a nearby pier on stays of 2+ nights.",
   },
   {
     icon: MessageCircle,
@@ -145,8 +145,8 @@ export default function Home() {
           Why book direct
         </p>
         <div className="mt-6 grid grid-cols-2 gap-5 lg:grid-cols-4">
-          {(resolveBookingEngine() === "own"
-            ? // Promo codes are off on our own engine: never promise the DIRECT code there.
+          {(directCopySwapped()
+            ? // Our own engine without the Direct rate (BOOKING_DIRECT_PROMO=off): never promise the DIRECT code there.
               directPerks.map((p) => (p.icon === BadgePercent ? { ...p, ...OWN_ENGINE_PERK.en } : p))
             : directPerks
           ).map(({ icon: Icon, title, text }) => (

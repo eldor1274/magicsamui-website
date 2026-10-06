@@ -2,15 +2,16 @@ import type { Metadata } from "next";
 import ClassicBookingPage from "@/components/ClassicBookingPage";
 import OwnBookingPage from "@/components/booking/OwnBookingPage";
 import type { BookingSearchParams } from "@/components/booking/OwnBookingPage";
-import { resolveBookingEngine } from "@/lib/booking/config";
+import { directCopySwapped, resolveBookingEngine } from "@/lib/booking/config";
 
-// The own engine adds an openly shown payment processing fee and has no DIRECT
-// code, so it must not promise the best rate (the Cloudbeds engine's DIRECT does).
+// The own engine adds an openly shown payment processing fee: while it sells Cloudbeds' Direct
+// rate for the DIRECT code it keeps the best-rate promise like the Cloudbeds engine; with
+// BOOKING_DIRECT_PROMO=off (no DIRECT there) it must not promise the best rate.
 export const metadata: Metadata = {
   alternates: { canonical: "/booking" },
   title: "Book Your Stay | Magic Suites & Villas",
   description:
-    resolveBookingEngine() === "own"
+    directCopySwapped()
       ? "Check live availability and book your private pool suite or villa at Magic Suites & Villas, Koh Samui — secure card or PromptPay payment, confirmed on the spot."
       : "Check live availability and book your private pool suite or villa at Magic Suites & Villas, Koh Samui — best rate, always, when you book direct.",
 };

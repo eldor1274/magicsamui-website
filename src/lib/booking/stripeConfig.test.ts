@@ -69,14 +69,16 @@ test("fee per provider: stripe 5%, beam 3%, demo 3%; BOOKING_CARD_FEE_PCT overri
   assert.equal(getPublicBookingConfig({ BOOKING_PAYMENT_PROVIDER: "stripe" }).cardFeePct, 5);
 });
 
-test("stripe modes: 100% up front, promos off, Standard Rate only, no add-ons, guest details required", () => {
+test("stripe modes: 100% up front, no site-side promo % (DIRECT sells Cloudbeds' Direct rate), Standard Rate only, no add-ons, guest details required", () => {
   const cfg = getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_DEPOSIT_PCT: "30" });
   assert.equal(cfg.depositPct, 100);
   assert.equal(cfg.promoPct, 0);
+  assert.equal(cfg.promo.mode, "direct-rate");
   assert.deepEqual(cfg.ratePlans, ["standard"]);
   assert.equal(cfg.addonsEnabled, false);
   const pub = getPublicBookingConfig(STRIPE_TEST_ENV);
-  assert.equal(pub.promoEnabled, false);
+  assert.equal(pub.promoEnabled, true, "owner decision 2026-10-06: the own engine honours DIRECT");
+  assert.equal(pub.promoMode, "direct-rate");
   assert.equal(pub.requiresGuestDetails, true);
   assert.equal(pub.collectPostcode, true);
   assert.deepEqual(pub.acceptedCardBrands, ["visa", "mastercard"], "Thai Stripe: no Amex/JCB/UnionPay");

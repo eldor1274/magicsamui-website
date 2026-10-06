@@ -4,7 +4,7 @@
 
 import { createContext, useContext } from "react";
 import type { Dispatch } from "react";
-import { ADDONS, cartConflict, getCatalogueRoom, hasUnitConflict, isAddonId, isBookableSlug, isRatePlanId } from "@/lib/booking/catalogue";
+import { ADDONS, POLICY_VERSION, cartConflict, getCatalogueRoom, hasUnitConflict, isAddonId, isBookableSlug, isRatePlanId } from "@/lib/booking/catalogue";
 import type { BookingAnalytics } from "@/lib/booking/clientAnalytics";
 import { isRestrictionMessage } from "@/lib/booking/checkoutMessages";
 import { isIsoDate } from "@/lib/booking/dates";
@@ -208,6 +208,8 @@ export interface PersistedBooking {
   guest: GuestDetails;
   /** See BookingState.landingKey. */
   landingKey: string | null;
+  /** The terms version (POLICY_VERSION) this page showed when it saved guest.agreedToPolicy; consent to other terms is dropped. */
+  termsVersion?: string;
   savedAt: string;
 }
 
@@ -433,6 +435,11 @@ export function bookingReducer(state: BookingState, action: BookingAction): Book
 
     case "checkoutFailed": {
       const { error } = action;
+      if (error.code === "terms_changed") {
+        // The terms this page shows are out of date: the tick given to them no longer counts (a reload of the
+        // new page lands on the guest step with the box clear). Never retried automatically.
+        return { ...state, guest: { ...state.guest, agreedToPolicy: false }, checkout: { status: "error", error } };
+      }
       if (error.code === "price_changed" && action.quote) {
         const key = pricingKey(state);
         const serverQuote = key && isQuoteForCart(action.quote, state) ? { key, quote: action.quote } : state.serverQuote;
@@ -622,6 +629,7 @@ export function toPersisted(state: BookingState): PersistedBooking {
     cartKey: state.cartKey,
     guest: state.guest,
     landingKey: state.landingKey,
+    termsVersion: POLICY_VERSION,
     savedAt: new Date().toISOString(),
   };
 }
@@ -648,12 +656,13 @@ function sanitizeCartItem(raw: unknown): CartItem | null {
   return { id: r.id, slug: r.slug, ratePlanId: r.ratePlanId, adults, addonIds: [...new Set(r.addonIds as AddonId[])] };
 }
 
-function sanitizeGuest(raw: unknown): GuestDetails {
+/** `termsCurrent`: the consent was given to the terms this page shows (else the box must be ticked again). */
+function sanitizeGuest(raw: unknown, termsCurrent: boolean): GuestDetails {
   const r = asObject(raw) ?? {};
   const out: GuestDetails = { ...EMPTY_GUEST };
   for (const key of Object.keys(EMPTY_GUEST) as (keyof GuestDetails)[]) {
     const v = r[key];
-    if (key === "agreedToPolicy") out.agreedToPolicy = v === true;
+    if (key === "agreedToPolicy") out.agreedToPolicy = termsCurrent && v === true;
     else if (typeof v === "string") out[key] = v.slice(0, 1000);
   }
   return out;
@@ -696,8 +705,10 @@ export function sanitizePersisted(v: unknown): PersistedBooking | null {
     search: { checkIn, checkOut, adults, promo },
     cart,
     cartKey: cartOk && typeof p.cartKey === "string" ? p.cartKey : null,
-    guest: sanitizeGuest(p.guest),
+    // A reload into a build with other terms (or a save from before the version was kept) asks for the tick again.
+    guest: sanitizeGuest(p.guest, p.termsVersion === POLICY_VERSION),
     landingKey,
+    ...(p.termsVersion === POLICY_VERSION ? { termsVersion: POLICY_VERSION } : {}),
     savedAt: typeof p.savedAt === "string" ? p.savedAt : "",
   };
 }

@@ -192,13 +192,15 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
 
   // Staff must never take a paid booking for a stale unpaid hold, even while confirming it keeps failing.
   if ((await deps.kv.get(keys.fulfilStep(sessionId, "paid-note"))) === null) {
-    // "After midnight" lived only in the best-effort pre-payment note: repeat it here.
-    const lateArrival = meta.arrivalLate === true ? "\nEstimated arrival: after midnight." : "";
+    // "After 11 PM" lived only in the best-effort pre-payment note: repeat it here.
+    const lateArrival = meta.arrivalLate === true ? "\nEstimated arrival: after 11 PM." : "";
+    // Which booking terms the guest agreed to (unknown on sessions created before msv_terms existed).
+    const terms = meta.termsVersion ? `\nBooking terms version ${meta.termsVersion} agreed online.` : "";
     let paidNoteSaved = false;
     try {
       await deps.writer.addNote(
         reservationId,
-        `${label}PAID via Stripe ${pi} (${money(meta.totalSatang)}) for online booking ${ref} - do NOT cancel. The "cancelled automatically if unpaid" rule no longer applies.${lateArrival}`,
+        `${label}PAID via Stripe ${pi} (${money(meta.totalSatang)}) for online booking ${ref} - do NOT cancel. The "cancelled automatically if unpaid" rule no longer applies.${terms}${lateArrival}`,
       );
       paidNoteSaved = true;
       await deps.kv.set(keys.fulfilStep(sessionId, "paid-note"), "1", DONE_TTL_SECONDS);
@@ -215,7 +217,7 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
         `Booking ${ref}: the guest's arrival time / requests are missing in Cloudbeds`,
         [
           `Booking ${ref} (reservation ${reservationId}): the guest's arrival time / special requests could not be saved before payment - ask the guest on WhatsApp.`,
-          `Missing: ${[missingLate ? "arrival after midnight" : "", missingRequests ? "special requests" : ""].filter(Boolean).join(" and ")}.`,
+          `Missing: ${[missingLate ? "arrival after 11 PM" : "", missingRequests ? "special requests" : ""].filter(Boolean).join(" and ")}.`,
         ],
         { key: `guest-note:${reservationId}`, severity: "warning" },
       );

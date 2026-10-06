@@ -2,9 +2,10 @@
 // Builds an "Add to calendar" .ics file for a confirmed stay, in the
 // browser. Contains the booking reference and stay facts only (no PII).
 // Koh Samui is UTC+7 all year (no daylight saving), so local check-in
-// 15:00 = 08:00Z and check-out 11:00 = 04:00Z.
+// 15:00 = 08:00Z and check-out 11:00 = 04:00Z (the times in HOUSE_POLICIES).
 
 import { site } from "@/data/site";
+import { HOUSE_POLICIES } from "@/lib/booking/catalogue";
 import { isBookingRef } from "@/lib/booking/ref";
 import type { IsoDate } from "@/lib/booking/types";
 
@@ -59,7 +60,7 @@ export function buildStayIcs({ ref: rawRef, checkIn, checkOut, rooms, now = new 
   const description = [
     ref === "booking" ? "" : `Booking reference ${ref}`,
     rooms.length > 0 ? `Rooms: ${rooms.join(", ")}` : "",
-    "Check-in from 3:00 PM, check-out by 11:00 AM.",
+    `${HOUSE_POLICIES.checkIn}. ${HOUSE_POLICIES.checkOut}.`,
     `Questions: WhatsApp ${site.phones[0].number}`,
   ]
     .filter(Boolean)

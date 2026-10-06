@@ -170,6 +170,11 @@ function markPurchaseSent(ref: string): void {
   }
 }
 
+/** GA4 `coupon`: the demo's discount code, or the guest's code when rooms are on Cloudbeds' Direct rate ("" = none). */
+export function couponOf(quote: Pick<Quote, "promo" | "directRate">): string {
+  return quote.promo?.code ?? quote.directRate?.code ?? "";
+}
+
 /** Purchase item list and totals in the Cloudbeds shape (subtotal = value before the card fee). */
 export function purchaseParams(booking: BookingSummary, confirmed: PurchaseView | null = null): Record<string, unknown> {
   return {
@@ -211,7 +216,7 @@ export function createBookingAnalytics(paymentMode: PaymentMode, vercelEnv?: str
       emit(enabled, "begin_checkout", {
         value: satangToBaht(quote.totalSatang),
         subtotal: satangToBaht(quote.totalSatang - quote.cardFeeSatang),
-        coupon: quote.promo?.code ?? "",
+        coupon: couponOf(quote),
         start_date: quote.checkIn,
         end_date: quote.checkOut,
         items: quote.lines.map((l) => itemFromQuoteLine(l, quote)),
@@ -221,7 +226,7 @@ export function createBookingAnalytics(paymentMode: PaymentMode, vercelEnv?: str
       emit(enabled, "add_payment_info", {
         value: satangToBaht(quote.totalSatang),
         payment_type: analyticsPaymentType(paymentMode),
-        coupon: quote.promo?.code ?? "",
+        coupon: couponOf(quote),
         items: quote.lines.map((l) => itemFromQuoteLine(l, quote)),
       });
     },

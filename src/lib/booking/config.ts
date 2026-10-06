@@ -17,7 +17,7 @@
 
 import { site } from "../../data/site.ts";
 import { acceptedCardBrands, defaultCardFeePct, isLiveMode, isTestMode, paymentMethodBadges, providerOf } from "./payments/provider.ts";
-import type { PaymentMode, PaymentProvider, PublicBookingConfig, RatePlanId } from "./types.ts";
+import type { PaymentMode, PaymentProvider, PromoMode, PublicBookingConfig, RatePlanId } from "./types.ts";
 
 export const BEAM_PLAYGROUND_BASE = "https://playground.api.beamcheckout.com";
 export const BEAM_LIVE_BASE = "https://api.beamcheckout.com";
@@ -38,7 +38,13 @@ export const MOCK_STRIPE_WEBHOOK_SECRET = "whsec_msv_MOCK_only_not_a_real_secret
 export const MOCK_STRIPE_SECRET_KEY = "sk_test_msv_MOCK_only";
 
 export const MERCHANT_NAME = "Magic Suites & Villas";
+/** The code guests type for the direct price (default of BOOKING_PROMO_CODE). */
 export const PROMO_CODE = "DIRECT";
+/**
+ * The promo code of Cloudbeds' "Direct booking rate" plan (live, 2026-10-06: rateID 3195765 on the
+ * Honeymoon Suite, 20% off the base rate, not synced to the OTAs). Default of CLOUDBEDS_PROMO_CODE.
+ */
+export const DEFAULT_CLOUDBEDS_PROMO_CODE = "Direct";
 export const MAX_NIGHTS = 30;
 export const BOOKING_WINDOW_MONTHS = 18;
 export const MAX_SEARCH_ADULTS = 18;
@@ -146,8 +152,10 @@ export interface BookingConfig {
   testGuard: { guestEmail: string | null; minArrivalMonths: number; accessKey: string | null } | null;
   cardFeePct: number;
   depositPct: number;
-  /** DIRECT promo percentage; 0 (switched off) outside demo mode. */
+  /** The demo's site-side DIRECT percentage; 0 outside demo mode (where Cloudbeds' own Direct rate is sold instead). */
   promoPct: number;
+  /** How the guest's promo code works here (resolvePromoSettings). */
+  promo: PromoSettings;
   ratePlans: RatePlanId[];
   addonsEnabled: boolean;
   /**
@@ -368,12 +376,68 @@ export function bookingBasePath(engine: BookingEngine): string {
 /* ------------------------------- config ------------------------------- */
 
 /**
- * The DIRECT code is a demo-only discount until it maps to a real Cloudbeds
- * derived rate plan, so it only works while payments are simulated. In every
- * Beam/Stripe mode (or a locked config) promos are switched off.
+ * The demo's site-side DIRECT discount: only while payments are simulated.
+ * Real money uses Cloudbeds' own Direct rate plan instead (resolvePromoSettings).
  */
 function promoPctFor(env: Env, paymentMode: PaymentMode | null): number {
   return paymentMode === "demo" ? parsePct(env.BOOKING_DEMO_PROMO_PCT, 10, 0, 50) : 0;
+}
+
+export interface PromoSettings {
+  mode: PromoMode;
+  /** The code guests type (BOOKING_PROMO_CODE, default DIRECT), upper case; compared trimmed and case-insensitively. */
+  code: string;
+  /** discount: the demo's percentage; 0 otherwise. */
+  pct: number;
+  /** direct-rate: Cloudbeds' promo code (CLOUDBEDS_PROMO_CODE, default "Direct"), sent as is and matched case-insensitively. */
+  cloudbedsCode: string;
+}
+
+const GUEST_PROMO_CODE_RE = /^[A-Z0-9_-]{1,32}$/;
+const CLOUDBEDS_PROMO_CODE_RE = /^[A-Za-z0-9_-]{1,32}$/;
+
+/**
+ * BOOKING_DIRECT_PROMO = on | off (default on): whether the own engine sells Cloudbeds' Direct
+ * rate for the guest's code. "off" (or false/0/no) is the emergency switch when Cloudbeds does not
+ * price holds at the Direct rate; guests with the code are then pointed to the classic booking page.
+ */
+export function directPromoOn(env: Env = process.env): boolean {
+  const raw = trimmed(env.BOOKING_DIRECT_PROMO).toLowerCase();
+  if (["off", "false", "0", "no"].includes(raw)) return false;
+  if (!["", "on", "true", "1", "yes"].includes(raw)) configWarning("BOOKING_DIRECT_PROMO", "not on/off: treated as on");
+  return true;
+}
+
+/**
+ * How the guest's promo code works (see PromoMode). Stripe sells Cloudbeds' own Direct rate plan
+ * (direct-rate) only with live Cloudbeds rates and BOOKING_DIRECT_PROMO on; otherwise a Stripe page
+ * points the code to the classic booking page (classic-only). The demo keeps its site-side % discount;
+ * Beam modes take no code (off). Never throws.
+ */
+export function resolvePromoSettings(env: Env, provider: PaymentProvider, paymentMode: PaymentMode | null, dataSource: "demo" | "cloudbeds"): PromoSettings {
+  const rawCode = trimmed(env.BOOKING_PROMO_CODE).toUpperCase();
+  if (rawCode !== "" && !GUEST_PROMO_CODE_RE.test(rawCode)) configWarning("BOOKING_PROMO_CODE", "not 1-32 letters, digits, - or _: DIRECT is used");
+  const code = GUEST_PROMO_CODE_RE.test(rawCode) ? rawCode : PROMO_CODE;
+  const rawCb = trimmed(env.CLOUDBEDS_PROMO_CODE);
+  if (rawCb !== "" && !CLOUDBEDS_PROMO_CODE_RE.test(rawCb)) configWarning("CLOUDBEDS_PROMO_CODE", "not 1-32 letters, digits, - or _: Direct is used");
+  const cloudbedsCode = CLOUDBEDS_PROMO_CODE_RE.test(rawCb) ? rawCb : DEFAULT_CLOUDBEDS_PROMO_CODE;
+  const pct = promoPctFor(env, paymentMode);
+  let mode: PromoMode;
+  if (provider === "stripe") mode = dataSource === "cloudbeds" && directPromoOn(env) ? "direct-rate" : "classic-only";
+  else mode = pct > 0 ? "discount" : "off";
+  return { mode, code, pct: mode === "discount" ? pct : 0, cloudbedsCode };
+}
+
+/**
+ * True while the DIRECT copy ("Best rate, always - Code DIRECT at checkout", the best-rate meta
+ * descriptions) must be swapped out: the own engine serves /booking (BOOKING_ENGINE=own) but does
+ * NOT honour the code with Cloudbeds' Direct rate (BOOKING_DIRECT_PROMO=off, or no live Cloudbeds
+ * rates). While it honours DIRECT it shows the same copy as the classic engine; with the default
+ * engine nothing changes.
+ */
+export function directCopySwapped(env: Env = process.env): boolean {
+  if (resolveBookingEngine(env) !== "own") return false;
+  return resolvePromoSettings(env, safeProvider(env), safePaymentMode(env), resolveDataSource(env)).mode !== "direct-rate";
 }
 
 function safePaymentMode(env: Env): PaymentMode | null {
@@ -575,6 +639,7 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
   const paymentMethod = resolveCloudbedsPaymentMethod(env, paymentMode);
   const zip = trimmed(env.BOOKING_GUEST_ZIP_PLACEHOLDER);
   const alertEmail = trimmed(env.BOOKING_ALERT_EMAIL);
+  const promo = resolvePromoSettings(env, provider, paymentMode, dataSource);
 
   return {
     provider,
@@ -598,7 +663,8 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
         : null,
     cardFeePct: cardFeeFor(env, provider),
     depositPct: depositFor(env, provider),
-    promoPct: promoPctFor(env, paymentMode),
+    promoPct: promo.pct,
+    promo,
     ratePlans: ratePlansFor(provider),
     addonsEnabled: provider !== "stripe",
     cloudbedsPaymentMethod: paymentMethod.method,
@@ -701,6 +767,11 @@ function publicFields(provider: PaymentProvider, paymentMode: PaymentMode, env: 
   };
 }
 
+/** The promo fields the browser reads: whether a code can change the price, how it works, and the code to suggest. */
+function publicPromo(promo: PromoSettings): Pick<PublicBookingConfig, "promoEnabled" | "promoMode" | "promoCode"> {
+  return { promoEnabled: promo.mode === "direct-rate" || (promo.mode === "discount" && promo.pct > 0), promoMode: promo.mode, promoCode: promo.code };
+}
+
 export function toPublicConfig(config: BookingConfig, env: Env = process.env): PublicBookingConfig {
   return {
     ...publicFields(config.provider, config.paymentMode, env),
@@ -709,7 +780,7 @@ export function toPublicConfig(config: BookingConfig, env: Env = process.env): P
     dataSource: config.dataSource,
     cardFeePct: config.cardFeePct,
     depositPct: config.depositPct,
-    promoEnabled: config.promoPct > 0,
+    ...publicPromo(config.promo),
     cloudbedsWrites: config.cloudbedsWrite?.mode ?? "none",
     testGuard: config.testGuard ? { minArrivalMonths: config.testGuard.minArrivalMonths } : null,
   };
@@ -734,7 +805,7 @@ export function getPublicBookingConfig(env: Env = process.env): PublicBookingCon
       cardFeePct: cardFeeFor(env, provider),
       depositPct: depositFor(env, provider),
       // Same rule the availability API applies (getInventoryConfig).
-      promoEnabled: promoPctFor(env, safePaymentMode(env)) > 0,
+      ...publicPromo(resolvePromoSettings(env, provider, safePaymentMode(env), resolveDataSource(env))),
       cloudbedsWrites: "none",
       testGuard: null,
     };
@@ -744,9 +815,10 @@ export function getPublicBookingConfig(env: Env = process.env): PublicBookingCon
 /** Inventory + pricing settings only; never throws (availability works even when payments are locked). */
 export function getInventoryConfig(
   env: Env = process.env,
-): Pick<BookingConfig, "dataSource" | "cloudbeds" | "promoPct" | "ratePlans" | "provider"> {
+): Pick<BookingConfig, "dataSource" | "cloudbeds" | "promoPct" | "promo" | "ratePlans" | "provider"> {
   const dataSource = resolveDataSource(env);
   const provider = safeProvider(env);
+  const promo = resolvePromoSettings(env, provider, safePaymentMode(env), dataSource);
   return {
     dataSource,
     provider,
@@ -754,7 +826,8 @@ export function getInventoryConfig(
       dataSource === "cloudbeds"
         ? { apiKey: cloudbedsReadKey(env), propertyId: trimmed(env.CLOUDBEDS_PROPERTY_ID) || null, baseRateOnly: provider === "stripe" }
         : null,
-    promoPct: promoPctFor(env, safePaymentMode(env)),
+    promoPct: promo.pct,
+    promo,
     ratePlans: ratePlansFor(provider),
   };
 }

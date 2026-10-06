@@ -153,6 +153,8 @@ export function parseCheckoutRequest(body: unknown, limits: ValidationLimits): P
 
   // Cosmetic only (which preview theme to come back to); anything else is ignored.
   const theme: ThemeName | undefined = b.theme === "classic" || b.theme === "magic" ? b.theme : undefined;
+  // The terms version the guest's page showed (compared in Stripe modes); only a plain version string is kept.
+  const termsVersion = typeof b.termsVersion === "string" && /^[A-Za-z0-9._-]{1,32}$/.test(b.termsVersion) ? b.termsVersion : undefined;
 
   if (issues.length > 0 || !checkIn || !checkOut) {
     return { ok: false, issues, ...(sink.addonIssue ? { fixStep: "addons" as const } : {}) };
@@ -167,6 +169,7 @@ export function parseCheckoutRequest(body: unknown, limits: ValidationLimits): P
       expectedTotalSatang: expected as number,
       expectedDueNowSatang: expectedDueNow as number,
       ...(theme ? { theme } : {}),
+      ...(termsVersion ? { termsVersion } : {}),
     },
   };
 }

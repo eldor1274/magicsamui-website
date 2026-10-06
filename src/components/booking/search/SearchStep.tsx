@@ -8,6 +8,7 @@
 import { useContext } from "react";
 import Image from "next/image";
 import { BadgePercent, Car, MessageCircle, ShieldCheck } from "lucide-react";
+import { HOUSE_POLICIES } from "@/lib/booking/catalogue";
 import { DEMO_COPY_CONFIG, providerCopy } from "@/lib/booking/paymentCopy";
 import { BookingContext } from "../state";
 import SearchBar from "./SearchBar";
@@ -15,10 +16,11 @@ import type { SearchBarProps } from "./SearchBar";
 
 export type SearchStepProps = Omit<SearchBarProps, "variant">;
 
-const PROMO_PERK = { icon: BadgePercent, title: "Best direct rate", text: "Use code DIRECT for our best price on every room." };
-/** Shown instead when promo codes are switched off (every Beam/Stripe mode), so the page never suggests a code that fails. */
+/** While the code lowers the price here (the demo discount, or Cloudbeds' Direct rate on the own engine). */
+const promoPerk = (code: string) => ({ icon: BadgePercent, title: "Best direct rate", text: `Use code ${code} for our best direct rate.` });
+/** Shown instead when no code can lower the price here (Beam modes, or Stripe without the Direct rate), so the page never suggests a code that fails. */
 const OWNER_PERK = { icon: MessageCircle, title: "Talk to the owner", text: "Questions before you book? Eldor answers on WhatsApp." };
-const PICKUP_PERK = { icon: Car, title: "Free airport pickup", text: "Included on stays of 2 nights or more." };
+const PICKUP_PERK = { icon: Car, title: HOUSE_POLICIES.transferTitle, text: HOUSE_POLICIES.transferShort };
 
 export default function SearchStep(props: SearchStepProps) {
   const config = useContext(BookingContext)?.config;
@@ -56,7 +58,7 @@ export default function SearchStep(props: SearchStepProps) {
       </div>
 
       <ul className="grid gap-3 sm:grid-cols-3">
-        {[props.promoEnabled === false ? OWNER_PERK : PROMO_PERK, ...perks].map(({ icon: Icon, title, text }) => (
+        {[props.promoEnabled === false || !props.promoCodeHint ? OWNER_PERK : promoPerk(props.promoCodeHint), ...perks].map(({ icon: Icon, title, text }) => (
           <li key={title} className="flex items-start gap-3 rounded-(--bk-radius-card) bg-(--bk-surface) p-4 shadow-(--bk-shadow-card)">
             <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-(--bk-accent-soft) text-(--bk-accent-soft-text)">
               <Icon size={18} aria-hidden="true" />

@@ -6,8 +6,9 @@
 //   replaced payment_method_types); Apple Pay / Google Pay come via card.
 //   A Thai Stripe account takes Visa and Mastercard only.
 // - client_reference_id = MSV ref; metadata (and payment_intent_data.metadata)
-//   carry the ref, the Cloudbeds reservationID, amounts and yes/no guest
-//   flags (late arrival, requests entered, note saved) - NO personal data.
+//   carry the ref, the Cloudbeds reservationID, amounts, yes/no guest
+//   flags (late arrival, requests entered, note saved) and the booking terms
+//   version the guest agreed to (POLICY_VERSION) - NO personal data.
 // - customer_email = the guest's email (Stripe receipt), submit_type=book,
 //   expires_at = now + 30 min (+1 min clock margin; Stripe's minimum is 30),
 //   locale auto, Adaptive Pricing off (always THB), one idempotency key per
@@ -15,6 +16,7 @@
 // - Webhooks: stripe.webhooks.constructEvent over the RAW body, 300 s tolerance.
 
 import Stripe from "stripe";
+import { POLICY_VERSION } from "../catalogue.ts";
 import { formatDisplayDate } from "../dates.ts";
 import type { Quote } from "../types.ts";
 
@@ -64,13 +66,15 @@ export interface SessionMeta {
   checkOut: string;
   mode: string;
   /**
-   * Yes/no guest flags (NEVER the request text or other personal data): arrival after midnight,
+   * Yes/no guest flags (NEVER the request text or other personal data): arrival after 11 PM,
    * special requests entered, and whether the pre-payment Cloudbeds note carrying them was saved.
    * null/absent = unknown (sessions created before the flags existed): nothing is done on them.
    */
   arrivalLate?: boolean | null;
   hasRequests?: boolean | null;
   noteSaved?: boolean | null;
+  /** The booking terms version agreed to (msv_terms); null/absent on sessions created before it existed. */
+  termsVersion?: string | null;
 }
 
 const META_PREFIX = "msv_";
@@ -86,6 +90,7 @@ export function sessionMetadata(m: SessionMeta): Record<string, string> {
     msv_checkin: m.checkIn,
     msv_checkout: m.checkOut,
     msv_mode: m.mode,
+    ...(m.termsVersion ? { msv_terms: m.termsVersion } : {}),
     ...Object.fromEntries(Object.entries(flags).flatMap(([k, v]) => (typeof v === "boolean" ? [[k, v ? "1" : "0"]] : []))),
   };
 }
@@ -114,6 +119,8 @@ export function parseSessionMeta(session: Pick<CheckoutSession, "metadata" | "cl
     arrivalLate: flag(md.msv_arrival_late),
     hasRequests: flag(md.msv_has_requests),
     noteSaved: flag(md.msv_note_saved),
+    // Goes into a Cloudbeds note: only a plain version string, anything else is unknown.
+    termsVersion: typeof md.msv_terms === "string" && /^[A-Za-z0-9._-]{1,32}$/.test(md.msv_terms) ? md.msv_terms : null,
   };
   if (!REF_RE.test(m.ref) || session.client_reference_id !== m.ref) return null;
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(m.reservationId)) return null;
@@ -160,7 +167,8 @@ export function buildCheckoutSessionParams(input: SessionInput): Stripe.Checkout
       currency: "thb",
       unit_amount: l.roomSatang,
       product_data: {
-        name: `${l.roomName} - ${l.ratePlanName}`.slice(0, 250),
+        // A room on Cloudbeds' Direct rate says so, as on the booking page.
+        name: `${l.roomName} - ${l.ratePlanName}${l.listRoomSatang !== undefined ? " (Direct rate)" : ""}`.slice(0, 250),
         description: `${dates} (${nights}, ${l.adults} guest${l.adults === 1 ? "" : "s"})`.slice(0, 500),
       },
     },
@@ -192,6 +200,8 @@ export function buildCheckoutSessionParams(input: SessionInput): Stripe.Checkout
     checkIn: quote.checkIn,
     checkOut: quote.checkOut,
     mode: input.mode,
+    // = the version the guest's page showed: runCheckout refuses any other one (terms_changed) before the hold.
+    termsVersion: POLICY_VERSION,
     ...input.guestFlags,
   });
   return {

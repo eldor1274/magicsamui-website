@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { AlertCircle, ArrowRight, CalendarDays, CheckCircle2, Loader2, Search, Tag, User } from "lucide-react";
+import { AlertCircle, ArrowRight, CalendarDays, CheckCircle2, Info, Loader2, Search, Tag, User } from "lucide-react";
 import { formatDisplayDate } from "@/lib/booking/dates";
 import type { IsoDate, PromoResult } from "@/lib/booking/types";
 import type { SearchDraft } from "../state";
@@ -37,11 +37,13 @@ export interface SearchBarProps {
   maxNights: number;
   maxAdults: number;
   /**
-   * False when no promo code can be valid (every Beam/Stripe mode: promos are off until a code maps to a
-   * real Cloudbeds rate plan). The code pill is then not offered at all, so a guest is never shown a code
-   * as "entered" that would not change the price.
+   * Whether the code pill is offered: false when no code can do anything here (Beam modes), so a guest
+   * is never shown a code as "entered" that would not change the price. A Stripe page that can't apply
+   * the Direct code still offers it, and answers the code with a note linking the classic booking page.
    */
   promoEnabled?: boolean;
+  /** The code the picker suggests ("Use code DIRECT..."); null = suggest none (the code can't change the price here). Default DIRECT. */
+  promoCodeHint?: string | null;
 }
 
 type Panel = "dates" | "guests" | "promo" | null;
@@ -63,6 +65,7 @@ export default function SearchBar({
   maxNights,
   maxAdults,
   promoEnabled = true,
+  promoCodeHint = "DIRECT",
 }: SearchBarProps) {
   const [panel, setPanel] = useState<Panel>(null);
   const datesRef = useRef<HTMLDivElement>(null);
@@ -164,7 +167,15 @@ export default function SearchBar({
 
   // One quiet line of feedback under the bar (reserved height: no jump). The
   // hero renders it OUTSIDE the frosted capsule so the capsule hugs its controls.
-  const feedback = <SearchFeedback compact={compact} ready={ready} hasCheckIn={value.checkIn !== null} promoVerdict={promoVerdict} />;
+  const feedback = (
+    <SearchFeedback
+      compact={compact}
+      ready={ready}
+      hasCheckIn={value.checkIn !== null}
+      promoVerdict={promoVerdict}
+      codeHint={promoEnabled && promoCode === "" ? promoCodeHint : null}
+    />
+  );
 
   return (
     <div>
@@ -238,13 +249,15 @@ export default function SearchBar({
                 aria-expanded={panel === "promo"}
                 aria-label={
                   promoCode
-                    ? `Promo code ${promoCode}${promoVerdict ? (promoVerdict.valid ? ", applied" : ", not valid") : ""}`
+                    ? `Promo code ${promoCode}${promoVerdict ? (promoVerdict.valid ? ", applied" : promoVerdict.note ? ", not applied here" : ", not valid") : ""}`
                     : "Add promo code"
                 }
                 className={`${pillButton} min-w-0 flex-1 md:flex-none md:min-w-36 ${compact ? "lg:min-w-0" : ""}`}
               >
                 {promoVerdict?.valid ? (
                   <CheckCircle2 size={18} className={`${pillIcon} text-(--bk-success)`} aria-hidden="true" />
+                ) : promoVerdict && !promoVerdict.valid && promoVerdict.note ? (
+                  <Info size={18} className={`${pillIcon} text-(--bk-text-muted)`} aria-hidden="true" />
                 ) : promoVerdict && !promoVerdict.valid ? (
                   <AlertCircle size={18} className={`${pillIcon} text-(--bk-danger)`} aria-hidden="true" />
                 ) : (
@@ -291,6 +304,7 @@ export default function SearchBar({
             onApply={(promo) => applyPatch({ promo })}
             anchorRef={promoRef}
             promoEnabled={promoEnabled}
+            hintCode={promoCodeHint}
           />
         )}
       </form>
@@ -304,15 +318,33 @@ function SearchFeedback({
   ready,
   hasCheckIn,
   promoVerdict,
+  codeHint,
 }: {
   compact: boolean;
   ready: boolean;
   hasCheckIn: boolean;
   promoVerdict: PromoResult | null;
+  /** The code to suggest while none is entered (null where no code lowers the price, e.g. Beam or classic-only). */
+  codeHint: string | null;
 }) {
   let content: ReactNode = null;
   let tone: "muted" | "success" | "danger" = "muted";
-  if (promoVerdict && !promoVerdict.valid) {
+  if (promoVerdict && !promoVerdict.valid && promoVerdict.note) {
+    // The code is real but can't be used here (e.g. the own engine with BOOKING_DIRECT_PROMO=off): a calm note, with the way that works.
+    content = (
+      <>
+        {promoVerdict.message}
+        {promoVerdict.link && (
+          <>
+            {" "}
+            <a href={promoVerdict.link.href} rel="nofollow" className="font-medium underline underline-offset-2">
+              {promoVerdict.link.text}
+            </a>
+          </>
+        )}
+      </>
+    );
+  } else if (promoVerdict && !promoVerdict.valid) {
     content = promoVerdict.message;
     tone = "danger";
   } else if (promoVerdict?.valid) {
@@ -320,6 +352,10 @@ function SearchFeedback({
     tone = "success";
   } else if (!ready) {
     content = hasCheckIn ? "Now choose your check-out date." : "Choose your dates to see prices.";
+  } else if (compact && codeHint) {
+    // Above the results: a guest who arrived with dates (e.g. the homepage date picker) skips the search
+    // step's DIRECT perk, and the code goes in this bar - not at a later step.
+    content = `Have code ${codeHint}? Add it above for our best direct rate.`;
   }
   if (content === null) {
     // Both variants keep the line's height, so the bar (and the results under it) never jump.

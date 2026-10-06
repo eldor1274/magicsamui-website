@@ -5,6 +5,7 @@
 
 import { ADDONS, RATE_PLANS, getCatalogueRoom } from "./catalogue.ts";
 import { eachNight, isHighSeason, isWeekendNight, nightsBetween, weekday } from "./dates.ts";
+import type { PromoSettings } from "./config.ts";
 import type {
   AddonInfo,
   CartItemInput,
@@ -12,8 +13,10 @@ import type {
   NightRate,
   PricingConfig,
   PromoResult,
+  PublicBookingConfig,
   Quote,
   QuoteAddonLine,
+  QuoteDirectRate,
   QuoteLine,
   QuotePromo,
   RateOffer,
@@ -79,12 +82,16 @@ export function occupancyExtraSatang(adultsExtraSatang: Record<string, number> |
   return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : 0;
 }
 
-/** Builds the sellable rate plans for a room from its base nightly rates. */
+/**
+ * Builds the sellable rate plans for a room from its base nightly rates.
+ * `list` (the Cloudbeds Direct rate only): the base rate it is derived from, shown struck through.
+ */
 export function buildRateOffers(
   baseNightly: NightRate[],
   adults: number,
   adultsExtraSatang: Record<string, number> = {},
   ratePlans: RatePlanId[] = ["standard", "breakfast"],
+  list?: RateOffer["list"],
 ): RateOffer[] {
   return ratePlans.map((id) => RATE_PLANS[id]).map((plan) => {
     const rate: RateOffer = {
@@ -95,9 +102,17 @@ export function buildRateOffers(
       adultsExtraSatang,
       totalSatang: 0,
       pricedForAdults: adults,
+      ...(list ? { list } : {}),
     };
     return { ...rate, totalSatang: rateTotalForAdults(rate, adults) };
   });
+}
+
+/** The struck-through base-rate total of a Direct rate at a given number of adults; null when the rate has no list price. */
+export function listTotalForAdults(rate: Pick<RateOffer, "list" | "supplementSatangPerGuestPerNight">, adults: number): number | null {
+  if (!rate.list) return null;
+  const base = rate.list.baseNightly.reduce((sum, n) => sum + n.amountSatang, 0);
+  return base + occupancyExtraSatang(rate.list.adultsExtraSatang, adults) + rate.supplementSatangPerGuestPerNight * adults * rate.list.baseNightly.length;
 }
 
 /** Stay total for a rate at a given number of adults (what a rate row shows). */
@@ -149,7 +164,9 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
     const offer = offers.find((o) => o.slug === item.slug);
     const rate = offer?.rates.find((r) => r.ratePlanId === item.ratePlanId);
     if (!offer || !rate) throw new QuoteError(item.slug, `No ${item.ratePlanId} rate for ${item.slug}`);
-    if (rate.baseNightly.length !== nights) throw new QuoteError(item.slug, `Rate nights mismatch for ${item.slug}`);
+    if (rate.baseNightly.length !== nights || (rate.list && rate.list.baseNightly.length !== nights)) {
+      throw new QuoteError(item.slug, `Rate nights mismatch for ${item.slug}`);
+    }
 
     const nightly: NightRate[] = rate.baseNightly.map((n) => ({
       date: n.date,
@@ -170,6 +187,8 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
       };
     });
     const addonsSatang = addons.reduce((sum, a) => sum + a.amountSatang, 0);
+    // The Cloudbeds Direct rate: the room is already priced at it; the base rate is only shown (struck through).
+    const listRoomSatang = listTotalForAdults(rate, item.adults);
 
     return {
       slug: item.slug,
@@ -181,6 +200,7 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
       nightly,
       occupancyExtraSatang: occupancySatang,
       roomSatang,
+      ...(listRoomSatang !== null ? { listRoomSatang } : {}),
       addons,
       addonsSatang,
     };
@@ -188,6 +208,17 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
 
   const roomsSubtotalSatang = lines.reduce((sum, l) => sum + l.roomSatang, 0);
   const addonsSubtotalSatang = lines.reduce((sum, l) => sum + l.addonsSatang, 0);
+  // Labelled with the guest's code (the offers carry list prices only when the server applied it).
+  let directRate: QuoteDirectRate | null = null;
+  if (input.promo && lines.some((l) => l.listRoomSatang !== undefined)) {
+    const baseRoomsSatang = lines.reduce((sum, l) => sum + (l.listRoomSatang ?? l.roomSatang), 0);
+    directRate = {
+      code: input.promo.code,
+      label: `${input.promo.label} - code ${input.promo.code}`,
+      baseRoomsSatang,
+      savingSatang: baseRoomsSatang - roomsSubtotalSatang,
+    };
+  }
 
   let promo: QuotePromo | null = null;
   if (input.promo && input.promo.pct > 0) {
@@ -215,6 +246,7 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
     roomsSubtotalSatang,
     addonsSubtotalSatang,
     promo,
+    directRate,
     feeBaseSatang,
     cardFeePct: input.pricing.cardFeePct,
     cardFeeSatang,
@@ -246,4 +278,50 @@ export function resolvePromo(code: string | null | undefined, promoPct: number, 
   }
   const hint = promoPct > 0 ? ` Try ${validCode} for our best direct rate.` : "";
   return { code: normalized, valid: false, message: `We don't recognise the code ${normalized}.${hint}` };
+}
+
+/** PromoResult.label of the Cloudbeds Direct rate (the quote adds " - code DIRECT"). */
+export const DIRECT_RATE_LABEL = "Direct rate";
+
+/**
+ * Whether the booking page offers the code input and sends a typed (or ?promo=) code with its searches:
+ * wherever a code can lower the price, and on a Stripe page that can't apply the Direct code (it answers
+ * the code with a note linking the classic booking page instead of ignoring it). Not in Beam modes.
+ */
+export function promoInputOffered(config: Pick<PublicBookingConfig, "promoEnabled" | "promoMode">): boolean {
+  return config.promoEnabled || config.promoMode === "classic-only";
+}
+
+/** The code the page suggests ("Use code DIRECT..."), or null where no code can lower the price. */
+export function promoCodeHint(config: Pick<PublicBookingConfig, "promoEnabled" | "promoCode">): string | null {
+  return config.promoEnabled ? (config.promoCode ?? "DIRECT") : null;
+}
+
+/**
+ * Validates a promo code for this deployment's PromoSettings. demo (discount) and Beam (off):
+ * exactly resolvePromo. direct-rate: the guest's code (trimmed, any case) is valid with pct 0 - the
+ * price comes from Cloudbeds' Direct rate rows, never from a site-side %. classic-only: the code is
+ * real but this page can't apply it, so the guest gets a calm note linking the classic booking page
+ * (`classicPath`, where Cloudbeds applies it) instead of the code being silently ignored.
+ */
+export function resolvePromoFor(
+  code: string | null | undefined,
+  settings: Pick<PromoSettings, "mode" | "code" | "pct">,
+  classicPath: string,
+): PromoResult | null {
+  if (settings.mode === "discount" || settings.mode === "off") return resolvePromo(code, settings.pct, settings.code);
+  const normalized = (code ?? "").trim().toUpperCase();
+  if (normalized === "") return null;
+  if (normalized.length > 32 || !/^[A-Z0-9_-]+$/.test(normalized)) {
+    return { code: normalized.slice(0, 32), valid: false, message: "That code doesn't look right - please check it and try again." };
+  }
+  if (normalized !== settings.code) return { code: normalized, valid: false, message: `We don't recognise the code ${normalized}.` };
+  if (settings.mode === "direct-rate") return { code: normalized, valid: true, pct: 0, label: DIRECT_RATE_LABEL };
+  return {
+    code: normalized,
+    valid: false,
+    note: true,
+    message: `Code ${normalized} can't be applied on this page right now - prices here are our standard rates. Our classic booking page applies it.`,
+    link: { href: classicPath, text: `Book with code ${normalized} on our classic booking page` },
+  };
 }

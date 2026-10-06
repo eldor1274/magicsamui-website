@@ -15,7 +15,7 @@ import { BedDouble, Check, ChevronDown, ChevronRight, Info, MessageCircle, Ruler
 import { RATE_PLANS } from "@/lib/booking/catalogue";
 import { formatNights } from "@/lib/booking/dates";
 import { formatThb } from "@/lib/booking/format";
-import { percentOf, rateTotalForAdults } from "@/lib/booking/quote";
+import { listTotalForAdults, percentOf, rateTotalForAdults } from "@/lib/booking/quote";
 import type { CatalogueRoom, RateOffer, RatePlanId, RatePlanInfo, RoomOffer } from "@/lib/booking/types";
 import { BTN_LINK, BTN_OUTLINE, BTN_PRIMARY, CHIP } from "../ui/styles";
 import OccupancyPopover from "./OccupancyPopover";
@@ -41,6 +41,11 @@ export interface RoomOfferCardProps {
   /** A valid promo from the search: rate rows show the discounted price, as the summary will. */
   promo?: { code: string; pct: number } | null;
   /**
+   * The guest's code when it sells Cloudbeds' Direct rate: rates on it show the base price struck
+   * through and "Direct rate - code X"; a room without it says the code doesn't apply to it.
+   */
+  directCode?: string | null;
+  /**
    * The payment processing fee (%) every online payment adds: shown under each
    * price, so the first price a guest sees says it applies (0 = none).
    */
@@ -58,6 +63,7 @@ export default function RoomOfferCard({
   onAdd,
   enquiryHref,
   promo = null,
+  directCode = null,
   feePct = 0,
 }: RoomOfferCardProps) {
   const maxAdults = Math.max(1, maxAdultsProp ?? offer.maxAdults ?? room.maxGuests);
@@ -148,6 +154,12 @@ export default function RoomOfferCard({
 
       {bookable && (
         <>
+          {directCode && offer.promoNotApplied && (
+            <p className="flex items-start gap-2 px-4 pb-3 text-sm text-(--bk-text-muted)">
+              <Info size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+              Code {directCode} doesn&apos;t apply to this room for these dates - our standard rate is shown.
+            </p>
+          )}
           {(addDisabledReason || !offer.fitsParty || maxAdults < room.maxGuests) && (
             <div className="space-y-1 px-4 pb-3">
               {addDisabledReason && !inCart && (
@@ -182,6 +194,7 @@ export default function RoomOfferCard({
                 maxAdults={maxAdults}
                 disabledReason={addDisabledReason}
                 promo={promo}
+                directCode={directCode}
                 feePct={feePct}
                 onShowPolicy={() => setPolicyPlan(RATE_PLANS[rate.ratePlanId])}
                 onAdd={(adults) => onAdd(rate.ratePlanId, adults)}
@@ -233,20 +246,25 @@ interface RateRowProps {
   maxAdults: number;
   disabledReason: string | null;
   promo: { code: string; pct: number } | null;
+  directCode: string | null;
   feePct: number;
   onShowPolicy: () => void;
   onAdd: (adults: number) => void;
 }
 
-function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason, promo, feePct, onShowPolicy, onAdd }: RateRowProps) {
+function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason, promo, directCode, feePct, onShowPolicy, onAdd }: RateRowProps) {
   const [picking, setPicking] = useState(false);
   const addRef = useRef<HTMLButtonElement>(null);
   const plan = RATE_PLANS[rate.ratePlanId];
   const hasDetails = plan.image !== null || plan.policy.length > 0;
   const perGuest = rate.supplementSatangPerGuestPerNight > 0;
+  // Cloudbeds' Direct rate: the base rate struck through, the Direct price (what is held and charged) below it.
+  const listTotal = listTotalForAdults(rate, defaultAdults);
+  const direct = listTotal !== null && directCode ? { code: directCode, listTotal } : null;
   const total = rateTotalForAdults(rate, defaultAdults);
   // Same satang rounding as the quote's promo line (quote.ts), so card, summary and server agree.
   const discounted = promo ? total - percentOf(total, promo.pct) : total;
+  const wasTotal = direct ? direct.listTotal : promo ? total : null;
 
   return (
     <li className="border-b border-(--bk-border) last:border-b-0">
@@ -281,20 +299,21 @@ function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason,
 
         <div className="col-span-2 flex items-center justify-between gap-4 sm:contents">
           <div className="sm:text-right">
-            {promo && (
+            {wasTotal !== null && (
               <p className="bk-price text-xs leading-tight text-(--bk-text-subtle) line-through">
                 <span className="bk-sr-only">Was </span>
-                {formatThb(total)}
+                {formatThb(wasTotal)}
               </p>
             )}
             <p className="bk-price text-lg font-semibold leading-tight">
-              {promo && <span className="bk-sr-only">Now </span>}
+              {wasTotal !== null && <span className="bk-sr-only">Now </span>}
               {formatThb(discounted)}
             </p>
             <p className="text-xs text-(--bk-text-muted)">
               {formatNights(nights)}
               {perGuest && ` · ${defaultAdults} ${defaultAdults === 1 ? "guest" : "guests"}`}
             </p>
+            {direct && <p className="text-xs font-medium text-(--bk-success)">Direct rate - code {direct.code}</p>}
             {promo && (
               <p className="text-xs font-medium text-(--bk-success)">
                 incl. {promo.code} −{promo.pct}%

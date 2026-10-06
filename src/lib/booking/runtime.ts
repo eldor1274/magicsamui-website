@@ -17,6 +17,7 @@ import { sendSiteMail } from "../siteMail.ts";
 import { getFulfilmentConfig, getStripeDrainConfig } from "./config.ts";
 import type { BookingConfig } from "./config.ts";
 import { cloudbedsRestrictions } from "./cloudbedsProvider.ts";
+import type { PromoRestrictionInput } from "./cloudbedsProvider.ts";
 import { createCloudbedsWriter } from "./cloudbedsWrite.ts";
 import type { CloudbedsWriter } from "./cloudbedsWrite.ts";
 import { createMemoryKv } from "./kv.ts";
@@ -132,12 +133,16 @@ export function getStripeDeps(config: BookingConfig): StripeDeps | null {
     log: logEvent,
     ...(cloudbeds && config.dataSource === "cloudbeds"
       ? {
-          restrictions: (roomTypeId: string, rateId: string | null, checkIn: string, checkOut: string, adults: number) =>
-            cloudbedsRestrictions(roomTypeId, rateId, checkIn, checkOut, adults, {
-              apiKey: cloudbeds.apiKey,
-              propertyId: cloudbeds.propertyId,
-              budgetWaitMs: 3_000,
-            }),
+          restrictions: (roomTypeId: string, rateId: string | null, checkIn: string, checkOut: string, adults: number, promo?: PromoRestrictionInput | null) =>
+            cloudbedsRestrictions(
+              roomTypeId,
+              rateId,
+              checkIn,
+              checkOut,
+              adults,
+              { apiKey: cloudbeds.apiKey, propertyId: cloudbeds.propertyId, budgetWaitMs: 3_000 },
+              promo ?? null,
+            ),
         }
       : {}),
   };

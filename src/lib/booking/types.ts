@@ -123,6 +123,11 @@ export interface RateOffer {
   /** Total for the stay at `pricedForAdults` guests (base + occupancy extra + supplement). */
   totalSatang: number;
   pricedForAdults: number;
+  /**
+   * Set when this is the Cloudbeds Direct (promo code) rate: the base (BAR)
+   * rate it is derived from, shown struck through next to the Direct price.
+   */
+  list?: { baseNightly: NightRate[]; adultsExtraSatang: Record<string, number> };
 }
 
 export type UnavailableReason = "sold-out" | "not-bookable";
@@ -141,6 +146,8 @@ export interface RoomOffer {
    */
   maxAdults?: number;
   rates: RateOffer[];
+  /** The guest's Direct code was checked but Cloudbeds has no Direct rate for this room and these dates: the standard rate is shown. */
+  promoNotApplied?: boolean;
 }
 
 export interface StaySearch {
@@ -150,9 +157,23 @@ export interface StaySearch {
   promo?: string;
 }
 
+/**
+ * pct is the demo's site-side discount; 0 for the Cloudbeds Direct rate (the
+ * rates themselves are lower). An invalid result with `note` is not an error:
+ * the code is real but can't be used here (shown calmly, with `link` when set).
+ */
 export type PromoResult =
   | { code: string; valid: true; pct: number; label: string }
-  | { code: string; valid: false; message: string };
+  | { code: string; valid: false; message: string; note?: true; link?: { href: string; text: string } };
+
+/**
+ * How a promo code works on this deployment (config.ts resolvePromoSettings):
+ * - discount: demo only, a site-side % (BOOKING_DEMO_PROMO_PCT);
+ * - direct-rate: Stripe with live Cloudbeds rates and BOOKING_DIRECT_PROMO on: Cloudbeds' own Direct rate plan is sold;
+ * - classic-only: Stripe without it (flag off, or no Cloudbeds rates): the code is pointed to the classic booking page;
+ * - off: Beam modes (no code applies).
+ */
+export type PromoMode = "discount" | "direct-rate" | "classic-only" | "off";
 
 /** Pricing knobs the client needs to mirror the server quote. */
 export interface PricingConfig {
@@ -218,8 +239,12 @@ export interface PublicBookingConfig extends PricingConfig {
   maxNights: number;
   bookingWindowMonths: number;
   maxSearchAdults: number;
-  /** True when a promo code can be valid (the DIRECT demo discount is off in every Beam mode). */
+  /** True when a promo code can change the price here (the demo discount, or the Cloudbeds Direct rate). */
   promoEnabled: boolean;
+  /** How a code works here (see PromoMode). Absent in answers cached before it existed. */
+  promoMode?: PromoMode;
+  /** The code guests type (BOOKING_PROMO_CODE, default DIRECT): not a secret, the site advertises it. */
+  promoCode?: string;
 }
 
 export interface CartItem {
@@ -259,6 +284,8 @@ export interface QuoteLine {
   /** Extra-adult (occupancy) charge for the stay, included in roomSatang. */
   occupancyExtraSatang: number;
   roomSatang: number;
+  /** On the Cloudbeds Direct rate: the same room at the base rate (shown struck through). Absent otherwise. */
+  listRoomSatang?: number;
   addons: QuoteAddonLine[];
   addonsSatang: number;
 }
@@ -270,15 +297,31 @@ export interface QuotePromo {
   discountSatang: number;
 }
 
+/** The Cloudbeds Direct rate on a quote (its rooms are already priced at it: nothing is deducted again). */
+export interface QuoteDirectRate {
+  /** The code the guest entered (e.g. DIRECT). */
+  code: string;
+  /** "Direct rate - code DIRECT". */
+  label: string;
+  /** The rooms at the base rate (lines on the Direct rate at their list price, the others as quoted). */
+  baseRoomsSatang: number;
+  /** baseRoomsSatang - roomsSubtotalSatang. */
+  savingSatang: number;
+}
+
 export interface Quote {
   currency: "THB";
   checkIn: IsoDate;
   checkOut: IsoDate;
   nights: number;
   lines: QuoteLine[];
+  /** What Cloudbeds holds for the rooms (on the Direct rate where it applies). */
   roomsSubtotalSatang: number;
   addonsSubtotalSatang: number;
+  /** The demo's site-side discount (deducted below the rooms). */
   promo: QuotePromo | null;
+  /** The Cloudbeds Direct rate (already in the room prices); absent or null when no line is on it. */
+  directRate?: QuoteDirectRate | null;
   /** rooms + addons - promo; the base the card fee is charged on. */
   feeBaseSatang: number;
   cardFeePct: number;
@@ -319,6 +362,8 @@ export type BookingErrorCode =
   | "server_error"
   /** stripe-test with real Cloudbeds writes: arrival too soon or not the owner's test email. */
   | "test_mode_restricted"
+  /** Stripe modes: the booking terms changed since the guest's page loaded (refresh, review and tick again). */
+  | "terms_changed"
   /** Client-side only: the request never got a response. */
   | "network_error";
 
@@ -349,6 +394,12 @@ export interface CheckoutRequest {
   expectedDueNowSatang: number;
   /** Preview theme to keep across the Beam round trip (no PII; validated server-side). */
   theme?: ThemeName;
+  /**
+   * The booking terms version (catalogue POLICY_VERSION) the guest's page showed next to the box they
+   * ticked. Stripe modes refuse any other version (terms_changed) before anything is held, so the version
+   * recorded with the payment (msv_terms, the PAID note) is always the one the guest saw.
+   */
+  termsVersion?: string;
   /**
    * Guest details. REQUIRED when config.requiresGuestDetails (stripe modes):
    * passed to Cloudbeds (the reservation) and Stripe (receipt email) only -
@@ -519,4 +570,12 @@ export interface RoomInventory {
   maxGuests?: number;
   /** Cloudbeds roomRateID of the row that was priced (sent with the hold so Cloudbeds prices the same rate). */
   rateId?: string;
+  /**
+   * Set when the row priced is the Cloudbeds Direct (promo code) rate: rateId is
+   * its roomRateID, and this is the base (BAR) row it is derived from (struck
+   * through on the page, and checked with it for stay rules at checkout).
+   */
+  promo?: { baseRateId: string; baseNightly: NightRate[]; baseAdultsExtraSatang: Record<string, number> };
+  /** A promo code was asked for, but no sellable Direct row came back for this room: the base row is priced. */
+  promoNotApplied?: boolean;
 }

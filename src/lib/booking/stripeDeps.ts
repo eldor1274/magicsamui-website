@@ -4,7 +4,7 @@
 
 import type { BookingConfig } from "./config.ts";
 import type { CloudbedsWriter } from "./cloudbedsWrite.ts";
-import type { RestrictionResult } from "./cloudbedsProvider.ts";
+import type { PromoRestrictionInput, RestrictionResult } from "./cloudbedsProvider.ts";
 import type { KvStore } from "./kv.ts";
 import type { StripeClient } from "./payments/stripe.ts";
 import type { IsoDate } from "./types.ts";
@@ -19,7 +19,15 @@ export type AlertFn = (subject: string, lines: string[], options?: { key?: strin
 
 export type LogFn = (message: string, data?: Record<string, unknown>) => void;
 
-export type RestrictionsFn = (roomTypeId: string, rateId: string | null, checkIn: IsoDate, checkOut: IsoDate, adults: number) => Promise<RestrictionResult>;
+/** `promo`: the Direct rate this checkout selected for the room (checked with its base row; see evaluateRestrictions). */
+export type RestrictionsFn = (
+  roomTypeId: string,
+  rateId: string | null,
+  checkIn: IsoDate,
+  checkOut: IsoDate,
+  adults: number,
+  promo?: PromoRestrictionInput | null,
+) => Promise<RestrictionResult>;
 
 export interface StripeDeps {
   config: BookingConfig;
