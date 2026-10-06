@@ -1,6 +1,7 @@
 "use client";
 
 import Script from "next/script";
+import { usePathname } from "next/navigation";
 import { useInteractionLoad } from "@/lib/useInteractionLoad";
 import { isOwnerDevice } from "@/lib/owner";
 
@@ -27,8 +28,10 @@ function shouldRecord(): boolean {
 // intent) is Clarity's own job, so nothing is tagged here.
 export default function ClarityScript() {
   const load = useInteractionLoad(10000, 3000);
+  const pathname = usePathname();
 
-  if (!load || !shouldRecord()) return null;
+  // No recordings of the booking preview (demo / test-mode / MOCK payments, Stage B tests).
+  if (!load || pathname?.startsWith("/booking-preview") || !shouldRecord()) return null;
 
   return (
     <Script id="ms-clarity" strategy="afterInteractive">

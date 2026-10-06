@@ -1,10 +1,17 @@
 // GA4 ecommerce events for the booking preview, shaped like the Cloudbeds
 // engine's events so reports and the Google Ads purchase import line up.
 //
-// GATED: events reach window.dataLayer/gtag ONLY when paymentMode is
-// "beam-live" AND NEXT_PUBLIC_VERCEL_ENV is "production". Everywhere else
-// (demo, playground, previews, localhost) they go to window.__bookingEvents
-// and console.debug, so nothing reaches GA4 or Google Ads.
+// GATED: events reach window.dataLayer/gtag ONLY when paymentMode is a live
+// mode ("stripe-live" or "beam-live") AND NEXT_PUBLIC_VERCEL_ENV is
+// "production". Everywhere else (demo, mock, test, previews, localhost) they
+// go to window.__bookingEvents and console.debug, so nothing reaches GA4 or
+// Google Ads.
+//
+// purchase (WI-10): fired once, only after the SERVER reported the booking
+// paid AND confirmed in Cloudbeds. In stripe-live the server says so by
+// returning StatusResponse.purchase (only then); transaction_id is the
+// Cloudbeds reservationID (the same id the Cloudbeds engine reports, so GA4
+// and the Google Ads import de-duplicate) and value is in baht.
 // Payloads never contain personal data (no name, email or phone).
 // Like Cloudbeds, every event carries property_id and item_name is the
 // Cloudbeds room type name (not the site's marketing name).
@@ -12,8 +19,9 @@
 import { CLOUDBEDS_PROPERTY_ID, CLOUDBEDS_ROOM_NAMES } from "../../data/cloudbeds.ts";
 import { RATE_PLANS, getCatalogueRoom } from "./catalogue.ts";
 import { averageNightlySatang, satangToBaht } from "./quote.ts";
+import { analyticsPaymentType } from "./payments/provider.ts";
 import { track } from "../track.ts";
-import type { BookingSummary, IsoDate, PaymentMode, Quote, QuoteLine, RatePlanId } from "./types.ts";
+import type { BookingSummary, IsoDate, PaymentMode, PurchaseView, Quote, QuoteLine, RatePlanId } from "./types.ts";
 
 export const AFFILIATION = "Magic Suites & Villas";
 export const BE_SOURCE = "magicsamui-direct";
@@ -48,7 +56,7 @@ export interface RecordedBookingEvent {
 type BookingEventWindow = Window & { __bookingEvents?: RecordedBookingEvent[] };
 
 export function analyticsEnabled(paymentMode: PaymentMode, vercelEnv: string | undefined = process.env.NEXT_PUBLIC_VERCEL_ENV): boolean {
-  return paymentMode === "beam-live" && vercelEnv === "production";
+  return (paymentMode === "beam-live" || paymentMode === "stripe-live") && vercelEnv === "production";
 }
 
 export interface ItemSource {
@@ -104,8 +112,12 @@ export interface BookingAnalytics {
   removeFromCart(line: QuoteLine, quote: Pick<Quote, "checkIn" | "checkOut">): void;
   beginCheckout(quote: Quote): void;
   addPaymentInfo(quote: Quote): void;
-  /** Fires once per booking ref (sessionStorage guard). Call only after a verified "paid" status. */
-  purchase(booking: BookingSummary): void;
+  /**
+   * Fires once per booking (sessionStorage guard). Call only after a verified
+   * "paid" status. Stripe modes: pass StatusResponse.purchase - without it
+   * (not confirmed in Cloudbeds yet, or not live) nothing is sent.
+   */
+  purchase(booking: BookingSummary, confirmed?: PurchaseView | null): void;
   /** The "Having trouble paying?" rescue strip appeared (same gate as everything else). */
   helpShown(): void;
   /** A rescue channel was used from the strip. */
@@ -159,10 +171,10 @@ function markPurchaseSent(ref: string): void {
 }
 
 /** Purchase item list and totals in the Cloudbeds shape (subtotal = value before the card fee). */
-export function purchaseParams(booking: BookingSummary): Record<string, unknown> {
+export function purchaseParams(booking: BookingSummary, confirmed: PurchaseView | null = null): Record<string, unknown> {
   return {
-    transaction_id: booking.ref,
-    value: satangToBaht(booking.dueNowSatang),
+    transaction_id: confirmed?.transactionId ?? booking.ref,
+    value: confirmed?.valueBaht ?? satangToBaht(booking.dueNowSatang),
     subtotal: satangToBaht(booking.totalSatang - booking.cardFeeSatang),
     tax: satangToBaht(booking.cardFeeSatang),
     coupon: booking.promoCode ?? "",
@@ -208,7 +220,7 @@ export function createBookingAnalytics(paymentMode: PaymentMode, vercelEnv?: str
     addPaymentInfo(quote) {
       emit(enabled, "add_payment_info", {
         value: satangToBaht(quote.totalSatang),
-        payment_type: "beam",
+        payment_type: analyticsPaymentType(paymentMode),
         coupon: quote.promo?.code ?? "",
         items: quote.lines.map((l) => itemFromQuoteLine(l, quote)),
       });
@@ -219,12 +231,14 @@ export function createBookingAnalytics(paymentMode: PaymentMode, vercelEnv?: str
     helpClick(channel) {
       emit(enabled, "booking_help_click", { channel });
     },
-    purchase(booking) {
+    purchase(booking, confirmed = null) {
+      // Stripe: no purchase until the server confirms the Cloudbeds reservation (it then supplies the reservationID).
+      if (booking.paymentMode.startsWith("stripe-") && !confirmed) return;
       if (typeof window === "undefined" || purchaseAlreadySent(booking.ref)) return;
       purchaseQueued.add(booking.ref);
       const ref = booking.ref;
       if (!enabled) {
-        emit(false, "purchase", purchaseParams(booking));
+        emit(false, "purchase", purchaseParams(booking, confirmed));
         markPurchaseSent(ref);
         return;
       }
@@ -232,7 +246,7 @@ export function createBookingAnalytics(paymentMode: PaymentMode, vercelEnv?: str
       // is set only once gtag has actually sent the event (event_callback), so
       // a guest who leaves before that gets it re-sent on a reload in this
       // tab. GA4 and the Ads import de-duplicate on transaction_id.
-      emit(true, "purchase", { ...purchaseParams(booking), event_callback: () => markPurchaseSent(ref) });
+      emit(true, "purchase", { ...purchaseParams(booking, confirmed), event_callback: () => markPurchaseSent(ref) });
     },
   };
 }

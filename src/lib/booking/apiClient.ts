@@ -1,7 +1,10 @@
 // Browser-side wrappers for the booking API. They never throw: failures come
 // back as ApiError objects so components can render a message.
 
+import { ALL_PAYMENT_REDIRECT_HOSTS } from "./payments/provider.ts";
 import type {
+  AbandonRequest,
+  AbandonResponse,
   ApiError,
   AvailabilityResponse,
   CheckoutRequest,
@@ -58,12 +61,14 @@ export function postCheckout(body: CheckoutRequest): Promise<CheckoutResponse> {
 }
 
 export function fetchStatus(
-  params: { t: string; p?: string | null; l?: string | null },
+  params: { t: string; p?: string | null; l?: string | null; s?: string | null },
   signal?: AbortSignal,
 ): Promise<StatusResponse | ApiError> {
   const q = new URLSearchParams({ t: params.t });
   if (params.p) q.set("p", params.p);
   if (params.l) q.set("l", params.l);
+  // Stripe: the Checkout Session id from the return URL's session_id.
+  if (params.s) q.set("s", params.s);
   return request<StatusResponse>(`/api/booking/status?${q.toString()}`, { signal });
 }
 
@@ -93,5 +98,33 @@ export function recallLinkToken(ref: string): string | null {
     return sessionStorage.getItem(LINK_TOKEN_PREFIX + ref);
   } catch {
     return null;
+  }
+}
+
+/**
+ * POST /api/booking/abandon (Stripe): call when the guest is back from
+ * Stripe's back link (?resume=payment&reason=cancelled&t=...) or presses
+ * Cancel. Expires the session and releases the room hold; never cancels a
+ * paid booking (state "paid" -> show the return page instead).
+ */
+export function postAbandon(body: AbandonRequest): Promise<AbandonResponse> {
+  return request<AbandonResponse>("/api/booking/abandon", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ t: body.t, l: body.l ?? null, s: body.s ?? null }),
+  }) as Promise<AbandonResponse>;
+}
+
+/**
+ * Only follow a checkout redirect to our own origin or a payment provider's
+ * hosted page (checkout.stripe.com, Beam's pages) over https.
+ */
+export function isAllowedPaymentRedirect(url: string, currentHref: string): boolean {
+  try {
+    const u = new URL(url, currentHref);
+    if (u.origin === new URL(currentHref).origin) return true;
+    return u.protocol === "https:" && ALL_PAYMENT_REDIRECT_HOSTS.includes(u.host);
+  } catch {
+    return false;
   }
 }

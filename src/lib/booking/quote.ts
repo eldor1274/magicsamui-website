@@ -17,6 +17,7 @@ import type {
   QuoteLine,
   QuotePromo,
   RateOffer,
+  RatePlanId,
   RoomOffer,
 } from "./types.ts";
 
@@ -31,6 +32,28 @@ export function thbToSatang(thb: number): number {
 /** Satang -> baht as a number (for analytics `value`, which is in major units). */
 export function satangToBaht(satang: number): number {
   return Math.round(satang) / SATANG_PER_THB;
+}
+
+/**
+ * Satang -> an exact major-unit decimal string for the Cloudbeds API
+ * ("12345.67", "100.00"). The ONLY place satang become baht on the way to
+ * Cloudbeds (cloudbedsWrite.ts); Stripe gets satang integers unchanged.
+ */
+export function satangToBahtString(satang: number): string {
+  if (!Number.isInteger(satang) || satang < 0) throw new RangeError(`satang must be a non-negative integer, got ${satang}`);
+  const whole = Math.floor(satang / SATANG_PER_THB);
+  const frac = satang % SATANG_PER_THB;
+  return `${whole}.${String(frac).padStart(2, "0")}`;
+}
+
+/**
+ * A Cloudbeds v1.x money field (major-unit baht, sent as a JSON number OR a
+ * string such as "0.00") -> integer satang. null when it is not a number.
+ */
+export function cloudbedsMoneyToSatang(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : Number(String(v).replace(/,/g, ""));
+  return Number.isFinite(n) ? Math.round(n * SATANG_PER_THB) : null;
 }
 
 /** `pct` percent of an integer satang amount, rounded half-up to a satang. */
@@ -57,8 +80,13 @@ export function occupancyExtraSatang(adultsExtraSatang: Record<string, number> |
 }
 
 /** Builds the sellable rate plans for a room from its base nightly rates. */
-export function buildRateOffers(baseNightly: NightRate[], adults: number, adultsExtraSatang: Record<string, number> = {}): RateOffer[] {
-  return [RATE_PLANS.standard, RATE_PLANS.breakfast].map((plan) => {
+export function buildRateOffers(
+  baseNightly: NightRate[],
+  adults: number,
+  adultsExtraSatang: Record<string, number> = {},
+  ratePlans: RatePlanId[] = ["standard", "breakfast"],
+): RateOffer[] {
+  return ratePlans.map((id) => RATE_PLANS[id]).map((plan) => {
     const rate: RateOffer = {
       ratePlanId: plan.id,
       ratePlanName: plan.name,

@@ -8,6 +8,7 @@ import Footer from "@/components/Footer";
 import WhatsAppFab from "@/components/WhatsAppFab";
 import { site } from "@/data/site";
 import { GOOGLE_ADS_ID } from "@/lib/analytics";
+import { finishesLiveStripePayments, getPublicBookingConfig, resolveBookingEngine } from "@/lib/booking/config";
 import "./globals.css";
 
 const sans = Inter({
@@ -23,8 +24,11 @@ const serif = Fraunces({
 
 export const metadata: Metadata = {
   title: "Luxury Private Pool Villas in Koh Samui | Magic Suites",
+  // No best-rate promise while our own engine (fee shown openly, no DIRECT code) serves /booking.
   description:
-    "Hillside villas and suites in Koh Samui, each with its own private pool and sea view. Rated 9.9 on Booking.com. 5 min to the beach — book direct for our best rate.",
+    resolveBookingEngine() === "own"
+      ? "Hillside villas and suites in Koh Samui, each with its own private pool and sea view. Rated 9.9 on Booking.com. 5 min to the beach — book direct with live availability."
+      : "Hillside villas and suites in Koh Samui, each with its own private pool and sea view. Rated 9.9 on Booking.com. 5 min to the beach — book direct for our best rate.",
   metadataBase: new URL(`https://${site.domain}`),
   openGraph: {
     type: "website",
@@ -54,6 +58,12 @@ export default function RootLayout({
 }>) {
   const gaId = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID;
   const tagIds = [gaId, GOOGLE_ADS_ID].filter(Boolean);
+  // The booking preview is tracked only while it takes REAL payments (stripe-live on production: Stage C
+  // and the soft launch run there). Demo / test / MOCK payments never reach GA4 or Google Ads.
+  const previewTracked = getPublicBookingConfig().live;
+  // The soft-launch return page also while live Stripe payments are only being FINISHED (emergency stop,
+  // provider drain): paid bookings are still confirmed there, and their purchase must still be recorded.
+  const previewReturnTracked = previewTracked || finishesLiveStripePayments();
 
   return (
     <html lang="en" className={`${sans.variable} ${serif.variable} h-full`}>
@@ -73,10 +83,11 @@ export default function RootLayout({
         <Header />
         <main className="flex-1">{children}</main>
         <Footer />
-        <WhatsAppFab />
-        <CloudbedsScript />
+        {/* BOOKING_ENGINE=own: /booking serves our own engine (default: the Cloudbeds engine, unchanged). */}
+        <WhatsAppFab ownEngine={resolveBookingEngine() === "own"} previewTracked={previewTracked} />
+        <CloudbedsScript ownEngine={resolveBookingEngine() === "own"} />
         <ClarityScript />
-        <GaScript />
+        <GaScript previewTracked={previewTracked} previewReturnTracked={previewReturnTracked} />
       </body>
     </html>
   );

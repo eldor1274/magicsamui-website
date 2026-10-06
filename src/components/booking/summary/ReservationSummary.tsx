@@ -5,18 +5,21 @@
 // state; one line per cart item (room, plan, guests, add-ons, price, remove);
 // Subtotal, add-ons, promo discount, the payment processing fee with a visible
 // explanation (Cloudbeds hides this fee in a tooltip the site suppresses - we
-// show it), Total "THB x", Due now; the step CTA; "Secure payment by Beam".
+// show it), Total "THB x", Due now; the step CTA; "Secure payment by <provider>"
+// (Stripe or Beam, from the booking config - see lib/booking/paymentCopy).
 // quote.lines[i] corresponds to cart[i]. "sidebar" is the sticky desktop
 // card; "sheet" is the same content inside the mobile summary sheet.
 // Keep ReservationSummaryProps / SummaryCta stable.
 
-import { useId, useState } from "react";
+import { useContext, useId, useState } from "react";
 import { ArrowRight, BedDouble, Car, Info, Moon, ShieldCheck, Trash2, User } from "lucide-react";
 import { FREE_PICKUP_MIN_NIGHTS, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { formatDisplayDate, formatNights, nightsBetween } from "@/lib/booking/dates";
 import { formatThb, formatThbWithCode } from "@/lib/booking/format";
+import { DEMO_COPY_CONFIG, providerCopy } from "@/lib/booking/paymentCopy";
 import type { CartItem, IsoDate, Quote } from "@/lib/booking/types";
 import { CHIP, TOUCH_TARGET } from "../ui/styles";
+import { BookingContext } from "../state";
 import SummaryCtaButton from "./SummaryCtaButton";
 
 export interface SummaryCta {
@@ -60,6 +63,9 @@ export default function ReservationSummary({
   variant,
 }: ReservationSummaryProps) {
   const [feeInfoOpen, setFeeInfoOpen] = useState(false);
+  const bookingConfig = useContext(BookingContext)?.config;
+  // Outside the booking app (never in practice) the wording falls back to the demo/Beam copy.
+  const copy = providerCopy(bookingConfig ?? DEMO_COPY_CONFIG);
   const feeInfoId = useId();
   const headingId = useId();
   const sidebar = variant === "sidebar";
@@ -234,8 +240,7 @@ export default function ReservationSummary({
                   hidden={!feeInfoOpen}
                   className="mt-1.5 rounded-(--bk-radius-control) bg-(--bk-surface-sunken) px-3 py-2 text-xs leading-relaxed text-(--bk-text-muted)"
                 >
-                  A {quote.cardFeePct}% fee covers the cost of taking your payment securely through Beam, whether you pay by card or
-                  PromptPay. It is already included in the total below - there are no other charges at checkout.
+                  {copy.feeExplainer(quote.cardFeePct)}
                 </p>
               </div>
               {!sidebar && totalRows}
@@ -266,7 +271,7 @@ export default function ReservationSummary({
 
             <p className="mt-3 flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1 text-xs text-(--bk-text-muted)">
               <ShieldCheck size={15} className="text-(--bk-success)" aria-hidden="true" />
-              <span>Secure payment by Beam</span>
+              <span>{copy.secureLine}</span>
               <button
                 type="button"
                 onClick={onLearnMore}

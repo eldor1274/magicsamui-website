@@ -6,7 +6,8 @@ import JsonLd from "@/components/JsonLd";
 import { resortJsonLd } from "@/lib/structuredData";
 import { rooms } from "@/data/rooms";
 import { site } from "@/data/site";
-import { LANG_LINKS, type Landing } from "@/data/landings";
+import { LANG_LINKS, perksForEngine, type Landing } from "@/data/landings";
+import { resolveBookingEngine } from "@/lib/booking/config";
 
 // Shared template for the localized landing pages. The header and footer stay
 // English (global chrome); everything inside is in the visitor's language,
@@ -105,7 +106,7 @@ export default function LocalizedLanding({ t }: { t: Landing }) {
         <div className="mx-auto max-w-6xl px-5 py-16">
           <h2 className="font-serif text-3xl text-ink">{t.perksTitle}</h2>
           <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-            {t.perks.map((perk) => (
+            {perksForEngine(t.perks, t.code, resolveBookingEngine() === "own").map((perk) => (
               <div key={perk.title} className="rounded-2xl bg-white p-6">
                 <p className="font-medium text-ink">{perk.title}</p>
                 <p className="mt-2 text-sm text-ink-soft">{perk.text}</p>

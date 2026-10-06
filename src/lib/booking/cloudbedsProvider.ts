@@ -18,7 +18,7 @@
 
 import { ROOM_TYPE_TO_SLUG } from "../../data/cloudbeds.ts";
 import { getBookableRooms } from "./catalogue.ts";
-import { eachNight } from "./dates.ts";
+import { addDays, eachNight } from "./dates.ts";
 import { thbToSatang } from "./quote.ts";
 import type { IsoDate, NightRate, RoomInventory } from "./types.ts";
 
@@ -69,6 +69,13 @@ export function createTokenBucket(ratePerSecond: number, burst: number): TokenBu
  */
 export const CLOUDBEDS_PREVIEW_BUDGET: TokenBucket = createTokenBucket(3, 8);
 
+/**
+ * One bucket for reads AND writes (cloudbedsWrite.ts) on this instance, so a
+ * checkout's hold and a burst of searches can never together exceed the
+ * key's 10 requests/second.
+ */
+export const CLOUDBEDS_BUDGET: TokenBucket = CLOUDBEDS_PREVIEW_BUDGET;
+
 export interface CloudbedsDeps {
   apiKey: string;
   propertyId: string | null;
@@ -93,7 +100,16 @@ export interface CloudbedsDeps {
    * CloudbedsBudgetError, so the caller falls back or answers 503.
    */
   budgetWaitMs?: number;
+  /** Waits before the single retry after a 429 (tests shorten it). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Sell only the base (BAR) row (Stripe modes); see ParseOptions. */
+  baseRateOnly?: boolean;
+  /** A room type had sellable rows but no base row (baseRateOnly): logged by the caller. */
+  onNoBaseRate?: (slug: string) => void;
 }
+
+/** Longest Retry-After honoured before the single 429 retry of a read. */
+export const READ_429_MAX_WAIT_MS = 2_000;
 
 /** The preview's Cloudbeds call budget is used up for the moment (no request was sent). */
 export class CloudbedsBudgetError extends Error {
@@ -114,6 +130,22 @@ async function acquire(budget: TokenBucket, maxWaitMs: number): Promise<boolean>
   }
 }
 
+/**
+ * One read call with a single retry after a 429 (Retry-After honoured up to
+ * READ_429_MAX_WAIT_MS), drawing a fresh token from the same budget for the
+ * retry. Reads are safe to repeat.
+ */
+async function readCall(url: string, init: RequestInit, deps: Pick<CloudbedsDeps, "fetchImpl" | "budgetWaitMs" | "sleep">, budget: TokenBucket | null): Promise<Response> {
+  const doFetch = deps.fetchImpl ?? fetch;
+  const res = await doFetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
+  if (res.status !== 429) return res;
+  const retryAfter = Number(res.headers.get("retry-after"));
+  const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, READ_429_MAX_WAIT_MS) : 500;
+  await (deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(wait);
+  if (budget && !(await acquire(budget, deps.budgetWaitMs ?? 0))) throw new CloudbedsBudgetError();
+  return doFetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
+}
+
 export class CloudbedsError extends Error {
   constructor(message: string) {
     super(message);
@@ -128,6 +160,7 @@ interface CbDetailedRate {
 
 interface CbRoom {
   roomTypeID?: unknown;
+  roomRateID?: unknown;
   roomsAvailable?: unknown;
   roomRateDetailed?: unknown;
   ratePlanNamePublic?: unknown;
@@ -195,8 +228,21 @@ function stayTotal(nightly: NightRate[]): number {
   return nightly.reduce((s, x) => s + x.amountSatang, 0);
 }
 
+export interface ParseOptions {
+  /**
+   * Sell ONLY the base (BAR) row - Stripe modes, where the guest pays for the
+   * "Standard Rate - Room only" under the house policy and the hold is made on
+   * the row's roomRateID. A room type that comes back with only derived or
+   * named-plan rows (package, long stay, non-refundable...) is then unavailable
+   * instead of being sold as another plan under the Standard label.
+   */
+  baseRateOnly?: boolean;
+  /** Called with each room type that had sellable rows but no base row (baseRateOnly). */
+  onNoBaseRate?: (slug: string) => void;
+}
+
 /** Pure parser for a getAvailableRoomTypes response (exported for tests). */
-export function parseAvailableRoomTypes(json: unknown, checkIn: IsoDate, checkOut: IsoDate): RoomInventory[] {
+export function parseAvailableRoomTypes(json: unknown, checkIn: IsoDate, checkOut: IsoDate, options: ParseOptions = {}): RoomInventory[] {
   const root = asRecord(json);
   if (!root || root.success !== true) {
     throw new CloudbedsError(`getAvailableRoomTypes failed: ${String(root?.message ?? "no success flag")}`);
@@ -205,6 +251,7 @@ export function parseAvailableRoomTypes(json: unknown, checkIn: IsoDate, checkOu
   const properties = Array.isArray(root.data) ? root.data : [];
 
   const found = new Map<string, { inventory: RoomInventory; tier: number }>();
+  const nonBaseOnly = new Set<string>();
   for (const p of properties) {
     const prop = asRecord(p);
     if (!prop) continue;
@@ -220,11 +267,16 @@ export function parseAvailableRoomTypes(json: unknown, checkIn: IsoDate, checkOu
       const nightly = nightlyFromDetailed(row.roomRateDetailed, nights);
       if (!nightly || !(remaining > 0)) continue;
       const tier = rowTier(row);
+      if (options.baseRateOnly && tier !== 2) {
+        nonBaseOnly.add(slug);
+        continue;
+      }
       const prev = found.get(slug);
       const better = !prev || tier > prev.tier || (tier === prev.tier && stayTotal(nightly) < stayTotal(prev.inventory.baseNightly));
       if (!better) continue;
       // Cloudbeds' own occupancy limit for the room type (may be lower than the site's rooms.ts figure).
       const maxGuests = Number(row.maxGuests);
+      const rateId = typeof row.roomRateID === "string" || typeof row.roomRateID === "number" ? String(row.roomRateID) : "";
       found.set(slug, {
         tier,
         inventory: {
@@ -234,14 +286,21 @@ export function parseAvailableRoomTypes(json: unknown, checkIn: IsoDate, checkOu
           baseNightly: nightly,
           adultsExtraSatang: parseAdultsExtraCharge(row.adultsExtraCharge, row.adultsIncluded),
           ...(Number.isInteger(maxGuests) && maxGuests >= 1 && maxGuests <= 50 ? { maxGuests } : {}),
+          ...(/^[A-Za-z0-9_-]{1,40}$/.test(rateId) ? { rateId } : {}),
         },
       });
     }
   }
 
+  for (const slug of nonBaseOnly) if (!found.has(slug)) options.onNoBaseRate?.(slug);
   return getBookableRooms().map(
     (room) => found.get(room.slug)?.inventory ?? { slug: room.slug, available: false, remaining: 0, baseNightly: [] },
   );
+}
+
+/** Read headers: the key plus X-PROPERTY-ID when the property id is known (recommended by Cloudbeds). */
+export function cloudbedsReadHeaders(apiKey: string, propertyId: string | null): Record<string, string> {
+  return { "x-api-key": apiKey, accept: "application/json", ...(propertyId ? { "X-PROPERTY-ID": propertyId } : {}) };
 }
 
 const searchCache = new Map<string, { expiresAt: number; inventory: RoomInventory[] }>();
@@ -262,7 +321,7 @@ export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, de
 
   const nowMs = deps.nowMs ?? Date.now();
   const ttl = deps.cacheTtlMs ?? 0;
-  const cacheKey = `${deps.apiKey.slice(-6)}|${url}`;
+  const cacheKey = `${deps.apiKey.slice(-6)}|${deps.baseRateOnly ? "base" : "any"}|${url}`;
   if (ttl > 0) {
     const hit = searchCache.get(cacheKey);
     if (hit && hit.expiresAt > nowMs) return hit.inventory;
@@ -271,14 +330,9 @@ export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, de
   const budget = deps.budget ?? (deps.fetchImpl ? null : CLOUDBEDS_PREVIEW_BUDGET);
   if (budget && !(await acquire(budget, deps.budgetWaitMs ?? 0))) throw new CloudbedsBudgetError();
 
-  const doFetch = deps.fetchImpl ?? fetch;
-  const res = await doFetch(url, {
-    headers: { "x-api-key": deps.apiKey, accept: "application/json" },
-    cache: "no-store",
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+  const res = await readCall(url, { headers: cloudbedsReadHeaders(deps.apiKey, deps.propertyId), cache: "no-store" }, deps, budget ?? null);
   if (!res.ok) throw new CloudbedsError(`getAvailableRoomTypes HTTP ${res.status}`);
-  const inventory = parseAvailableRoomTypes(await res.json(), checkIn, checkOut);
+  const inventory = parseAvailableRoomTypes(await res.json(), checkIn, checkOut, { baseRateOnly: deps.baseRateOnly, onNoBaseRate: deps.onNoBaseRate });
 
   if (ttl > 0) {
     if (searchCache.size >= CACHE_MAX_ENTRIES) {
@@ -293,4 +347,106 @@ export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, de
     searchCache.set(cacheKey, { expiresAt: nowMs + ttl, inventory });
   }
   return inventory;
+}
+
+/* --------------------------- restrictions ---------------------------- */
+
+export type RestrictionResult =
+  | { ok: true; checked: boolean }
+  | { ok: false; reason: "closed_to_arrival" | "closed_to_departure" | "min_stay" | "max_stay" | "blocked" | "sold_out"; minNights?: number; maxNights?: number };
+
+interface CbRateDay {
+  date?: unknown;
+  closedToArrival?: unknown;
+  closedToDeparture?: unknown;
+  blocked?: unknown;
+  minLos?: unknown;
+  maxLos?: unknown;
+  roomsAvailable?: unknown;
+}
+
+function truthy(v: unknown): boolean {
+  return v === true || v === "true" || v === 1 || v === "1";
+}
+
+/**
+ * Pure check of a getRatePlans (detailedRates=true) answer for one room type
+ * against the stay (exported for tests). Picks the row with `rateId` when
+ * given, else the base (non-derived, unnamed) row. Rules: arrival day not
+ * closedToArrival; departure day (queried with endDate = check-out + 1, so it
+ * is normally returned) not closedToDeparture;
+ * nights >= arrival-day minLos; nights <= maxLos when maxLos > 0 (0 = none);
+ * every night not blocked and roomsAvailable >= 1. A missing row, or a row
+ * without the arrival day, means the answer can't be evaluated: { ok: true, checked: false } (availability itself
+ * already came from getAvailableRoomTypes).
+ */
+export function evaluateRestrictions(
+  json: unknown,
+  roomTypeId: string,
+  rateId: string | null,
+  checkIn: IsoDate,
+  checkOut: IsoDate,
+): RestrictionResult {
+  const root = asRecord(json);
+  if (!root || root.success !== true) throw new CloudbedsError(`getRatePlans failed: ${String(root?.message ?? "no success flag")}`);
+  const rows = (Array.isArray(root.data) ? root.data : []).map(asRecord).filter((r): r is Record<string, unknown> => r !== null);
+  const forType = rows.filter((r) => String(r.roomTypeID ?? "") === roomTypeId);
+  const row =
+    (rateId ? forType.find((r) => String(r.rateID ?? "") === rateId) : undefined) ??
+    forType.find((r) => !r.isDerived && !r.derivedType && !r.ratePlanNamePublic) ??
+    forType[0];
+  if (!row) return { ok: true, checked: false };
+  const days = (Array.isArray(row.roomRateDetailed) ? row.roomRateDetailed : []) as CbRateDay[];
+  const byDate = new Map<string, CbRateDay>();
+  for (const d of days) if (typeof d?.date === "string") byDate.set(d.date.slice(0, 10), d);
+  const nights = eachNight(checkIn, checkOut);
+  const arrival = byDate.get(checkIn);
+  // Without the arrival day's row nothing (CTA, min/max stay) can be evaluated: say so, never "checked".
+  if (!arrival) return { ok: true, checked: false };
+  if (truthy(arrival.closedToArrival)) return { ok: false, reason: "closed_to_arrival" };
+  const departure = byDate.get(checkOut);
+  if (departure && truthy(departure.closedToDeparture)) return { ok: false, reason: "closed_to_departure" };
+  const minLos = Number(arrival?.minLos);
+  if (Number.isFinite(minLos) && minLos > 0 && nights.length < minLos) return { ok: false, reason: "min_stay", minNights: minLos };
+  const maxLos = Number(arrival?.maxLos);
+  if (Number.isFinite(maxLos) && maxLos > 0 && nights.length > maxLos) return { ok: false, reason: "max_stay", maxNights: maxLos };
+  for (const night of nights) {
+    const d = byDate.get(night);
+    if (!d) continue;
+    if (truthy(d.blocked)) return { ok: false, reason: "blocked" };
+    if (d.roomsAvailable !== undefined && Number(d.roomsAvailable) < 1) return { ok: false, reason: "sold_out" };
+  }
+  return { ok: true, checked: true };
+}
+
+/** Live restriction check for one room type (no cache). Throws CloudbedsError / CloudbedsBudgetError. */
+export async function cloudbedsRestrictions(
+  roomTypeId: string,
+  rateId: string | null,
+  checkIn: IsoDate,
+  checkOut: IsoDate,
+  adults: number,
+  deps: Omit<CloudbedsDeps, "adults" | "cacheTtlMs">,
+): Promise<RestrictionResult> {
+  const params = new URLSearchParams({
+    roomTypeID: roomTypeId,
+    startDate: checkIn,
+    // One day past check-out, so the departure day's row (closedToDeparture) is returned too; only the
+    // stay nights are checked for blocked / roomsAvailable.
+    endDate: addDays(checkOut, 1),
+    adults: String(Math.max(1, Math.floor(adults))),
+    children: "0",
+    detailedRates: "true",
+  });
+  if (deps.propertyId) params.set("propertyIDs", deps.propertyId);
+  const budget = deps.budget ?? (deps.fetchImpl ? null : CLOUDBEDS_BUDGET);
+  if (budget && !(await acquire(budget, deps.budgetWaitMs ?? 0))) throw new CloudbedsBudgetError();
+  const res = await readCall(
+    `${CLOUDBEDS_API_BASE}/getRatePlans?${params.toString()}`,
+    { headers: cloudbedsReadHeaders(deps.apiKey, deps.propertyId), cache: "no-store" },
+    deps,
+    budget ?? null,
+  );
+  if (!res.ok) throw new CloudbedsError(`getRatePlans HTTP ${res.status}`);
+  return evaluateRestrictions(await res.json(), roomTypeId, rateId, checkIn, checkOut);
 }

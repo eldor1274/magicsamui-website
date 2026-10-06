@@ -16,13 +16,15 @@ import JsonLd from "@/components/JsonLd";
 import { resortJsonLd } from "@/lib/structuredData";
 import BookNowButton from "@/components/BookNowButton";
 import CloudbedsDatePicker from "@/components/CloudbedsDatePicker";
+import OwnDatePicker from "@/components/OwnDatePickerLazy";
+import { BOOKING_WINDOW_MONTHS, MAX_NIGHTS, resolveBookingEngine } from "@/lib/booking/config";
 import DesktopVideo from "@/components/DesktopVideo";
 import ReviewsSection from "@/components/ReviewsSection";
 import RoomCard from "@/components/RoomCard";
 import { rooms } from "@/data/rooms";
 import { reviewStats } from "@/data/reviews";
 import { getAllBlogPosts } from "@/data/blog";
-import { LANG_ALTERNATES } from "@/data/landings";
+import { LANG_ALTERNATES, OWN_ENGINE_PERK } from "@/data/landings";
 import { Star } from "lucide-react";
 
 const featuredRooms = rooms.filter(
@@ -130,7 +132,12 @@ export default function Home() {
       </section>
 
       <section className="mx-auto -mt-9 max-w-3xl px-5">
-        <CloudbedsDatePicker />
+        {/* BOOKING_ENGINE=own: our own quick search (same reserved height) sending to /booking; otherwise the Cloudbeds widget. */}
+        {resolveBookingEngine() === "own" ? (
+          <OwnDatePicker maxNights={MAX_NIGHTS} bookingWindowMonths={BOOKING_WINDOW_MONTHS} />
+        ) : (
+          <CloudbedsDatePicker />
+        )}
       </section>
 
       <section className="mx-auto max-w-6xl px-5 pt-12">
@@ -138,7 +145,11 @@ export default function Home() {
           Why book direct
         </p>
         <div className="mt-6 grid grid-cols-2 gap-5 lg:grid-cols-4">
-          {directPerks.map(({ icon: Icon, title, text }) => (
+          {(resolveBookingEngine() === "own"
+            ? // Promo codes are off on our own engine: never promise the DIRECT code there.
+              directPerks.map((p) => (p.icon === BadgePercent ? { ...p, ...OWN_ENGINE_PERK.en } : p))
+            : directPerks
+          ).map(({ icon: Icon, title, text }) => (
             <div key={title} className="rounded-2xl bg-stone-100 p-5">
               <Icon size={22} className="text-pool" />
               <p className="mt-3 text-sm font-semibold text-ink">{title}</p>

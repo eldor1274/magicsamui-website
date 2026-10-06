@@ -1,7 +1,9 @@
 // Checkout orchestration (server). Re-quotes on the server from the cart's
-// identifiers only, creates the booking ref + signed token, and creates the
-// Beam payment link (or the simulated demo link). No reservation is created
-// and nothing is stored: this is a preview.
+// identifiers only (no cache), then per provider:
+// - demo: signed token + the simulated payment page (nothing reserved);
+// - beam: Beam payment link (preview: no reservation is created);
+// - stripe: HOLD FIRST - Cloudbeds reservation, price assertion, then a
+//   Stripe Checkout Session (stripeCheckout.ts).
 
 import { InventoryUnavailableError, buildOffers, getCartInventory } from "./availability.ts";
 import { createPaymentLink, buildPaymentLinkRequest, BeamApiError } from "./beam.ts";
@@ -20,9 +22,13 @@ import type { BookingConfig } from "./config.ts";
 import { todayInBangkok } from "./dates.ts";
 import { MIN_CHARGE_SATANG, QuoteError, computeQuote, resolvePromo } from "./quote.ts";
 import { createBookingToken, generateBookingRef, generateNonce, idempotencyKeyFor } from "./token.ts";
+import { providerOf } from "./payments/provider.ts";
+import { STRIPE_MAX_CHARGE_SATANG } from "./payments/stripe.ts";
+import { noteCheckoutReadFailure, startStripeCheckout } from "./stripeCheckout.ts";
+import type { StripeDeps } from "./stripeDeps.ts";
 import type { BookingSummary, CheckoutFailure, CheckoutResponse, DataSource, Quote } from "./types.ts";
 import { cancelUrl, demoPayUrl, returnUrl } from "./urls.ts";
-import { parseCheckoutRequest, unavailableCartSlugs } from "./validate.ts";
+import { parseCheckoutRequest, parseGuestInput, unavailableCartSlugs } from "./validate.ts";
 import type { ValidationLimits } from "./validate.ts";
 
 export interface CheckoutDeps {
@@ -35,6 +41,20 @@ export interface CheckoutDeps {
   /** Random salt for the Beam idempotency key (tests pin it). */
   nonce?: () => string;
   log?: (message: string, data?: Record<string, unknown>) => void;
+  /** Stripe modes: Stripe client, Cloudbeds writer, KV, alerts (runtime.ts builds them). */
+  stripe?: StripeDeps;
+  /** Client IP (stripe: hashed per-client hold brake; never stored in clear). */
+  clientIp?: string | null;
+  /** Stage B staff cookie value (testAccess.ts). */
+  testAccessToken?: string | null;
+  /** Waits between unit-lock attempts (tests shorten it). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Overrides how long a checkout waits for a unit another checkout holds (tests). */
+  unitLockWaitMs?: number;
+  /** Wall-clock deadline (`clock` ms) by which the route must answer; stripe sizes its writes to it. */
+  deadlineMs?: number;
+  /** Wall clock for the deadline (default Date.now; tests move it). */
+  clock?: () => number;
 }
 
 export interface CheckoutResult {
@@ -64,9 +84,9 @@ const LIVE_AVAILABILITY_UNCONFIRMED = "We could not confirm live availability. N
  * be papered over with demo data once a Beam payment link would follow.
  */
 export function dataSourceAllowsPayment(paymentMode: BookingConfig["paymentMode"], dataSource: DataSource): boolean {
-  if (paymentMode === "demo") return true;
-  if (paymentMode === "beam-live") return dataSource === "cloudbeds";
-  return dataSource !== "demo-fallback"; // playground: explicit demo data is fine (test money), an outage is not
+  if (paymentMode === "demo" || paymentMode === "stripe-mock") return true;
+  if (paymentMode === "beam-live" || paymentMode === "stripe-live") return dataSource === "cloudbeds";
+  return dataSource !== "demo-fallback"; // test modes: explicit demo data is fine (test money), an outage is not
 }
 
 export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise<CheckoutResult> {
@@ -84,8 +104,28 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
     });
   }
   const req = parsed.value;
+  const provider = providerOf(config.paymentMode);
 
-  const promo = resolvePromo(req.promo, config.promoPct, PROMO_CODE);
+  // Stripe: the guest's details go to Cloudbeds (the hold) and Stripe (receipt).
+  // Demo/Beam never read them (they stay in the browser).
+  let guest = null;
+  if (provider === "stripe") {
+    const g = parseGuestInput((rawBody as Record<string, unknown>).guest);
+    if (!g.ok) return fail(400, { error: "invalid_request", message: "Please check your details.", issues: g.issues });
+    guest = g.value;
+    const offPlan = req.items.find((i) => !config.ratePlans.includes(i.ratePlanId) || (!config.addonsEnabled && i.addonIds.length > 0));
+    if (offPlan) {
+      return fail(400, {
+        error: "invalid_request",
+        message: "Please choose again.",
+        issues: ["Only the Standard Rate can be booked online right now (breakfast can be arranged with us after booking)."],
+      });
+    }
+  }
+
+  // Promo codes only exist while payments are simulated (demo). Elsewhere a
+  // code (e.g. ?promo=DIRECT from an old ad link) is ignored, never an error.
+  const promo = config.promoPct > 0 || provider !== "stripe" ? resolvePromo(req.promo, config.promoPct, PROMO_CODE) : null;
   if (promo && !promo.valid) return fail(400, { error: "promo_invalid", message: promo.message });
 
   if (!dataSourceAllowsPayment(config.paymentMode, config.dataSource)) {
@@ -98,13 +138,14 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
     inventoryResult = await getCartInventory(req.checkIn, req.checkOut, req.items, config, {
       fetchImpl: deps.fetchImpl,
       // Simulated stand-in data only while payments are simulated too.
-      allowDemoFallback: config.paymentMode === "demo",
+      allowDemoFallback: config.paymentMode === "demo" || config.paymentMode === "stripe-mock",
       onFallback: (e) => deps.log?.("cloudbeds_fallback", { error: e instanceof Error ? e.message : String(e) }),
       onOccupancyPricing: (note) => deps.log?.("cloudbeds_occupancy_rate_differs", { ...note }),
     });
   } catch (e) {
     if (!(e instanceof InventoryUnavailableError)) throw e;
     deps.log?.("checkout_refused_cloudbeds_down", { mode: config.paymentMode, error: e.message });
+    if (provider === "stripe" && deps.stripe) await noteCheckoutReadFailure(deps.stripe, "re-quote", e.message);
     return fail(503, { error: "payment_unavailable", message: LIVE_AVAILABILITY_UNCONFIRMED });
   }
   const { inventory, dataSource } = inventoryResult;
@@ -112,7 +153,7 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
     deps.log?.("checkout_refused_data_source", { mode: config.paymentMode, dataSource });
     return fail(503, { error: "payment_unavailable", message: LIVE_AVAILABILITY_UNCONFIRMED });
   }
-  const offers = buildOffers(inventory, 1);
+  const offers = buildOffers(inventory, 1, config.ratePlans);
   // Two different causes, told apart so the guest gets the right advice:
   // sold (gone for these dates) vs an occupancy limit (Cloudbeds won't take
   // this many guests in that room online - fewer guests may still work).
@@ -176,6 +217,47 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
   }
 
   const today = limits.today;
+
+  if (provider === "stripe") {
+    if (!deps.stripe || !guest) {
+      return fail(503, { error: "payment_unavailable", message: "Online payment is not available right now. Nothing has been charged." });
+    }
+    // Stripe's largest single charge (8 digits). Checked BEFORE any Cloudbeds write: a long stay in a
+    // large villa must never create a hold that Stripe will then refuse.
+    if (quote.dueNowSatang > STRIPE_MAX_CHARGE_SATANG || quote.lines.some((l) => l.roomSatang > STRIPE_MAX_CHARGE_SATANG)) {
+      deps.log?.("checkout_refused_over_max_charge", { amount: quote.dueNowSatang });
+      return fail(422, {
+        error: "payment_unavailable",
+        message: "A stay of this size can't be paid online in one payment. Nothing has been reserved or charged - please message us on WhatsApp and we'll book it for you.",
+      });
+    }
+    // Re-read under the unit lock just before the hold: another checkout may have taken the unit since.
+    const recheckAvailability =
+      dataSource === "cloudbeds"
+        ? async (): Promise<string[]> => {
+            const fresh = await getCartInventory(req.checkIn, req.checkOut, req.items, config, { fetchImpl: deps.fetchImpl, allowDemoFallback: false });
+            if (fresh.dataSource !== "cloudbeds") throw new Error("live availability unavailable");
+            return unavailableCartSlugs(req.items, buildOffers(fresh.inventory, 1, config.ratePlans));
+          }
+        : undefined;
+    return startStripeCheckout(
+      { checkIn: req.checkIn, checkOut: req.checkOut, items: req.items, guest, quote, inventory, dataSource, theme: req.theme, today, recheckAvailability },
+      {
+        deps: deps.stripe,
+        origin: deps.origin,
+        nowMs,
+        pickRefChar: deps.pickRefChar,
+        nonce: deps.nonce,
+        clientIp: deps.clientIp ?? null,
+        testAccessToken: deps.testAccessToken ?? null,
+        sleep: deps.sleep,
+        unitLockWaitMs: deps.unitLockWaitMs,
+        deadlineMs: deps.deadlineMs,
+        clock: deps.clock,
+      },
+    );
+  }
+
   const ref = generateBookingRef(today, deps.pickRefChar);
   const linkExpiresAt = new Date(nowMs + PAYMENT_LINK_TTL_MINUTES * 60_000).toISOString();
   const booking: BookingSummary = {
@@ -209,6 +291,8 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
         quote,
         expiresAt: linkExpiresAt,
         linkToken: null,
+        provider: "demo",
+        holdReservationId: null,
       },
     };
   }
@@ -245,6 +329,8 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
         quote,
         expiresAt: linkExpiresAt,
         linkToken,
+        provider: "beam",
+        holdReservationId: null,
       },
     };
   } catch (e) {

@@ -8,9 +8,26 @@
 // Money is ALWAYS integer satang (1 THB = 100 satang) and named *Satang.
 // Dates are ISO calendar dates "YYYY-MM-DD" in Asia/Bangkok (property-local).
 
+import type { GuestDetails } from "./guest.ts";
+
 export type IsoDate = string;
 
-export type PaymentMode = "demo" | "beam-playground" | "beam-live";
+/**
+ * Payment provider chosen by BOOKING_PAYMENT_PROVIDER (stripe | beam | demo).
+ * Unset keeps the legacy rule: beam when BEAM_API_BASE is set, else demo.
+ */
+export type PaymentProvider = "demo" | "beam" | "stripe";
+
+/**
+ * Concrete payment mode (provider + test/live):
+ * - demo: simulated payment, nothing leaves our servers.
+ * - beam-playground / beam-live: Beam payment links (beam-live is locked in code: no fulfilment).
+ * - stripe-mock: in-repo fake Stripe + fake Cloudbeds (local click-through, clearly labelled MOCK).
+ * - stripe-test: Stripe test keys (sk_test_/rk_test_). Cloudbeds writes are REAL when
+ *   CLOUDBEDS_API_KEY_BOOKING is set (guarded), otherwise mocked.
+ * - stripe-live: live keys + every live condition (see config.ts stripeLiveBlockers).
+ */
+export type PaymentMode = "demo" | "beam-playground" | "beam-live" | "stripe-mock" | "stripe-test" | "stripe-live";
 
 /** Where availability and nightly rates came from for a response. */
 export type DataSource = "demo" | "cloudbeds" | "demo-fallback";
@@ -143,9 +160,57 @@ export interface PricingConfig {
   depositPct: number;
 }
 
+export type CardBrand = "visa" | "mastercard" | "amex" | "jcb" | "unionpay";
+export type PaymentMethodBadge = "card" | "promptpay" | "apple_pay" | "google_pay";
+
 /** Non-secret config the browser may see. */
 export interface PublicBookingConfig extends PricingConfig {
   paymentMode: PaymentMode;
+  /** demo | beam | stripe (BOOKING_PAYMENT_PROVIDER). */
+  provider: PaymentProvider;
+  /** True only when real money can be charged (beam-live / stripe-live). */
+  live: boolean;
+  /** Provider test mode (beam-playground / stripe-test): test cards only. */
+  testMode: boolean;
+  /** stripe-mock: fake Stripe + fake Cloudbeds - label everything MOCK. */
+  mock: boolean;
+  /**
+   * Where the reservation is written: "live" = a real Cloudbeds reservation (hold-first),
+   * "mock" = simulated writer (nothing reaches Cloudbeds), "none" = no reservation (demo/beam preview).
+   */
+  cloudbedsWrites: "live" | "mock" | "none";
+  /** True when the server needs the guest's details at checkout (stripe modes): send CheckoutRequest.guest. */
+  requiresGuestDetails: boolean;
+  /** Ask for a postcode (sent to Cloudbeds as guestZip; optional for the guest - a placeholder is sent when empty). */
+  collectPostcode: boolean;
+  /** Rate plans offered (stripe: Standard only - Cloudbeds does not price the synthetic Breakfast plan). */
+  ratePlans: RatePlanId[];
+  /** Add-ons offered (false in stripe modes). */
+  addonsEnabled: boolean;
+  /** Card brands the provider accepts (Stripe Thailand: Visa + Mastercard only). */
+  acceptedCardBrands: CardBrand[];
+  /** Payment method badges to show. */
+  paymentMethods: PaymentMethodBadge[];
+  /** How long the room is held while the guest pays (minutes). */
+  holdMinutes: number;
+  /**
+   * Stripe modes: whether Cloudbeds emails the guest a booking confirmation
+   * when we confirm (CLOUDBEDS_SEND_STATUS_EMAIL). When false the only email
+   * is Stripe's payment receipt, and copy must not promise a confirmation email.
+   */
+  sendsBookingConfirmationEmail: boolean;
+  /**
+   * stripe-test with REAL Cloudbeds writes only: holds are refused unless the
+   * arrival is at least `minArrivalMonths` ahead and the guest email is the
+   * owner's test address (the address itself is never exposed). null otherwise.
+   */
+  testGuard: { minArrivalMonths: number } | null;
+  /** Path of the own booking page for this deployment ("/booking" once BOOKING_ENGINE=own is active, else "/booking-preview"). */
+  bookingPath: string;
+  /** Where the Cloudbeds booking engine lives: the fallback offered when online payment here is paused ("/booking/classic" with BOOKING_ENGINE=own, else "/booking"). */
+  classicBookingPath: string;
+  /** WhatsApp fallback link (show it when payments are locked or a booking needs attention). */
+  whatsappUrl: string;
   /** "locked" when live Beam credentials are configured without every live-mode condition. */
   paymentStatus: "ok" | "locked";
   dataSource: "demo" | "cloudbeds";
@@ -236,6 +301,8 @@ export interface ApiError {
   issues?: string[];
   /** invalid_request: the step where the guest can fix it ("addons" = an add-on no longer fits the stay). */
   fixStep?: "addons";
+  /** rate_limited: roughly how long the guest should wait before trying again. */
+  retryAfterMinutes?: number;
 }
 
 export type BookingErrorCode =
@@ -250,6 +317,8 @@ export type BookingErrorCode =
   | "rate_limited"
   | "upstream_error"
   | "server_error"
+  /** stripe-test with real Cloudbeds writes: arrival too soon or not the owner's test email. */
+  | "test_mode_restricted"
   /** Client-side only: the request never got a response. */
   | "network_error";
 
@@ -280,6 +349,13 @@ export interface CheckoutRequest {
   expectedDueNowSatang: number;
   /** Preview theme to keep across the Beam round trip (no PII; validated server-side). */
   theme?: ThemeName;
+  /**
+   * Guest details. REQUIRED when config.requiresGuestDetails (stripe modes):
+   * passed to Cloudbeds (the reservation) and Stripe (receipt email) only -
+   * never stored by us, never put in tokens, URLs, logs or analytics. Ignored
+   * (not read) in demo/beam modes.
+   */
+  guest?: GuestDetails;
 }
 
 export interface CheckoutSuccess {
@@ -298,6 +374,10 @@ export interface CheckoutSuccess {
    * page sends it to /api/booking/status as `l`. null in demo mode.
    */
   linkToken: string | null;
+  /** demo | beam | stripe. */
+  provider: PaymentProvider;
+  /** Cloudbeds reservation id of the hold (stripe modes; null otherwise). Not PII. */
+  holdReservationId: string | null;
 }
 
 export interface CheckoutFailure extends ApiError {
@@ -339,16 +419,75 @@ export interface BookingSummary {
   theme?: ThemeName;
 }
 
-/** GET /api/booking/status?t=token[&p=demoProof][&l=linkToken] */
+/**
+ * Whether the paid booking is confirmed in Cloudbeds (stripe modes).
+ * - not_applicable: demo/beam (no reservation is written).
+ * - awaiting_payment: the hold exists, payment not (yet) complete.
+ * - confirming: payment received, the Cloudbeds confirmation is still running or retrying.
+ * - confirmed: Cloudbeds reservation confirmed with the payment recorded.
+ * - needs_attention: paid, but something needs a human (e.g. the hold was cancelled) - show WhatsApp.
+ * - released: the hold was cancelled (payment expired, failed or abandoned).
+ */
+export type FulfilmentState = "not_applicable" | "awaiting_payment" | "confirming" | "confirmed" | "needs_attention" | "released";
+
+export interface FulfilmentView {
+  state: FulfilmentState;
+  /** Cloudbeds reservationID once confirmed (or for needs_attention); null otherwise. */
+  reservationId: string | null;
+}
+
+/**
+ * Present ONLY when a GA4 purchase may be sent: stripe-live on the production
+ * deployment, paid, and confirmed in Cloudbeds. transactionId = Cloudbeds
+ * reservationID (as the Cloudbeds engine's own purchase events); value in baht.
+ */
+export interface PurchaseView {
+  transactionId: string;
+  valueBaht: number;
+  currency: "THB";
+}
+
+/** GET /api/booking/status?t=token[&p=demoProof][&l=linkToken][&s=checkoutSessionId] */
 export interface StatusResponse {
   ok: true;
   ref: string;
   paymentMode: PaymentMode;
+  provider: PaymentProvider;
   status: PaymentStatus;
   failureCode: string | null;
   booking: BookingSummary;
+  fulfilment: FulfilmentView;
+  purchase: PurchaseView | null;
   checkedAt: string;
 }
+
+/** POST /api/booking/abandon { t, l?, s? } - the guest came back via Cancel/Back: expire the Stripe session and release the hold. */
+export interface AbandonRequest {
+  t: string;
+  l?: string | null;
+  s?: string | null;
+}
+
+/**
+ * released: session expired and the Cloudbeds hold cancelled (inventory free again).
+ * paid: the session was already paid - nothing was cancelled (show the return page instead).
+ * pending: the payment is still processing - nothing was cancelled.
+ * closed: nothing to do (already released or unknown session).
+ * not_applicable: demo/beam modes.
+ */
+export type AbandonState = "released" | "paid" | "pending" | "closed" | "not_applicable";
+
+export type AbandonResponse = { ok: true; state: AbandonState } | ApiError;
+
+/** POST /api/booking/mock-stripe - stripe-mock mode only (404 otherwise). */
+export type MockStripeAction = "pay" | "pay_delayed_success" | "pay_delayed_failure" | "cancel" | "expire";
+
+export interface MockStripeRequest {
+  sessionId: string;
+  action: MockStripeAction;
+}
+
+export type MockStripeResponse = { ok: true; redirectUrl: string } | ApiError;
 
 export type DemoPayOutcome = "paid" | "declined" | "insufficient_funds";
 
@@ -378,4 +517,6 @@ export interface RoomInventory {
   adultsExtraSatang?: Record<string, number>;
   /** Cloudbeds' maxGuests for the room type; absent = use the site's rooms.ts figure. */
   maxGuests?: number;
+  /** Cloudbeds roomRateID of the row that was priced (sent with the hold so Cloudbeds prices the same rate). */
+  rateId?: string;
 }

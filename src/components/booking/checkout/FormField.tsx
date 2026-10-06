@@ -36,15 +36,17 @@ export interface FieldShellProps {
   /** Extra content on the right of the box (chevrons, counters). */
   trailing?: ReactNode;
   className?: string;
+  /** Extra classes for the outlined box itself (e.g. a width cap, so the whole visible box is the click target). */
+  boxClassName?: string;
   children: ReactNode;
 }
 
-export default function FieldShell({ id, label, required, error, hint, trailing, className = "", children }: FieldShellProps) {
+export default function FieldShell({ id, label, required, error, hint, trailing, className = "", boxClassName = "", children }: FieldShellProps) {
   const invalid = Boolean(error);
   return (
     <div className={className}>
       <div
-        className={`relative flex items-stretch rounded-(--bk-radius-control) border bg-(--bk-surface) transition-[border-color,box-shadow] ${
+        className={`relative flex items-stretch rounded-(--bk-radius-control) border bg-(--bk-surface) transition-[border-color,box-shadow] ${boxClassName} ${
           invalid
             ? // Focus ADDS emphasis on an invalid field: a thicker danger ring plus the focus outline.
               "border-(--bk-danger) shadow-[0_0_0_1px_var(--bk-danger)] focus-within:shadow-[0_0_0_2px_var(--bk-danger)] focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-(--bk-focus)"

@@ -87,7 +87,7 @@ function HelpBar({
     <aside
       ref={barRef}
       aria-label="Payment help"
-      className="fixed inset-x-0 bottom-[var(--bk-cart-bar-h,0px)] z-40 border-t border-(--bk-border) bg-(--bk-surface) px-4 py-3 text-(--bk-text) shadow-(--bk-shadow-bar) lg:bottom-0"
+      className="bk-help-bar fixed inset-x-0 bottom-[var(--bk-cart-bar-h,0px)] z-40 border-t border-(--bk-border) bg-(--bk-surface) px-4 py-3 text-(--bk-text) shadow-(--bk-shadow-bar) lg:bottom-0"
     >
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-3">
         <p className="min-w-0 text-sm">

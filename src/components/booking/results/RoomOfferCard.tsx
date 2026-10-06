@@ -40,6 +40,11 @@ export interface RoomOfferCardProps {
   enquiryHref?: string;
   /** A valid promo from the search: rate rows show the discounted price, as the summary will. */
   promo?: { code: string; pct: number } | null;
+  /**
+   * The payment processing fee (%) every online payment adds: shown under each
+   * price, so the first price a guest sees says it applies (0 = none).
+   */
+  feePct?: number;
 }
 
 export default function RoomOfferCard({
@@ -53,6 +58,7 @@ export default function RoomOfferCard({
   onAdd,
   enquiryHref,
   promo = null,
+  feePct = 0,
 }: RoomOfferCardProps) {
   const maxAdults = Math.max(1, maxAdultsProp ?? offer.maxAdults ?? room.maxGuests);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -176,6 +182,7 @@ export default function RoomOfferCard({
                 maxAdults={maxAdults}
                 disabledReason={addDisabledReason}
                 promo={promo}
+                feePct={feePct}
                 onShowPolicy={() => setPolicyPlan(RATE_PLANS[rate.ratePlanId])}
                 onAdd={(adults) => onAdd(rate.ratePlanId, adults)}
               />
@@ -226,11 +233,12 @@ interface RateRowProps {
   maxAdults: number;
   disabledReason: string | null;
   promo: { code: string; pct: number } | null;
+  feePct: number;
   onShowPolicy: () => void;
   onAdd: (adults: number) => void;
 }
 
-function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason, promo, onShowPolicy, onAdd }: RateRowProps) {
+function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason, promo, feePct, onShowPolicy, onAdd }: RateRowProps) {
   const [picking, setPicking] = useState(false);
   const addRef = useRef<HTMLButtonElement>(null);
   const plan = RATE_PLANS[rate.ratePlanId];
@@ -292,6 +300,7 @@ function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason,
                 incl. {promo.code} −{promo.pct}%
               </p>
             )}
+            {feePct > 0 && <p className="text-xs text-(--bk-text-muted)">+ {feePct}% payment processing fee</p>}
           </div>
           <button
             ref={addRef}

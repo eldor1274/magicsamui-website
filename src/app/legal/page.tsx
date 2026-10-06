@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { site } from "@/data/site";
+import { getPublicBookingConfig } from "@/lib/booking/config";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/legal" },
@@ -11,6 +12,10 @@ export const metadata: Metadata = {
 // Company details live here for verification purposes (banks, payment
 // providers, platform checks) rather than in the visible footer.
 export default function LegalPage() {
+  // Shown once Stripe is the configured provider (BOOKING_PAYMENT_PROVIDER=stripe). Worded so it is true in
+  // every phase: during Stage B and the soft launch the public /booking is still the Cloudbeds engine.
+  // The legal entity above is deliberately unchanged here - see docs/booking-engine.md (owner TODO).
+  const stripe = getPublicBookingConfig().provider === "stripe";
   return (
     <div className="mx-auto max-w-3xl px-5 py-16">
       <p className="text-sm uppercase tracking-[0.3em] text-pool">Legal information</p>
@@ -38,6 +43,15 @@ export default function LegalPage() {
             {site.email} · {site.phones[0].number}
           </dd>
         </div>
+        {stripe && (
+          <div>
+            <dt className="text-sm font-medium text-ink">Online payments</dt>
+            <dd>
+              Online payments on our own direct booking pages may be processed by Stripe. Card details are entered on
+              Stripe&apos;s secure checkout page and never reach our own systems.
+            </dd>
+          </div>
+        )}
       </dl>
     </div>
   );

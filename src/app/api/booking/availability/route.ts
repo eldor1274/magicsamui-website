@@ -14,7 +14,9 @@ import { parseSearch } from "@/lib/booking/validate";
 // Cloudbeds key is shared with /api/rates and the owner's cron, so on top of
 // the per-IP limit every preview call to Cloudbeds draws on a small
 // per-instance budget (cloudbedsProvider.ts), and `fresh=1` is honoured only
-// a few times per IP - otherwise the cached answer is served.
+// a few times per IP - otherwise the cached answer is served. On the production
+// deployment a LOCKED config (nobody can pay) answers 503 without calling
+// Cloudbeds at all.
 const isRateLimited = createRateLimiter(60, 60_000);
 const isFreshLimited = createRateLimiter(3, 10 * 60_000);
 
@@ -33,14 +35,21 @@ export async function GET(request: NextRequest) {
 
   const inventoryConfig = getInventoryConfig();
   const config = getPublicBookingConfig();
-  const promo = resolvePromo(search.promo, inventoryConfig.promoPct, PROMO_CODE);
+  // A locked preview on the production deployment (the default there: no booking env) can't book anything,
+  // so it never spends the Cloudbeds read key shared with /api/rates and the owner's cron.
+  if (config.paymentStatus === "locked" && process.env.VERCEL_ENV === "production") {
+    return apiError(503, "payment_unavailable", "Online booking on this page is paused right now. Please book on our main booking page or message us on WhatsApp.");
+  }
+  // Stripe: promo codes are off (no Cloudbeds rate plan behind them yet), so a
+  // code from an old link (?promo=DIRECT) is ignored instead of shown as an error.
+  const promo = inventoryConfig.provider === "stripe" && inventoryConfig.promoPct === 0 ? null : resolvePromo(search.promo, inventoryConfig.promoPct, PROMO_CODE);
   let result: Awaited<ReturnType<typeof getInventory>>;
   try {
     result = await getInventory(search.checkIn, search.checkOut, inventoryConfig, {
       // Simulated stand-in data is shown only while payments are simulated
       // (demo, or locked so nobody can pay); in any Beam mode a guest must
       // never see - and then pay - made-up prices.
-      allowDemoFallback: config.paymentMode === "demo",
+      allowDemoFallback: config.paymentMode === "demo" || config.paymentMode === "stripe-mock",
       cacheTtlMs: sp.get("fresh") === "1" && !isFreshLimited(ip) ? 0 : SEARCH_CACHE_TTL_MS,
       onFallback: (e) => logEvent("cloudbeds_fallback", { error: e instanceof Error ? e.message : String(e) }),
     });
@@ -58,7 +67,7 @@ export async function GET(request: NextRequest) {
     dataSource,
     config,
     promo,
-    offers: buildOffers(inventory, search.adults),
+    offers: buildOffers(inventory, search.adults, inventoryConfig.ratePlans),
     generatedAt: new Date().toISOString(),
   };
   return json(body);

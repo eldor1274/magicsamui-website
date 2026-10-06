@@ -1,4 +1,22 @@
 /*
+ * Tailwind utilities for the booking engine. globals.css leaves this folder and
+ * the /booking-preview pages out of the site-wide sheet (@source not), so the
+ * rest of the site does not download the booking engine's classes. This sheet,
+ * which only loads with the booking engine, therefore generates the utilities
+ * for ALL of src/ (a superset of the site-wide sheet): it loads after
+ * globals.css, so on booking pages every utility resolves in one complete,
+ * correctly ordered set - exactly as when everything was in one sheet (a
+ * partial set would let e.g. its `hidden` override the header's `lg:flex`).
+ * Same layer order and theme tokens as globals.css; preflight (base) and the
+ * site's own rules come from globals.css.
+ */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "../../app/tailwind-theme.css";
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "../../";
+
+/*
  * Booking preview theme tokens. Scoped to .booking-app so nothing leaks into
  * the rest of the site. Components must use these variables (e.g. Tailwind
  * `bg-(--bk-accent)`, `text-(--bk-text-muted)`, `border-(--bk-border)`,
@@ -210,6 +228,20 @@ html:has(.booking-app) {
   }
 }
 
+/*
+ * Phones, review-and-pay step: the full-width Pay button and the review's Edit
+ * buttons run to the right edge, where the floating button would cover them
+ * (a tap meant for Pay could open WhatsApp; WCAG 2.4.11). The step offers
+ * WhatsApp itself (help strip, error panels). Guest step: hidden once the help
+ * strip (which carries its own WhatsApp link) is showing.
+ */
+@media (max-width: 767.98px) {
+  html[data-bk-step="payment"] .bk-wa-fab,
+  html[data-bk-step="guest"]:has(.bk-help-bar) .bk-wa-fab {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html:has(.booking-app) {
     scroll-behavior: auto !important;
@@ -224,5 +256,18 @@ html:has(.booking-app) {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/*
+ * Printing the return page ("Print or save this confirmation"): only the
+ * booking card - no site header, footer, floating WhatsApp button or help strip.
+ */
+@media print {
+  html:has(.booking-return) body > header,
+  html:has(.booking-return) body > footer,
+  html:has(.booking-return) .bk-wa-fab,
+  html:has(.booking-return) .bk-help-bar {
+    display: none !important;
   }
 }

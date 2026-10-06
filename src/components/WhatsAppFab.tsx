@@ -10,21 +10,26 @@ const HREF = `${site.whatsapp}?text=${encodeURIComponent(
   "Hi! I have a question about Magic Suites & Villas"
 )}`;
 
-export default function WhatsAppFab() {
+// ownEngine (BOOKING_ENGINE=own, from the layout): /booking serves our own
+// booking engine, which publishes its bottom-bar height like the preview.
+// previewTracked: the booking preview takes real payments (stripe-live on
+// production), so its clicks are measured like everywhere else.
+export default function WhatsAppFab({ ownEngine = false, previewTracked = false }: { ownEngine?: boolean; previewTracked?: boolean }) {
   const pathname = usePathname();
-  // The simulated Beam checkout stands alone like a real hosted payment page.
-  if (pathname === "/booking-preview/beam-demo") return null;
+  // The simulated Beam checkout (and the MOCK Stripe page) stand alone like a real hosted payment page.
+  if (pathname === "/booking-preview/beam-demo" || pathname === "/booking-preview/stripe-mock") return null;
   // On /booking the help strip can pin itself to the bottom edge; sit above it.
   // The /booking-preview pages also have sticky bottom bars (cart, help strip).
   // The preview pages publish the height of whichever bottom bars are actually
   // showing as --bk-fab-lift (booking/bottomBars.ts), so the button only lifts
   // when something is underneath it and never covers the search controls.
-  const offset =
-    pathname === "/booking"
+  const ownEnginePage =
+    pathname?.startsWith("/booking-preview") || pathname?.startsWith("/booking/return") || (ownEngine && pathname === "/booking");
+  const offset = ownEnginePage
+    ? "bottom-[calc(1.25rem+var(--bk-fab-lift,0px))]"
+    : pathname === "/booking" || pathname === "/booking/classic"
       ? "bottom-24"
-      : pathname?.startsWith("/booking-preview")
-        ? "bottom-[calc(1.25rem+var(--bk-fab-lift,0px))]"
-        : "bottom-5";
+      : "bottom-5";
 
   return (
     <a
@@ -33,8 +38,8 @@ export default function WhatsAppFab() {
       rel="noopener noreferrer"
       aria-label="Chat with us on WhatsApp"
       onClick={() => {
-        // The booking preview must not send anything to GA4 / Google Ads.
-        if (!pathname?.startsWith("/booking-preview")) track("whatsapp_fab_click");
+        // A non-live booking preview must not send anything to GA4 / Google Ads.
+        if (previewTracked || !pathname?.startsWith("/booking-preview")) track("whatsapp_fab_click");
       }}
       // bk-wa-fab: hook for booking.css (hidden on the preview's phone search step).
       className={`bk-wa-fab fixed right-5 ${offset} z-40 flex h-14 w-14 items-center justify-center rounded-full bg-[#25D366] text-white shadow-lg transition-transform hover:scale-105`}

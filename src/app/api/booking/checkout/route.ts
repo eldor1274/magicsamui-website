@@ -10,16 +10,23 @@ import {
   logEvent,
   readJsonBody,
 } from "@/lib/booking/routeUtils";
+import { getStripeDeps } from "@/lib/booking/runtime";
+import { TEST_ACCESS_COOKIE, readCookie } from "@/lib/booking/testAccess";
 import { resolveOrigin } from "@/lib/booking/urls";
 
-// Booking preview checkout: re-quotes on the server, signs a booking token
-// and creates the Beam payment link (or the simulated demo link). The client
-// never sends prices. No reservation is created in this preview.
+// Booking checkout: re-quotes on the server (the client never sends prices),
+// then demo -> simulated payment page; beam -> Beam payment link (preview, no
+// reservation); stripe -> HOLD FIRST in Cloudbeds, assert the price, then a
+// Stripe Checkout Session (see lib/booking/stripeCheckout.ts).
+export const runtime = "nodejs";
 export const maxDuration = 30;
+/** The checkout chain answers by this long after the request arrived (maxDuration minus a margin). */
+const CHECKOUT_BUDGET_MS = 25_000;
 
 const isRateLimited = createRateLimiter(10, 10 * 60_000);
 
 export async function POST(request: Request) {
+  const deadlineMs = Date.now() + CHECKOUT_BUDGET_MS;
   let config: BookingConfig;
   try {
     config = getBookingConfig();
@@ -37,6 +44,10 @@ export async function POST(request: Request) {
       config,
       origin: resolveOrigin(request.headers.get("host"), process.env),
       log: logEvent,
+      stripe: getStripeDeps(config) ?? undefined,
+      clientIp: clientIp(request) === "unknown" ? null : clientIp(request),
+      testAccessToken: readCookie(request.headers.get("cookie"), TEST_ACCESS_COOKIE),
+      deadlineMs,
     });
     return json(result.body, result.status);
   } catch (e) {

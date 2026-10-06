@@ -1,13 +1,16 @@
 "use client";
 
 // OWNER: ui-checkout
-// Slim banner above the booking app saying plainly what this preview is:
-// payment mode (demo / Beam playground / live / locked), where availability
-// comes from, and links to switch between the two themes.
-// Keep PreviewBannerProps stable.
+// Slim banner above the booking app saying plainly what this page is running
+// on: the payment provider (Stripe / Beam / simulated), the mode (demo / MOCK /
+// test / live / locked), where availability comes from and whether a real
+// Cloudbeds reservation is written - plus links to switch between the two
+// themes. Not shown to guests on a fully live Stripe page (nothing to warn
+// about there). Keep PreviewBannerProps stable (new props are optional).
 
-import { Database, FlaskConical, Lock, Palette, TriangleAlert } from "lucide-react";
-import type { DataSource, PaymentMode, ThemeName } from "@/lib/booking/types";
+import { CreditCard, Database, FlaskConical, Lock, MessageCircle, Palette, TriangleAlert } from "lucide-react";
+import { modeKind, previewHeadline } from "@/lib/booking/paymentCopy";
+import type { DataSource, PaymentMode, PaymentProvider, ThemeName } from "@/lib/booking/types";
 
 export interface PreviewBannerProps {
   paymentMode: PaymentMode;
@@ -17,35 +20,53 @@ export interface PreviewBannerProps {
   theme: ThemeName;
   /** Same page URL with ?theme= set, for each theme. */
   themeHref: Record<ThemeName, string>;
+  /** Configured provider (shown even when payments are locked). Defaults from paymentMode. */
+  provider?: PaymentProvider;
+  /** Whether a real Cloudbeds reservation is written ("live"), simulated ("mock") or not at all ("none"). */
+  cloudbedsWrites?: "live" | "mock" | "none";
+  /** WhatsApp fallback shown with the locked message. */
+  whatsappUrl?: string;
 }
 
 const THEME_LABELS: Record<ThemeName, string> = { magic: "Magic", classic: "Classic" };
 
-function headline(paymentMode: PaymentMode, dataSource: DataSource | null): string {
-  const live = dataSource === "cloudbeds";
-  switch (paymentMode) {
-    case "demo":
-      return live
-        ? "demo mode: live Cloudbeds availability, simulated payment - no real payment is taken."
-        : "demo mode: availability and prices are simulated, no real payment is taken.";
-    case "beam-playground":
-      return live
-        ? "Beam test mode: live Cloudbeds availability, payments go to Beam's playground - use Beam test cards only, no real money moves."
-        : "Beam test mode: simulated availability, payments go to Beam's playground - use Beam test cards only, no real money moves.";
-    case "beam-live":
-      return "LIVE payments: real cards are charged through Beam.";
-  }
-}
+const PROVIDER_LABEL: Record<PaymentProvider, string> = { stripe: "Stripe", beam: "Beam", demo: "Simulated payments" };
+
+const MODE_LABEL = { demo: "Demo", mock: "MOCK", test: "Test mode", live: "LIVE" } as const;
 
 const DATA_SOURCE: Record<DataSource, { label: string; tone: "ok" | "info" | "warn" }> = {
-  cloudbeds: { label: "Live Cloudbeds availability (read-only)", tone: "ok" },
+  cloudbeds: { label: "Live Cloudbeds availability", tone: "ok" },
   demo: { label: "Simulated availability", tone: "info" },
   "demo-fallback": { label: "Cloudbeds unavailable - showing simulated availability", tone: "warn" },
 };
 
-export default function PreviewBanner({ paymentMode, paymentStatus, dataSource, theme, themeHref }: PreviewBannerProps) {
+const WRITES_LABEL: Record<"live" | "mock" | "none", string> = {
+  live: "Real Cloudbeds reservations",
+  mock: "Reservation simulated",
+  none: "No reservation is made",
+};
+
+const CHIP = "inline-flex items-center gap-1.5 rounded-(--bk-radius-pill) px-2.5 py-1 font-medium";
+
+export default function PreviewBanner({
+  paymentMode,
+  paymentStatus,
+  dataSource,
+  theme,
+  themeHref,
+  provider,
+  cloudbedsWrites,
+  whatsappUrl,
+}: PreviewBannerProps) {
+  const locked = paymentStatus === "locked";
+  // A fully live Stripe page is the real booking page: no preview banner for guests.
+  if (!locked && paymentMode === "stripe-live") return null;
+
   const source = dataSource ? DATA_SOURCE[dataSource] : null;
-  const isLive = paymentMode === "beam-live";
+  const kind = modeKind(paymentMode);
+  const isLive = !locked && kind === "live";
+  const shownProvider: PaymentProvider = provider ?? (paymentMode.startsWith("stripe") ? "stripe" : paymentMode.startsWith("beam") ? "beam" : "demo");
+  const writes = locked ? "none" : (cloudbedsWrites ?? "none");
 
   return (
     <section
@@ -64,10 +85,10 @@ export default function PreviewBanner({ paymentMode, paymentStatus, dataSource, 
             <FlaskConical size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-warning)" />
           )}
           <span>
-            <strong className="font-semibold">Preview of your own booking engine with Beam payments</strong> -{" "}
-            {paymentStatus === "locked"
-              ? "payments are locked, so you can browse rooms but paying is disabled."
-              : headline(paymentMode, dataSource)}
+            <strong className="font-semibold">Preview of your own booking engine</strong> -{" "}
+            {locked
+              ? "payments are locked, so you can browse rooms but paying is disabled and nothing can be charged."
+              : previewHeadline({ paymentMode, dataSource, cloudbedsWrites: writes })}
           </span>
         </p>
 
@@ -99,31 +120,51 @@ export default function PreviewBanner({ paymentMode, paymentStatus, dataSource, 
         </nav>
       </div>
 
-      {(source || paymentStatus === "locked") && (
-        <div className="mt-2 flex flex-wrap gap-2 text-xs">
-          {source && (
-            <span
-              className={`inline-flex items-center gap-1.5 rounded-(--bk-radius-pill) px-2.5 py-1 font-medium ${
-                source.tone === "warn"
-                  ? "bg-(--bk-warning-soft) text-(--bk-warning)"
-                  : source.tone === "ok"
-                    ? "bg-(--bk-success-soft) text-(--bk-success)"
-                    : "bg-(--bk-surface) text-(--bk-text-muted)"
-              }`}
+      <ul aria-label="Preview settings" className="mt-2 flex flex-wrap gap-2 text-xs">
+        <li className={`${CHIP} bg-(--bk-surface) text-(--bk-text)`}>
+          <CreditCard size={12} aria-hidden="true" />
+          {PROVIDER_LABEL[shownProvider]} · {locked ? "Locked" : MODE_LABEL[kind]}
+        </li>
+        {source && (
+          <li
+            className={`${CHIP} ${
+              source.tone === "warn"
+                ? "bg-(--bk-warning-soft) text-(--bk-warning)"
+                : source.tone === "ok"
+                  ? "bg-(--bk-success-soft) text-(--bk-success)"
+                  : "bg-(--bk-surface) text-(--bk-text-muted)"
+            }`}
+          >
+            <Database size={12} aria-hidden="true" />
+            {source.label}
+          </li>
+        )}
+        {shownProvider === "stripe" && !locked && (
+          <li className={`${CHIP} ${writes === "live" ? "bg-(--bk-warning-soft) text-(--bk-warning)" : "bg-(--bk-surface) text-(--bk-text-muted)"}`}>
+            <Database size={12} aria-hidden="true" />
+            {WRITES_LABEL[writes]}
+          </li>
+        )}
+        {locked && (
+          <li className={`${CHIP} bg-(--bk-danger-soft) text-(--bk-danger)`}>
+            <Lock size={12} aria-hidden="true" />
+            Payments locked: a payment setting is missing or not allowed here - see docs/booking-engine.md.
+          </li>
+        )}
+        {locked && whatsappUrl && (
+          <li>
+            <a
+              href={whatsappUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={`${CHIP} bg-(--bk-surface) text-(--bk-text) underline-offset-2 hover:underline`}
             >
-              <Database size={12} aria-hidden="true" />
-              {source.label}
-            </span>
-          )}
-          {paymentStatus === "locked" && (
-            <span className="inline-flex items-center gap-1.5 rounded-(--bk-radius-pill) bg-(--bk-danger-soft) px-2.5 py-1 font-medium text-(--bk-danger)">
-              <Lock size={12} aria-hidden="true" />
-              Payments locked: a payment setting (Beam keys or BOOKING_TOKEN_SECRET) is missing or not allowed here - see
-              docs/booking-beam-preview.md.
-            </span>
-          )}
-        </div>
-      )}
+              <MessageCircle size={12} aria-hidden="true" />
+              Book on WhatsApp
+            </a>
+          </li>
+        )}
+      </ul>
     </section>
   );
 }

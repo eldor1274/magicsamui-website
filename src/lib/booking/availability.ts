@@ -5,9 +5,10 @@
 import { CATALOGUE } from "./catalogue.ts";
 import { cloudbedsInventory } from "./cloudbedsProvider.ts";
 import { demoInventory } from "./demoProvider.ts";
+import { logEvent } from "./routeUtils.ts";
 import { buildRateOffers, occupancyExtraSatang } from "./quote.ts";
 import type { BookingConfig } from "./config.ts";
-import type { CartItemInput, DataSource, IsoDate, RoomInventory, RoomOffer } from "./types.ts";
+import type { CartItemInput, DataSource, IsoDate, RatePlanId, RoomInventory, RoomOffer } from "./types.ts";
 
 /** Search answers from Cloudbeds are reused this long (per server instance). */
 export const SEARCH_CACHE_TTL_MS = 60_000;
@@ -65,6 +66,9 @@ export async function getInventory(
         fetchImpl: options.fetchImpl,
         cacheTtlMs: options.cacheTtlMs,
         budgetWaitMs: options.budgetWaitMs,
+        baseRateOnly: config.cloudbeds.baseRateOnly === true,
+        // Stripe sells the base (BAR) row only: a room type offered only on another plan is shown as unavailable.
+        onNoBaseRate: (slug) => logEvent("cloudbeds_no_base_rate", { slug, checkIn, checkOut }),
       });
       return { inventory, dataSource: "cloudbeds" };
     } catch (error) {
@@ -157,7 +161,7 @@ export async function getCartInventory(
  * One offer per catalogue room (in catalogue order), including the
  * non-bookable tuxedo-3br as "not-bookable" so the UI can show an enquiry card.
  */
-export function buildOffers(inventory: RoomInventory[], adults: number): RoomOffer[] {
+export function buildOffers(inventory: RoomInventory[], adults: number, ratePlans: RatePlanId[] = ["standard", "breakfast"]): RoomOffer[] {
   return CATALOGUE.map((room) => {
     if (!room.bookable) {
       const fitsParty = adults <= room.maxGuests;
@@ -178,7 +182,7 @@ export function buildOffers(inventory: RoomInventory[], adults: number): RoomOff
       remaining: inv.remaining,
       fitsParty,
       maxAdults,
-      rates: buildRateOffers(inv.baseNightly, pricedFor, inv.adultsExtraSatang ?? {}),
+      rates: buildRateOffers(inv.baseNightly, pricedFor, inv.adultsExtraSatang ?? {}, ratePlans),
     };
   });
 }

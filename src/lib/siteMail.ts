@@ -27,6 +27,13 @@ export interface SiteMail {
   fromName?: string;
   /** Used by the SMTP fallback only. */
   replyTo?: string;
+  /**
+   * Per-route time limit (ms) for the relay and for each SMTP stage. Callers
+   * inside a short serverless function (booking alerts: maxDuration 30 s) pass
+   * a small value so the SMTP fallback still runs before the platform kills
+   * the function. Default: 35 s relay, nodemailer's own SMTP timeouts.
+   */
+  timeoutMs?: number;
 }
 
 async function postToDroplet(pathname: string, body: unknown, timeoutMs: number): Promise<boolean> {
@@ -52,7 +59,8 @@ async function viaSmtp(mail: SiteMail): Promise<boolean> {
   const pass = process.env.CONTACT_GMAIL_APP_PASSWORD;
   if (!user || !pass) return false;
   try {
-    const transporter = nodemailer.createTransport({ service: "gmail", auth: { user, pass } });
+    const limits = mail.timeoutMs ? { connectionTimeout: mail.timeoutMs, greetingTimeout: mail.timeoutMs, socketTimeout: mail.timeoutMs } : {};
+    const transporter = nodemailer.createTransport({ service: "gmail", auth: { user, pass }, ...limits });
     await transporter.sendMail({
       from: `"${mail.fromName ?? "Magic Suites Website"}" <${user}>`,
       to: mail.to,
@@ -71,7 +79,7 @@ export async function sendSiteMail(mail: SiteMail): Promise<boolean> {
   const relayed = await postToDroplet(
     "/site/mail",
     { to: mail.to, subject: mail.subject, body: mail.text, fromName: mail.fromName ?? "Magic Suites Website" },
-    35000
+    mail.timeoutMs ?? 35000
   );
   if (relayed) return true;
   return viaSmtp(mail);

@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
 import LocalizedLanding from "@/components/LocalizedLanding";
-import { landings, LANG_ALTERNATES } from "@/data/landings";
+import { descriptionForEngine, landings, LANG_ALTERNATES } from "@/data/landings";
+import { resolveBookingEngine } from "@/lib/booking/config";
 
 const t = landings.th;
 
 export const metadata: Metadata = {
   title: t.title,
-  description: t.description,
+  description: descriptionForEngine(t, resolveBookingEngine() === "own"),
   alternates: { canonical: "/th", languages: LANG_ALTERNATES },
 };
 

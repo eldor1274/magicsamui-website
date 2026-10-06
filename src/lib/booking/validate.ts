@@ -6,6 +6,8 @@
 import { ADDONS, RATE_PLANS, getCatalogueRoom, hasUnitConflict, isAddonId, isRatePlanId } from "./catalogue.ts";
 import { STAY_DATE_ERROR_MESSAGES, validateStayDates } from "./dates.ts";
 import { addonEligibleNights } from "./quote.ts";
+import { GUEST_LIMITS, normalizeName, normalizePostcode, validateGuest } from "./guest.ts";
+import type { GuestDetails } from "./guest.ts";
 import type { AddonId, CartItemInput, CheckoutRequest, IsoDate, RoomOffer, StaySearch, ThemeName } from "./types.ts";
 
 export interface ValidationLimits {
@@ -178,4 +180,32 @@ export function unavailableCartSlugs(items: CartItemInput[], offers: RoomOffer[]
     if (!offer || !offer.available || !hasRate) out.push(item.slug);
   }
   return out;
+}
+
+/**
+ * Server-side guest validation (stripe modes). Only known fields are kept,
+ * strings are trimmed, and the same rules as the browser apply. Issue strings
+ * never echo what the guest typed (they end up in logs as counts only).
+ */
+export function parseGuestInput(raw: unknown): Parsed<GuestDetails> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: false, issues: ["Please fill in your details."] };
+  const r = raw as Record<string, unknown>;
+  const s = (k: string, max: number) => (typeof r[k] === "string" ? (r[k] as string).trim().slice(0, max) : "");
+  const guest: GuestDetails = {
+    // Normalised (NFKC, any space -> " ") before checking and before it goes to Cloudbeds.
+    firstName: normalizeName(s("firstName", GUEST_LIMITS.name * 2)).slice(0, GUEST_LIMITS.name + 1),
+    lastName: normalizeName(s("lastName", GUEST_LIMITS.name * 2)).slice(0, GUEST_LIMITS.name + 1),
+    country: s("country", 2).toUpperCase(),
+    email: s("email", GUEST_LIMITS.email + 1),
+    dialCode: s("dialCode", 5),
+    phone: s("phone", 30),
+    // Normalised (NFKC: full-width digits become plain ones) before checking and before it goes to Cloudbeds.
+    postcode: normalizePostcode(s("postcode", GUEST_LIMITS.postcode * 2)).slice(0, GUEST_LIMITS.postcode + 1),
+    arrivalTime: s("arrivalTime", 8),
+    specialRequests: typeof r.specialRequests === "string" ? r.specialRequests.slice(0, GUEST_LIMITS.specialRequests + 1) : "",
+    agreedToPolicy: r.agreedToPolicy === true,
+  };
+  const errors = validateGuest(guest);
+  const issues = Object.values(errors).filter((m): m is string => typeof m === "string");
+  return issues.length > 0 ? { ok: false, issues } : { ok: true, value: guest };
 }

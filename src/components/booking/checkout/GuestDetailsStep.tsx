@@ -6,7 +6,11 @@
 // errors (aria-invalid + aria-describedby) appear after the first submit and
 // focus moves to the first invalid field. The <form id={formId}> is also
 // submitted by the summary CTA / mobile bar (form="guest-form").
-// Guest details are personal data: they stay in the browser in this preview.
+// Guest details are personal data. Demo/Beam modes keep them in the browser;
+// Stripe modes (config.requiresGuestDetails) send them in the checkout request
+// body only - to Cloudbeds for the reservation and to Stripe for the receipt -
+// never in a URL, token, log or analytics payload. Stripe modes also ask for
+// an optional postcode (Cloudbeds guestZip; the server re-validates it).
 // Keep GuestDetailsStepProps stable.
 
 import { useContext } from "react";
@@ -36,7 +40,18 @@ export interface GuestDetailsStepProps {
 }
 
 /** Order used to find the first invalid field to focus. */
-const FOCUS_ORDER: GuestField[] = ["firstName", "lastName", "country", "email", "dialCode", "phone", "specialRequests", "agreedToPolicy"];
+const FOCUS_ORDER: GuestField[] = [
+  "firstName",
+  "lastName",
+  "country",
+  "postcode",
+  "email",
+  "dialCode",
+  "phone",
+  "arrivalTime",
+  "specialRequests",
+  "agreedToPolicy",
+];
 
 export default function GuestDetailsStep({ formId, guest, errors, showErrors, onChange, onSubmit }: GuestDetailsStepProps) {
   const ids: Record<GuestField, string> = {
@@ -46,13 +61,26 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
     email: `${formId}-email`,
     dialCode: `${formId}-phone-dial`,
     phone: `${formId}-phone`,
+    postcode: `${formId}-postcode`,
     arrivalTime: `${formId}-arrivalTime`,
     specialRequests: `${formId}-specialRequests`,
     agreedToPolicy: `${formId}-agreedToPolicy`,
   };
+  const bookingConfig = useContext(BookingContext)?.config;
   // Only a live booking sends a confirmation; the preview modes say what would happen.
-  const live = useContext(BookingContext)?.config.paymentMode === "beam-live";
-  const confirmationHint = live ? "Your booking confirmation is sent here." : "In live mode your booking confirmation is sent here.";
+  const live = bookingConfig?.live === true;
+  const stripe = bookingConfig?.provider === "stripe";
+  const collectPostcode = bookingConfig?.collectPostcode === true;
+  const sendsDetails = bookingConfig?.requiresGuestDetails === true;
+  // Stripe: Cloudbeds only emails a confirmation when CLOUDBEDS_SEND_STATUS_EMAIL is on; otherwise the receipt is the only email.
+  const stripeEmails = bookingConfig?.sendsBookingConfirmationEmail ? "payment receipt and booking confirmation are" : "payment receipt is";
+  const confirmationHint = stripe
+    ? live
+      ? `Your ${stripeEmails} sent here.`
+      : `In live mode your ${stripeEmails} sent here.`
+    : live
+      ? "Your booking confirmation is sent here."
+      : "In live mode your booking confirmation is sent here.";
   const err = (field: GuestField): string | null => (showErrors ? (errors[field] ?? null) : null);
   // Code + number share one field and one message.
   const errorCount = showErrors ? Object.keys(errors).filter((k) => !(k === "dialCode" && errors.phone)).length : 0;
@@ -169,6 +197,31 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
           />
         </FieldShell>
 
+        {collectPostcode && (
+          <FieldShell
+            id={ids.postcode}
+            label="Postcode / ZIP"
+            boxClassName="sm:max-w-56"
+            error={err("postcode")}
+            hint="Optional - leave it empty if your country doesn't use postcodes."
+          >
+            <input
+              id={ids.postcode}
+              name="postcode"
+              type="text"
+              autoComplete="postal-code"
+              autoCapitalize="characters"
+              spellCheck={false}
+              maxLength={GUEST_LIMITS.postcode}
+              value={guest.postcode ?? ""}
+              onChange={(e) => onChange({ postcode: e.target.value })}
+              aria-invalid={Boolean(err("postcode")) || undefined}
+              aria-describedby={describedBy(ids.postcode, { error: Boolean(err("postcode")), hint: !err("postcode") })}
+              className={FIELD_CONTROL_CLASS}
+            />
+          </FieldShell>
+        )}
+
         <FieldShell id={ids.email} label="Email" required error={err("email")} hint={confirmationHint}>
           <input
             id={ids.email}
@@ -219,6 +272,7 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
         <FieldShell
           id={ids.arrivalTime}
           label="Estimated arrival time"
+          error={err("arrivalTime")}
           hint={`${HOUSE_POLICIES.checkIn}. Arriving late is fine - just let us know.`}
         >
           <select
@@ -226,7 +280,8 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
             name="arrivalTime"
             value={guest.arrivalTime}
             onChange={(e) => onChange({ arrivalTime: e.target.value })}
-            aria-describedby={describedBy(ids.arrivalTime, { hint: true })}
+            aria-invalid={Boolean(err("arrivalTime")) || undefined}
+            aria-describedby={describedBy(ids.arrivalTime, { error: Boolean(err("arrivalTime")), hint: !err("arrivalTime") })}
             className={`${FIELD_CONTROL_CLASS} cursor-pointer appearance-auto`}
           >
             <option value="">I don&apos;t know yet</option>
@@ -333,7 +388,9 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
         </button>
         <p className="flex items-start justify-center gap-1.5 text-center text-xs text-(--bk-text-subtle)">
           <Lock size={12} aria-hidden="true" className="mt-0.5 shrink-0" />
-          Preview: your details stay in this browser and are not sent anywhere. Nothing is booked until you pay.
+          {sendsDetails
+            ? "When you press Pay, your details go securely to our reservation system to hold your room, and your email to Stripe for your receipt. Nothing is charged until you pay."
+            : "Preview: your details stay in this browser and are not sent anywhere. Nothing is booked until you pay."}
         </p>
       </div>
     </form>

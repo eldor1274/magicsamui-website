@@ -9,23 +9,25 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
-import { fetchAvailability, postCheckout, rememberLinkToken } from "@/lib/booking/apiClient";
+import { fetchAvailability, isAllowedPaymentRedirect, postAbandon, postCheckout, recallLinkToken, rememberLinkToken } from "@/lib/booking/apiClient";
 import { getCatalogueRoom } from "@/lib/booking/catalogue";
 import { createBookingAnalytics } from "@/lib/booking/clientAnalytics";
 import { formatThbWithCode } from "@/lib/booking/format";
-import { isGuestValid, validateGuest } from "@/lib/booking/guest";
+import { isGuestValid, normalizePostcode, validateGuest } from "@/lib/booking/guest";
+import { providerCopy } from "@/lib/booking/paymentCopy";
 import { computeQuote } from "@/lib/booking/quote";
-import type { AddonId, AvailabilityResponse, CartItem, IsoDate, PublicBookingConfig, ThemeName } from "@/lib/booking/types";
-import { allowListedSearch } from "@/lib/booking/urls";
+import type { AbandonResponse, AddonId, AvailabilityResponse, CartItem, IsoDate, PublicBookingConfig, ThemeName } from "@/lib/booking/types";
+import { allowListedSearch, returnPagePath } from "@/lib/booking/urls";
 import type { ResumeReason } from "@/lib/booking/urls";
 import BookingHelp from "./BookingHelp";
 import BookingThemeRoot from "./BookingThemeRoot";
+import { attemptMayStillBePaid, clearAttempt, readAttempt, rememberAttempt } from "./attempt";
 import NoticeBar from "./NoticeBar";
 import PreviewBanner from "./PreviewBanner";
 import StepHeader from "./StepHeader";
 import AddonsStep from "./checkout/AddonsStep";
 import GuestDetailsStep from "./checkout/GuestDetailsStep";
-import PaymentStep from "./checkout/PaymentStep";
+import PaymentStep, { isPaymentPaused } from "./checkout/PaymentStep";
 import SecurePaymentModal from "./checkout/SecurePaymentModal";
 import ResultsList, { AvailabilityErrorCard } from "./results/ResultsList";
 import SearchBar from "./search/SearchBar";
@@ -71,22 +73,24 @@ export interface BookingAppProps {
   /** Last selectable date (today + booking window). */
   maxDate: IsoDate;
   themeHref: Record<ThemeName, string>;
+  /**
+   * The Cloudbeds engine's fallback page (/booking/classic) when this page IS
+   * the live /booking (BOOKING_ENGINE=own); null on the preview.
+   */
+  classicHref?: string | null;
+  /**
+   * Stripe's back link (cancel_url) landed here with this attempt's ref and
+   * signed token (?resume=payment&reason=cancelled&ref&t): its Checkout
+   * Session is expired and its room hold released at once (POST
+   * /api/booking/abandon), and Pay waits for that. Read on the server, so an
+   * App Router replay of a cleaned-up URL still has it. null otherwise.
+   */
+  cancelledAttempt?: { ref: string; t: string } | null;
 }
 
 
 const STEP_HEADING_ID = "booking-step-heading";
 const SEARCH_HEADING_ID = "booking-search-title";
-
-/** Only follow redirects to our own origin or Beam's hosted pages. */
-function isSafeRedirect(url: string): boolean {
-  try {
-    const u = new URL(url, window.location.href);
-    if (u.origin === window.location.origin) return true;
-    return u.protocol === "https:" && (u.host === "pay.beamcheckout.com" || u.host === "playground-pay.beamcheckout.com");
-  } catch {
-    return false;
-  }
-}
 
 /** Scroll behaviour that respects the visitor's reduced-motion setting (CSS can't reach JS scrolling). */
 function scrollBehavior(): ScrollBehavior {
@@ -168,9 +172,13 @@ export default function BookingApp({
   today,
   maxDate,
   themeHref,
+  classicHref = null,
+  cancelledAttempt = null,
 }: BookingAppProps) {
   const [state, dispatch] = useReducer(bookingReducer, undefined, initialBookingState);
   const [secureInfoOpen, setSecureInfoOpen] = useState(false);
+  /** Stripe: an earlier checkout attempt is being expired (its room hold released) before Pay is allowed again. */
+  const [releasing, setReleasing] = useState(cancelledAttempt !== null);
   const stateRef = useRef(state);
   const abortRef = useRef<AbortController | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -192,6 +200,9 @@ export default function BookingApp({
   const configRef = useRef(config);
   const analytics = useMemo(() => createBookingAnalytics(config.paymentMode), [config.paymentMode]);
   const quote = useMemo(() => selectQuote(state), [state]);
+  // Stripe sells the Standard Rate only (Cloudbeds prices the reservation itself): no add-ons step.
+  const addonsEnabled = config.addonsEnabled;
+  const steps = useMemo(() => (addonsEnabled ? STEP_ORDER : STEP_ORDER.filter((s) => s !== "addons")), [addonsEnabled]);
 
   useEffect(() => {
     stateRef.current = state;
@@ -208,10 +219,54 @@ export default function BookingApp({
     }, 50);
   }, []);
 
+  /**
+   * Stripe: expire an earlier checkout attempt's session and release its room
+   * hold (POST /api/booking/abandon). A paid or still-processing attempt is
+   * never cancelled: the guest goes to its return page instead ("left").
+   * "error": the earlier session could not be checked - it is kept, so the
+   * next Pay asks again (Stripe's 30-minute expiry and the sweeper still
+   * release that hold). The caller sets `releasing` first (Pay waits).
+   */
+  const finishRelease = useCallback(
+    (attempt: { ref: string; t: string }, res: AbandonResponse): "continue" | "left" | "error" => {
+      if (res.ok && (res.state === "paid" || res.state === "pending")) {
+        window.location.assign(returnPagePath(configRef.current.bookingPath, attempt.ref, attempt.t, theme));
+        return "left";
+      }
+      setReleasing(false);
+      if (!res.ok) return "error";
+      // Released, already closed or not a Stripe booking: forget it.
+      clearAttempt(attempt.ref);
+      return "continue";
+    },
+    [theme],
+  );
+  const releaseAttempt = useCallback(
+    async (attempt: { ref: string; t: string; l: string | null }): Promise<"continue" | "left" | "error"> =>
+      finishRelease(attempt, await postAbandon({ t: attempt.t, l: attempt.l })),
+    [finishRelease],
+  );
+
   /* ------------------------- hydrate + persist ------------------------- */
 
   useEffect(() => {
-    dispatch({ type: "hydrate", persisted: readPersistedBooking(), initialSearch, resume, resumeReason, landingKey, today });
+    // Stripe's back link (cancel_url) landed here: expire that session and release its hold right away
+    // (`releasing` started true for it, so Pay waits for the answer).
+    if (cancelledAttempt) {
+      void postAbandon({ t: cancelledAttempt.t, l: recallLinkToken(cancelledAttempt.ref) }).then((res) => finishRelease(cancelledAttempt, res));
+    }
+    dispatch({
+      type: "hydrate",
+      persisted: readPersistedBooking(),
+      initialSearch,
+      resume,
+      resumeReason,
+      // Stripe: a cancelled attempt's hold is released (by this landing, or by the abandon the return page ran),
+      // so the notice must never say the room is still held - with or without a token in the link.
+      holdReleased: cancelledAttempt !== null || configRef.current.provider === "stripe",
+      landingKey,
+      today,
+    });
     // The prefill (?checkin ?checkout ?adults ?promo) and the Beam cancel
     // params are one-shot: once applied they leave the address bar, so a
     // reload or a theme switch restores the guest's own (saved) choices
@@ -259,7 +314,8 @@ export default function BookingApp({
     const controller = new AbortController();
     abortRef.current = controller;
     dispatch({ type: "searchStarted", key });
-    const promo = draft.promo.trim();
+    // Promos off (Beam/Stripe): never send a code left over in the saved search; the code pill is hidden.
+    const promo = config.promoEnabled ? draft.promo.trim() : "";
     fetchAvailability(
       { checkIn: draft.checkIn, checkOut: draft.checkOut, adults: draft.adults, promo: promo || undefined },
       controller.signal,
@@ -275,7 +331,7 @@ export default function BookingApp({
         if (e instanceof DOMException && e.name === "AbortError") return;
         dispatch({ type: "searchFailed", key, message: "Something went wrong. Please try again." });
       });
-  }, [announce]);
+  }, [announce, config.promoEnabled]);
 
   // After hydration (reload, URL prefill, return from Beam) fetch fresh prices.
   const needsInitialSearch =
@@ -427,10 +483,38 @@ export default function BookingApp({
       dispatch({ type: "goToStep", step: "guest" });
       return;
     }
-    if (configRef.current.paymentStatus !== "ok") return;
+    const cfg = configRef.current;
+    if (cfg.paymentStatus !== "ok" || releasing) return;
     analytics.addPaymentInfo(q);
     dispatch({ type: "checkoutStarted" });
-    announce("Taking you to Beam's secure payment page.");
+    announce(providerCopy(cfg).payAnnouncement);
+    if (cfg.provider === "stripe") {
+      // An earlier attempt from this tab (e.g. the guest used the browser's Back button on Stripe's page)
+      // still holds the room: release it first - or, if it was paid meanwhile, show its confirmation.
+      const prior = readAttempt();
+      if (prior) {
+        setReleasing(true);
+        const released = await releaseAttempt({ ref: prior.ref, t: prior.token, l: prior.token });
+        if (released === "left") return;
+        if (released === "error") {
+          // Never open a second payable Stripe session while the earlier one might still be paid
+          // (a guest paying both would be charged twice). Once it has certainly expired, carry on.
+          if (attemptMayStillBePaid(prior, Date.now())) {
+            announce("Payment could not be started. Nothing was charged.");
+            dispatch({
+              type: "checkoutFailed",
+              error: {
+                code: "upstream_error",
+                message:
+                  "We couldn't check your earlier payment attempt just now, so we haven't started a new one - this makes sure nobody pays twice. Please try again in a minute, or message us on WhatsApp.",
+              },
+            });
+            return;
+          }
+          clearAttempt(prior.ref);
+        }
+      }
+    }
     const res = await postCheckout({
       checkIn: data.search.checkIn,
       checkOut: data.search.checkOut,
@@ -440,13 +524,18 @@ export default function BookingApp({
       expectedTotalSatang: q.totalSatang,
       expectedDueNowSatang: q.dueNowSatang,
       theme,
+      // Stripe: the reservation is created in Cloudbeds before payment, so the server needs the lead guest.
+      // Sent only in the request body (never in a URL); demo/Beam modes keep the details in the browser.
+      ...(cfg.requiresGuestDetails ? { guest: { ...s.guest, postcode: normalizePostcode(s.guest.postcode ?? "") } } : {}),
     });
     if (res.ok) {
-      if (!isSafeRedirect(res.redirectUrl)) {
+      if (!isAllowedPaymentRedirect(res.redirectUrl, window.location.href)) {
+        announce("Payment could not be started. Nothing was charged.");
         dispatch({ type: "checkoutFailed", error: { code: "server_error", message: "Unexpected payment page address. Nothing was charged." } });
         return;
       }
       rememberLinkToken(res.ref, res.linkToken);
+      if (res.provider === "stripe" && res.linkToken) rememberAttempt({ ref: res.ref, token: res.linkToken, startedAt: Date.now() });
       dispatch({ type: "checkoutRedirecting" });
       window.location.assign(res.redirectUrl);
       return;
@@ -454,11 +543,18 @@ export default function BookingApp({
     // price_changed: the server's quote becomes the one shown and paid (state.serverQuote).
     // unavailable: the reducer drops those rooms. Either way refresh the offers, past the search cache.
     dispatch({ type: "checkoutFailed", error: toCheckoutErrorView(res), quote: res.quote });
-    if (res.error === "price_changed" && res.quote) {
-      announce(`The price has changed. New total ${formatThbWithCode(res.quote.totalSatang)}.`);
-    }
+    // Replace "Reserving your room and taking you to ..." so screen-reader users never read a stale promise.
+    announce(
+      res.error === "price_changed" && res.quote
+        ? `The price has changed. New total ${formatThbWithCode(res.quote.totalSatang)}.`
+        : res.error === "live_payments_locked"
+          ? "Online payment is paused. Nothing was charged."
+          : "Payment could not be started. Nothing was charged.",
+    );
+    // price_changed WITHOUT a quote (Stripe: Cloudbeds priced the hold differently and it was cancelled):
+    // refresh once past the cache; the guest decides whether to pay again (never an automatic retry).
     if (res.error === "unavailable" || res.error === "price_changed") runSearch(s.search, { fresh: true });
-  }, [analytics, announce, runSearch, theme]);
+  }, [analytics, announce, releaseAttempt, releasing, runSearch, theme]);
 
   const actions: BookingActions = useMemo(() => {
     const goToStep = (step: Step) => dispatch({ type: "goToStep", step });
@@ -519,12 +615,17 @@ export default function BookingApp({
       updateGuest: (patch) => dispatch({ type: "updateGuest", patch }),
       goToStep,
       back: () => {
-        const i = STEP_ORDER.indexOf(stateRef.current.step);
-        if (i > 0) goToStep(STEP_ORDER[i - 1]);
+        const i = steps.indexOf(stateRef.current.step);
+        if (i > 0) goToStep(steps[i - 1]);
       },
       continue: () => {
         const s = stateRef.current;
-        if (s.step === "results") goToStep("addons");
+        if (s.step === "results" && !configRef.current.addonsEnabled) {
+          // No add-ons offered (Stripe): straight on to the guest details.
+          const q = selectQuote(s);
+          if (q) analytics.beginCheckout(q);
+          goToStep("guest");
+        } else if (s.step === "results") goToStep("addons");
         else if (s.step === "addons") {
           const q = selectQuote(s);
           if (q) analytics.beginCheckout(q);
@@ -541,7 +642,18 @@ export default function BookingApp({
       },
       openSecurePaymentInfo: () => setSecureInfoOpen(true),
     };
-  }, [analytics, announce, pay, runSearch]);
+  }, [analytics, announce, pay, runSearch, steps]);
+
+  // Add-ons switched off (Stripe): a cart saved under another mode may still carry them, or the guest
+  // may be on the add-ons step (reload, browser Forward). Drop them, so the summary never shows a price
+  // the server would refuse, and move on to the guest details.
+  useEffect(() => {
+    if (!state.hydrated || addonsEnabled) return;
+    for (const item of state.cart) {
+      for (const addonId of item.addonIds) dispatch({ type: "toggleAddon", itemId: item.id, addonId });
+    }
+    if (state.step === "addons") dispatch({ type: "goToStep", step: state.cart.length > 0 ? "guest" : "results" });
+  }, [state.hydrated, state.cart, state.step, addonsEnabled]);
 
   // Lets page-level CSS react to the step (booking.css hides the site's
   // WhatsApp button over the phone search step's Search button).
@@ -562,11 +674,13 @@ export default function BookingApp({
   /* ------------------------------- view -------------------------------- */
 
   const { step, search, cart, checkout } = state;
-  const submitting = checkout.status === "submitting" || checkout.status === "redirecting";
+  const submitting = checkout.status === "submitting" || checkout.status === "redirecting" || releasing;
   const stayIn = availability?.search.checkIn ?? search.checkIn;
   const stayOut = availability?.search.checkOut ?? search.checkOut;
   const pricesLoading = state.results.status === "loading" || state.results.status === "idle";
   const locked = config.paymentStatus === "locked";
+  // The server refused the Pay as locked after this page loaded (e.g. an emergency stop).
+  const paymentPaused = isPaymentPaused(checkout.error);
 
   let cta: SummaryCta | null = null;
   if (step === "results" || step === "addons") {
@@ -580,7 +694,8 @@ export default function BookingApp({
       barLabel: "Pay now",
       onClick: () => void actions.pay(),
       busy: submitting,
-      disabled: locked,
+      disabled: locked || paymentPaused,
+      ...(paymentPaused ? { label: "Online payment paused", barLabel: "Payment paused" } : {}),
     };
   }
 
@@ -611,8 +726,10 @@ export default function BookingApp({
     />
   );
 
-  const stepIndex = STEP_ORDER.indexOf(step);
-  const prevStep = STEP_ORDER[stepIndex - 1];
+  // Position among the steps this mode shows (no add-ons step on Stripe); the add-ons step itself is
+  // only ever shown when add-ons are on.
+  const stepIndex = Math.max(0, steps.indexOf(step));
+  const prevStep = steps[stepIndex - 1];
   // After the cart step the main column needs prices; if they can't load, say so with a way out.
   const needsPrices = step === "addons" || step === "guest" || step === "payment";
   const pricesError = needsPrices && !quote && state.results.status === "error";
@@ -631,6 +748,9 @@ export default function BookingApp({
             dataSource={availability?.dataSource ?? config.dataSource}
             theme={theme}
             themeHref={themeHref}
+            provider={config.provider}
+            cloudbedsWrites={config.cloudbedsWrites}
+            whatsappUrl={config.whatsappUrl}
           />
 
           <header>
@@ -639,13 +759,22 @@ export default function BookingApp({
             </p>
             <h1 className="bk-heading mt-3 text-4xl text-(--bk-frame-text)">Book Your Stay</h1>
             <p className="mt-4 max-w-2xl text-(--bk-frame-text-muted)">
-              Live availability and secure payment, right here on our site.
+              Live availability and secure payment, booked direct with us.
             </p>
+            {classicHref && (
+              <p className="mt-2 text-sm text-(--bk-frame-text-muted)">
+                Prefer the booking page you know?{" "}
+                <a href={classicHref} rel="nofollow" className="font-medium underline underline-offset-2 hover:text-(--bk-frame-text)">
+                  Use our classic booking page
+                </a>
+                .
+              </p>
+            )}
           </header>
 
           {/* One polite announcement per step change ("Step 3 of 5: Add-ons and Extras"). */}
           <p role="status" className="bk-sr-only">
-            {state.hydrated ? `Step ${stepIndex + 1} of ${STEP_ORDER.length}: ${STEP_TITLES[step]}` : ""}
+            {state.hydrated ? `Step ${stepIndex + 1} of ${steps.length}: ${STEP_TITLES[step]}` : ""}
           </p>
           {/* Cart, add-on, price and results changes ("Sunrise Suite added. Total THB 13,182.75."), written by announce(). */}
           <p ref={liveRef} role="status" className="bk-sr-only" />
@@ -730,7 +859,10 @@ export default function BookingApp({
                       onPay={() => void actions.pay()}
                       onEditGuest={() => actions.goToStep("guest")}
                       onEditRooms={() => actions.goToStep("results")}
-                      onEditAddons={() => actions.goToStep("addons")}
+                      onEditAddons={addonsEnabled ? () => actions.goToStep("addons") : undefined}
+                      onChangeDates={() => actions.goToStep("search")}
+                      config={config}
+                      busyLabel={releasing ? "Checking your earlier payment..." : undefined}
                     />
                   ) : (
                     !pricesError && <PaymentStepSkeleton />

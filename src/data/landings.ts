@@ -8,6 +8,51 @@ export interface LandingPerk {
   text: string;
 }
 
+/**
+ * Replaces the "Code DIRECT at checkout" perk while our own booking engine
+ * serves /booking (BOOKING_ENGINE=own): promo codes are off there until DIRECT
+ * maps to a real Cloudbeds rate plan, so the page must not promise a code.
+ */
+export const OWN_ENGINE_PERK: Record<string, LandingPerk> = {
+  en: { title: "Book direct, instantly", text: "Live availability and secure card or PromptPay payment, confirmed on the spot." },
+  he: { title: "הזמנה ישירה ומיידית", text: "זמינות בזמן אמת ותשלום מאובטח בכרטיס או ב־PromptPay, עם אישור מיידי." },
+  ru: { title: "Прямое бронирование сразу", text: "Наличие в реальном времени и безопасная оплата картой или PromptPay, подтверждение сразу." },
+  fr: { title: "Réservation directe immédiate", text: "Disponibilités en temps réel et paiement sécurisé par carte ou PromptPay, confirmé sur-le-champ." },
+  de: { title: "Direkt und sofort buchen", text: "Live-Verfügbarkeit und sichere Zahlung per Karte oder PromptPay, sofort bestätigt." },
+  zh: { title: "直接预订，即时确认", text: "实时房态，银行卡或 PromptPay 安全支付，立即确认。" },
+  es: { title: "Reserva directa al instante", text: "Disponibilidad en tiempo real y pago seguro con tarjeta o PromptPay, confirmado al momento." },
+  th: { title: "จองตรงได้ทันที", text: "ดูห้องว่างแบบเรียลไทม์ ชำระเงินอย่างปลอดภัยด้วยบัตรหรือ PromptPay ยืนยันทันที" },
+};
+
+/**
+ * The "best rate when you book direct" clause of each landing description,
+ * and its neutral replacement while our own engine serves /booking: it adds an
+ * openly shown payment processing fee and DIRECT is off there, so the site
+ * must not promise the best price (consumer law, Google Ads misrepresentation).
+ */
+export const OWN_ENGINE_DESCRIPTION_CLAUSE: Record<string, [string, string]> = {
+  he: ["הזמינו ישירות וקבלו את המחיר הטוב ביותר.", "הזמינו ישירות עם זמינות בזמן אמת."],
+  ru: ["Бронируйте напрямую по лучшей цене.", "Бронируйте напрямую — наличие в реальном времени."],
+  fr: ["réservez en direct au meilleur tarif.", "réservez en direct, disponibilités en temps réel."],
+  de: ["direkt buchen zum besten Preis.", "direkt buchen mit Live-Verfügbarkeit."],
+  zh: ["直接预订享最优价格。", "实时房态，直接预订。"],
+  es: ["reserva directa al mejor precio.", "reserva directa con disponibilidad en tiempo real."],
+  th: ["จองตรงราคาดีที่สุด", "จองตรงพร้อมดูห้องว่างแบบเรียลไทม์"],
+};
+
+/** A landing's meta description, without the best-rate promise while the own engine serves /booking. */
+export function descriptionForEngine(t: Pick<Landing, "code" | "description">, ownEngine: boolean): string {
+  const clause = OWN_ENGINE_DESCRIPTION_CLAUSE[t.code];
+  if (!ownEngine || !clause) return t.description;
+  return t.description.replace(clause[0], clause[1]);
+}
+
+/** The perks to show: the DIRECT-code perk is swapped out while the own engine is live. */
+export function perksForEngine(perks: LandingPerk[], code: string, ownEngine: boolean): LandingPerk[] {
+  if (!ownEngine) return perks;
+  return perks.map((p) => (/DIRECT/.test(p.text) ? (OWN_ENGINE_PERK[code] ?? OWN_ENGINE_PERK.en) : p));
+}
+
 export interface Landing {
   code: string; // URL segment and hreflang code
   htmlLang: string;

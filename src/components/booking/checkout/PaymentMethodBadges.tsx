@@ -1,11 +1,14 @@
 // OWNER: ui-checkout
 // Payment method badges (plain text, no brand artwork) and the WhatsApp
 // help link shared by the payment step, the secure-payment modal, the
-// simulated Beam page and the return page.
+// simulated Beam page and the return page. Which badges a provider shows
+// comes from paymentMethodLabels(config) (Stripe Thailand: Visa, Mastercard,
+// PromptPay, Apple Pay, Google Pay; Beam: all five card brands + PromptPay).
 
 import { site } from "@/data/site";
+import type { PaymentMethodLabel } from "@/lib/booking/paymentCopy";
 
-export type PaymentMethodName = "Visa" | "Mastercard" | "JCB" | "Amex" | "UnionPay" | "PromptPay";
+export type PaymentMethodName = PaymentMethodLabel;
 
 export const CARD_METHODS: PaymentMethodName[] = ["Visa", "Mastercard", "JCB", "Amex", "UnionPay"];
 export const ALL_METHODS: PaymentMethodName[] = [...CARD_METHODS, "PromptPay"];

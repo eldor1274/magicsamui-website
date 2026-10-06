@@ -219,7 +219,7 @@ export const HOUSE_POLICIES = {
   checkIn: "Check-in from 3:00 PM",
   checkOut: "Check-out by 11:00 AM",
   cancellation:
-    "Full charge (100% of stay) if cancelled within 60 days of arrival; 50% of stay if cancelled within 90 days of arrival.",
+    "Full charge (100% of stay) if cancelled within 60 days of arrival; 50% of stay if cancelled within 90 days of arrival. The payment processing fee is refunded only when the whole stay is refunded.",
   children: "Children are not accommodated - all guests are counted as adults.",
   airportPickup: "Free airport pickup on stays of 2 nights or more.",
 };

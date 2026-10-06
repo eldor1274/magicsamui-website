@@ -36,7 +36,11 @@ export interface SearchBarProps {
   maxDate: IsoDate;
   maxNights: number;
   maxAdults: number;
-  /** False when no promo code can be valid (Beam modes): the code picker drops its DIRECT hint. */
+  /**
+   * False when no promo code can be valid (every Beam/Stripe mode: promos are off until a code maps to a
+   * real Cloudbeds rate plan). The code pill is then not offered at all, so a guest is never shown a code
+   * as "entered" that would not change the price.
+   */
   promoEnabled?: boolean;
 }
 
@@ -218,35 +222,37 @@ export default function SearchBar({
               aria-expanded={panel === "guests"}
               aria-label={`Guests, ${guestsLabel}`}
               // Compact phones: Guests hugs its label so the code pill gets the rest of the row.
-              className={`${pillButton} md:flex-none md:min-w-32 ${compact ? "flex-none sm:flex-1 lg:min-w-0" : "flex-1"}`}
+              className={`${pillButton} md:flex-none md:min-w-32 ${compact ? (promoEnabled ? "flex-none sm:flex-1 lg:min-w-0" : "flex-1 lg:min-w-0") : "flex-1"}`}
             >
               <User size={18} className={`${pillIcon} text-(--bk-text-muted)`} aria-hidden="true" />
               <span className="whitespace-nowrap">{guestsLabel}</span>
             </button>
 
-            {/* Promo code */}
-            <button
-              ref={promoRef}
-              type="button"
-              onClick={() => toggle("promo")}
-              aria-haspopup="dialog"
-              aria-expanded={panel === "promo"}
-              aria-label={
-                promoCode
-                  ? `Promo code ${promoCode}${promoVerdict ? (promoVerdict.valid ? ", applied" : ", not valid") : ""}`
-                  : "Add promo code"
-              }
-              className={`${pillButton} min-w-0 flex-1 md:flex-none md:min-w-36 ${compact ? "lg:min-w-0" : ""}`}
-            >
-              {promoVerdict?.valid ? (
-                <CheckCircle2 size={18} className={`${pillIcon} text-(--bk-success)`} aria-hidden="true" />
-              ) : promoVerdict && !promoVerdict.valid ? (
-                <AlertCircle size={18} className={`${pillIcon} text-(--bk-danger)`} aria-hidden="true" />
-              ) : (
-                <Tag size={18} className={`${pillIcon} text-(--bk-text-muted)`} aria-hidden="true" />
-              )}
-              <span className="truncate whitespace-nowrap">{promoCode || "Add Code"}</span>
-            </button>
+            {/* Promo code (only while a code can apply) */}
+            {promoEnabled && (
+              <button
+                ref={promoRef}
+                type="button"
+                onClick={() => toggle("promo")}
+                aria-haspopup="dialog"
+                aria-expanded={panel === "promo"}
+                aria-label={
+                  promoCode
+                    ? `Promo code ${promoCode}${promoVerdict ? (promoVerdict.valid ? ", applied" : ", not valid") : ""}`
+                    : "Add promo code"
+                }
+                className={`${pillButton} min-w-0 flex-1 md:flex-none md:min-w-36 ${compact ? "lg:min-w-0" : ""}`}
+              >
+                {promoVerdict?.valid ? (
+                  <CheckCircle2 size={18} className={`${pillIcon} text-(--bk-success)`} aria-hidden="true" />
+                ) : promoVerdict && !promoVerdict.valid ? (
+                  <AlertCircle size={18} className={`${pillIcon} text-(--bk-danger)`} aria-hidden="true" />
+                ) : (
+                  <Tag size={18} className={`${pillIcon} text-(--bk-text-muted)`} aria-hidden="true" />
+                )}
+                <span className="truncate whitespace-nowrap">{promoCode || "Add Code"}</span>
+              </button>
+            )}
 
             {compact && searchButton}
           </div>
@@ -276,15 +282,17 @@ export default function SearchBar({
           onApply={(adults) => applyPatch({ adults })}
           anchorRef={guestsRef}
         />
-        <PromoPopover
-          open={panel === "promo"}
-          onClose={() => setPanel(null)}
-          value={value.promo}
-          result={promoResult}
-          onApply={(promo) => applyPatch({ promo })}
-          anchorRef={promoRef}
-          promoEnabled={promoEnabled}
-        />
+        {promoEnabled && (
+          <PromoPopover
+            open={panel === "promo"}
+            onClose={() => setPanel(null)}
+            value={value.promo}
+            result={promoResult}
+            onApply={(promo) => applyPatch({ promo })}
+            anchorRef={promoRef}
+            promoEnabled={promoEnabled}
+          />
+        )}
       </form>
       {!compact && feedback}
     </div>

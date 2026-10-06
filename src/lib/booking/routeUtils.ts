@@ -17,9 +17,10 @@ export function apiError(status: number, error: ApiError["error"], message: stri
 /** Maps a config error to a 503 the UI can explain; rethrows anything else. */
 export function configErrorResponse(e: unknown): Response {
   if (e instanceof BookingConfigError) {
-    console.error(`[booking] config error: ${e.code}`);
+    // Names of the missing/invalid settings only (never values), so go-live day can see what is left.
+    console.error(`[booking] config error: ${e.code}${e.missing.length ? ` - missing: ${e.missing.join(", ")}` : ""}`);
     return e.code === "live_payments_locked"
-      ? apiError(503, "live_payments_locked", "Live payments are switched off for this site. No payment was taken.")
+      ? apiError(503, "live_payments_locked", "Online payment on this page is paused right now. No payment was taken.")
       : apiError(503, "payment_unavailable", "Online payment is not configured right now. No payment was taken.");
   }
   throw e;

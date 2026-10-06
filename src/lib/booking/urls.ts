@@ -61,6 +61,29 @@ export function cancelUrl(origin: string, ref: string, token: string, theme?: Th
   return `${origin}${PREVIEW_PATH}?${q.toString()}`;
 }
 
+/**
+ * Stripe success_url: the own booking page's /return with the booking token
+ * and Stripe's literal {CHECKOUT_SESSION_ID} placeholder (Stripe substitutes
+ * it; it must NOT be percent-encoded, so it is appended by hand).
+ */
+export function stripeReturnUrl(origin: string, basePath: string, ref: string, token: string, theme?: ThemeName): string {
+  const q = withTheme(new URLSearchParams({ ref, t: token }), theme);
+  return `${origin}${basePath}/return?${q.toString()}&session_id={CHECKOUT_SESSION_ID}`;
+}
+
+/**
+ * Stripe cancel_url (the "back" link on Checkout): back to the payment step.
+ * The booking page must POST /api/booking/abandon with `t` (and the link
+ * token) so the session is expired and the hold released at once.
+ */
+export function stripeCancelUrl(origin: string, basePath: string, ref: string, token: string, theme?: ThemeName): string {
+  const q = withTheme(new URLSearchParams({ resume: "payment", reason: "cancelled", ref, t: token }), theme);
+  return `${origin}${basePath}?${q.toString()}`;
+}
+
+/** Local stripe-mock checkout page (MOCK only). */
+export const STRIPE_MOCK_PATH = "/booking-preview/stripe-mock";
+
 export function demoPayUrl(origin: string, token: string, theme?: ThemeName): string {
   const q = withTheme(new URLSearchParams({ t: token }), theme);
   return `${origin}${DEMO_PAY_PATH}?${q.toString()}`;
@@ -72,8 +95,14 @@ export function demoReturnUrl(origin: string, ref: string, token: string, proof:
   return `${origin}${RETURN_PATH}?${q.toString()}`;
 }
 
-/** Query parameters a booking page may keep in the address bar after its one-shot cleanup. */
-const KEEP_PARAMS = new Set(["theme", "staff", "gclid", "gbraid", "wbraid"]);
+/**
+ * Query parameters a booking page may keep in the address bar after its
+ * one-shot cleanup: the theme, the ?staff device flag, and ad-click / cross-
+ * domain ids (none of them personal data) that Google Ads (gclid, gbraid,
+ * wbraid, gad_source, gad_campaignid, dclid), the GA linker (_gl), Microsoft
+ * Ads (msclkid) and Meta (fbclid) use for attribution.
+ */
+const KEEP_PARAMS = new Set(["theme", "staff", "gclid", "gbraid", "wbraid", "gad_source", "gad_campaignid", "dclid", "_gl", "msclkid", "fbclid"]);
 
 /**
  * The address-bar query to keep once a booking page has read its parameters:
@@ -104,8 +133,23 @@ export function parseResumeReason(v: unknown): ResumeReason | null {
  * attempt: the booking page ignores a landing URL it has already applied
  * (Back/Forward replays), so two attempts must never share one URL.
  */
-export function resumePaymentPath(reason: ResumeReason, theme?: ThemeName, ref?: string | null): string {
+export function resumePaymentPath(reason: ResumeReason, theme?: ThemeName, ref?: string | null, basePath: string = PREVIEW_PATH): string {
   const q = new URLSearchParams({ resume: "payment", reason });
   if (isBookingRef(ref)) q.set("ref", ref);
-  return `${PREVIEW_PATH}?${withTheme(q, theme).toString()}`;
+  return `${safeBookingBasePath(basePath)}?${withTheme(q, theme).toString()}`;
+}
+
+/** The two own-booking-page paths; anything else falls back to the preview (never an open redirect). */
+export function safeBookingBasePath(basePath: string | null | undefined): "/booking" | "/booking-preview" {
+  return basePath === "/booking" ? "/booking" : PREVIEW_PATH;
+}
+
+/**
+ * Same-origin return page for a booking attempt (used when the booking page
+ * finds that an attempt it was about to abandon was already paid or is still
+ * processing). Only the signed token and the ref - never personal data.
+ */
+export function returnPagePath(basePath: string, ref: string, token: string, theme?: ThemeName): string {
+  const q = withTheme(new URLSearchParams({ ref, t: token }), theme);
+  return `${safeBookingBasePath(basePath)}/return?${q.toString()}`;
 }

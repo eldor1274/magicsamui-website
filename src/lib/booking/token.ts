@@ -101,7 +101,7 @@ export function verifyBookingToken(token: unknown, secret: string, nowMs: number
 
 /* ------------------------- payload validation ------------------------- */
 
-const PAYMENT_MODES: PaymentMode[] = ["demo", "beam-playground", "beam-live"];
+const PAYMENT_MODES: PaymentMode[] = ["demo", "beam-playground", "beam-live", "stripe-mock", "stripe-test", "stripe-live"];
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 const PROMO_CODE_RE = /^[A-Z0-9_-]{1,32}$/;
 /** Generous ceiling (100M THB) so no absurd amount is ever displayed as a real booking. */

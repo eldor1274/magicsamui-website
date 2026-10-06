@@ -5,7 +5,9 @@ import { readdirSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const dir = fileURLToPath(new URL(".", import.meta.url));
-const files = readdirSync(dir)
+// Every *.test.ts in this folder and its subfolders (payments/, mock/, ...).
+const files = readdirSync(dir, { recursive: true })
+  .map(String)
   .filter((name) => name.endsWith(".test.ts"))
   .sort();
 for (const name of files) {

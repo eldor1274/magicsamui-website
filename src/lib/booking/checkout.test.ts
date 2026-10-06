@@ -271,7 +271,7 @@ test("Cloudbeds failure falls back to demo data and says so", async () => {
   const result = await getInventory(
     "2026-11-11",
     "2026-11-14",
-    { dataSource: "cloudbeds", cloudbeds: { apiKey: "cbat_x", propertyId: null } },
+    { dataSource: "cloudbeds", cloudbeds: { apiKey: "cbat_x", propertyId: null, baseRateOnly: false } },
     { fetchImpl: failing, onFallback: () => (reported = true) },
   );
   assert.equal(result.dataSource, "demo-fallback");

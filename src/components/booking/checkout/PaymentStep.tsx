@@ -4,8 +4,11 @@
 // "Review and pay": stay, rooms and guest review with edit links, the amount
 // due now, accepted methods and the pay button. Paying POSTs the cart (no
 // prices) to /api/booking/checkout via BookingApp's pay(), which re-quotes on
-// the server and does a top-level redirect to Beam's hosted page (or the
-// simulated one in demo mode). Every checkout error has its own recovery.
+// the server and does a top-level redirect to the provider's hosted page:
+// Stripe Checkout (after the room is held in Cloudbeds), Beam's page, or the
+// simulated one in demo/MOCK mode. All wording comes from the public config
+// (lib/booking/paymentCopy), so a Stripe page never mentions Beam. Every
+// checkout error has its own recovery.
 // Keep PaymentStepProps stable.
 
 import { useEffect, useRef } from "react";
@@ -27,8 +30,10 @@ import {
 import { HOUSE_POLICIES, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { formatDisplayDateWithWeekday, formatNights } from "@/lib/booking/dates";
 import { formatThb, formatThbWithCode } from "@/lib/booking/format";
+import { normalizePostcode } from "@/lib/booking/guest";
 import type { GuestDetails } from "@/lib/booking/guest";
-import type { CartItem, IsoDate, PaymentMode, Quote } from "@/lib/booking/types";
+import { DEMO_COPY_CONFIG, paymentMethodLabels, providerCopy } from "@/lib/booking/paymentCopy";
+import type { CartItem, IsoDate, PaymentMode, PublicBookingConfig, Quote } from "@/lib/booking/types";
 import type { CheckoutErrorView } from "../state";
 import { TOUCH_TARGET } from "../ui/styles";
 import PaymentMethodBadges, { whatsappHref } from "./PaymentMethodBadges";
@@ -50,7 +55,14 @@ export interface PaymentStepProps {
   onEditRooms: () => void;
   /** Optional: back to the Add-ons step (offered when an add-on is what the server refused). */
   onEditAddons?: () => void;
+  /** Optional: back to the date search (test-mode date rule, stay restrictions). */
+  onChangeDates?: () => void;
+  /** Booking config: provider wording, badges, hold time, mode notes. Absent = the demo/Beam wording. */
+  config?: PublicBookingConfig;
+  /** Overrides the busy label (e.g. while an earlier Stripe attempt is being released). */
+  busyLabel?: string;
 }
+
 
 const HELP_MESSAGE = "Hi, I'm trying to book on magicsamui.com but the payment step isn't working - can you help?";
 
@@ -61,6 +73,13 @@ function roomName(slug: string): string {
 const LINK_BUTTON = `${TOUCH_TARGET} inline-flex items-center gap-1 rounded-(--bk-radius-pill) px-2 py-1 text-sm font-medium text-(--bk-accent-soft-text) underline-offset-2 hover:underline`;
 const SECONDARY_BUTTON =
   "inline-flex min-h-11 items-center justify-center gap-1.5 rounded-(--bk-radius-pill) border border-(--bk-border-strong) bg-(--bk-surface) px-4 text-sm font-medium text-(--bk-text) transition-colors hover:border-(--bk-accent)";
+const PRIMARY_BUTTON =
+  "inline-flex min-h-11 items-center justify-center gap-1.5 rounded-(--bk-radius-pill) bg-(--bk-accent) px-4 text-sm font-semibold text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover)";
+
+/** The server refused to take payments on this page (live payments locked): Pay can't work until it is unlocked. */
+export function isPaymentPaused(error: { code: string } | null | undefined): boolean {
+  return error?.code === "live_payments_locked";
+}
 
 function ReviewSection({
   icon: Icon,
@@ -107,9 +126,37 @@ interface ErrorPanelProps {
   onEditRooms: () => void;
   onEditAddons?: () => void;
   onShowAmount: () => void;
+  onEditGuest: () => void;
+  onChangeDates?: () => void;
+  /** Stripe modes: the server validates the guest's details too. */
+  guestChecked: boolean;
+  /** The Cloudbeds booking engine: the working fallback while online payment here is paused. */
+  classicHref: string;
 }
 
-function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onEditAddons, onShowAmount }: ErrorPanelProps) {
+/** " Nothing has been charged." unless the server message already says so (never twice). */
+function chargedNote(message: string): string {
+  return /charged|no payment was taken/i.test(message) ? "" : " Nothing has been charged.";
+}
+
+/** " Message us on WhatsApp ..." unless the server message already points there. */
+function whatsappNote(message: string): string {
+  return /whatsapp/i.test(message) ? "" : " Message us on WhatsApp and we'll complete the booking for you.";
+}
+
+function ErrorPanel({
+  error,
+  quote,
+  submitting,
+  onPay,
+  onEditRooms,
+  onEditAddons,
+  onShowAmount,
+  onEditGuest,
+  onChangeDates,
+  guestChecked,
+  classicHref,
+}: ErrorPanelProps) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     ref.current?.focus();
@@ -126,7 +173,7 @@ function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onEditAddons
       if (forParty.length > 0 && forParty.length === names.length) {
         // Not sold: Cloudbeds won't take this many guests in that room online.
         title = "Too many guests for online booking";
-        body = <>{error.message} Nothing has been charged.</>;
+        body = <>{error.message}{chargedNote(error.message)}</>;
         actions = (
           <button type="button" onClick={onEditRooms} className={SECONDARY_BUTTON}>
             <BedDouble size={15} aria-hidden="true" />
@@ -144,8 +191,8 @@ function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onEditAddons
             </>
           ) : (
             error.message
-          )}{" "}
-          Nothing has been charged.
+          )}
+          {names.length > 0 ? " Nothing has been charged." : chargedNote(error.message)}
         </>
       );
       actions = (
@@ -157,6 +204,28 @@ function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onEditAddons
       break;
     }
     case "price_changed": {
+      if (error.newTotalSatang === undefined) {
+        // Stripe: our reservation system priced the hold differently, so the hold was cancelled. The summary
+        // refreshes from a fresh search; the guest decides whether to pay again (never an automatic retry).
+        title = "The price has just changed";
+        body = (
+          <>
+            {error.message} Your summary is being refreshed with the latest price - please review it before paying again.
+          </>
+        );
+        actions = (
+          <>
+            <button type="button" onClick={onShowAmount} className={SECONDARY_BUTTON}>
+              Review new price
+            </button>
+            <a href={whatsappHref(HELP_MESSAGE)} target="_blank" rel="noopener noreferrer" className={SECONDARY_BUTTON}>
+              <MessageCircle size={15} aria-hidden="true" />
+              WhatsApp us
+            </a>
+          </>
+        );
+        break;
+      }
       const updated =
         error.newTotalSatang !== undefined &&
         error.newTotalSatang === quote.totalSatang &&
@@ -222,30 +291,102 @@ function ErrorPanel({ error, quote, submitting, onPay, onEditRooms, onEditAddons
             Review add-ons
           </button>
         ) : (
-          <button type="button" onClick={onEditRooms} className={SECONDARY_BUTTON}>
-            <BedDouble size={15} aria-hidden="true" />
-            Review rooms
-          </button>
+          <>
+            {guestChecked && (
+              <button type="button" onClick={onEditGuest} className={SECONDARY_BUTTON}>
+                <User size={15} aria-hidden="true" />
+                Edit guest details
+              </button>
+            )}
+            <button type="button" onClick={onEditRooms} className={SECONDARY_BUTTON}>
+              <BedDouble size={15} aria-hidden="true" />
+              Review rooms
+            </button>
+          </>
         );
       break;
+    case "test_mode_restricted":
+      // Stripe test mode with real Cloudbeds writes: holds only far ahead and for the owner's test email.
+      title = "Test booking not allowed";
+      body = error.message; // the server message already says nothing was reserved or charged
+      actions = (
+        <>
+          {onChangeDates && (
+            <button type="button" onClick={onChangeDates} className={SECONDARY_BUTTON}>
+              <CalendarDays size={15} aria-hidden="true" />
+              Change dates
+            </button>
+          )}
+          <button type="button" onClick={onEditGuest} className={SECONDARY_BUTTON}>
+            <User size={15} aria-hidden="true" />
+            Edit guest details
+          </button>
+        </>
+      );
+      break;
     case "live_payments_locked":
+      // Pay stays disabled ("Online payment paused"): the ways that work right now come first.
+      title = "Online payment is paused";
+      body = <>No payment was taken. You can book right away on our classic booking page, or message us on WhatsApp and we&apos;ll book it for you.</>;
+      actions = (
+        <>
+          <a href={classicHref} className={PRIMARY_BUTTON}>
+            <CalendarDays size={15} aria-hidden="true" />
+            Book on our classic booking page
+          </a>
+          <a href={whatsappHref(HELP_MESSAGE)} target="_blank" rel="noopener noreferrer" className={SECONDARY_BUTTON}>
+            <MessageCircle size={15} aria-hidden="true" />
+            WhatsApp us
+          </a>
+        </>
+      );
+      break;
     case "payment_unavailable":
       title = "Online payment is unavailable right now";
-      body = <>{error.message} Nothing has been charged. Message us on WhatsApp and we&apos;ll complete the booking for you.</>;
+      body = <>{error.message}{chargedNote(error.message)}{whatsappNote(error.message)}</>;
       actions = (
-        <a href={whatsappHref(HELP_MESSAGE)} target="_blank" rel="noopener noreferrer" className={SECONDARY_BUTTON}>
-          <MessageCircle size={15} aria-hidden="true" />
-          WhatsApp us
-        </a>
+        <>
+          <a href={classicHref} className={SECONDARY_BUTTON}>
+            <CalendarDays size={15} aria-hidden="true" />
+            Book on our classic booking page
+          </a>
+          <a href={whatsappHref(HELP_MESSAGE)} target="_blank" rel="noopener noreferrer" className={SECONDARY_BUTTON}>
+            <MessageCircle size={15} aria-hidden="true" />
+            WhatsApp us
+          </a>
+        </>
       );
       break;
     case "rate_limited":
+      // A retry can't work until the brake's window has passed: no "Try again", say how long, offer the ways that do work.
+      title = "Online payment is paused for a while";
+      body = (
+        <>
+          {error.message}
+          {chargedNote(error.message)}{" "}
+          {error.retryAfterMinutes ? `You can try again here in about ${error.retryAfterMinutes} minutes, ` : "You can try again here in a few minutes, "}
+          or book right away on our classic booking page or with us on WhatsApp.
+        </>
+      );
+      actions = (
+        <>
+          <a href={classicHref} className={SECONDARY_BUTTON}>
+            <CalendarDays size={15} aria-hidden="true" />
+            Book on our classic booking page
+          </a>
+          <a href={whatsappHref(HELP_MESSAGE)} target="_blank" rel="noopener noreferrer" className={SECONDARY_BUTTON}>
+            <MessageCircle size={15} aria-hidden="true" />
+            WhatsApp us
+          </a>
+        </>
+      );
+      break;
     case "network_error":
     case "upstream_error":
     case "server_error":
     default:
       title = error.code === "network_error" ? "Connection problem" : "Payment could not be started";
-      body = <>{error.message} Nothing has been charged.</>;
+      body = <>{error.message}{chargedNote(error.message)}</>;
       actions = (
         <>
           <button
@@ -300,9 +441,16 @@ export default function PaymentStep({
   onEditGuest,
   onEditRooms,
   onEditAddons,
+  onChangeDates,
+  config,
+  busyLabel,
 }: PaymentStepProps) {
   const amountRef = useRef<HTMLDivElement>(null);
   const locked = paymentStatus === "locked";
+  // Refused by the server as locked after the page loaded (e.g. an emergency stop): Pay can't work now.
+  const paused = !locked && isPaymentPaused(error);
+  const copy = providerCopy(config ?? DEMO_COPY_CONFIG);
+  const methods = config ? paymentMethodLabels(config) : undefined;
   const country = getCountry(guest.country);
   const dueNow = formatThbWithCode(quote.dueNowSatang);
 
@@ -323,6 +471,10 @@ export default function PaymentStep({
           onEditRooms={onEditRooms}
           onEditAddons={onEditAddons}
           onShowAmount={showAmount}
+          onEditGuest={onEditGuest}
+          onChangeDates={onChangeDates}
+          guestChecked={config?.requiresGuestDetails === true}
+          classicHref={config?.classicBookingPath ?? "/booking"}
         />
       )}
 
@@ -387,6 +539,7 @@ export default function PaymentStep({
             <p className="text-(--bk-text-muted)">
               {guest.dialCode} {guest.phone}
               {country ? ` · ${country.name}` : ""}
+              {guest.postcode?.trim() ? ` · ${normalizePostcode(guest.postcode)}` : ""}
             </p>
           </div>
         </ReviewSection>
@@ -440,12 +593,9 @@ export default function PaymentStep({
 
       <div className="space-y-4 rounded-(--bk-radius-card) bg-(--bk-surface) p-4 shadow-(--bk-shadow-card) sm:p-6">
         <div>
-          <h3 className="bk-heading text-lg text-(--bk-text)">Pay securely with Beam</h3>
-          <p className="mt-1 text-sm text-(--bk-text-muted)">
-            You&apos;ll go to Beam&apos;s secure payment page to pay by card or Thai PromptPay QR, then come straight back here with your
-            booking reference. Card details are entered on Beam&apos;s PCI DSS compliant page - never on our site.
-          </p>
-          <PaymentMethodBadges className="mt-3" />
+          <h3 className="bk-heading text-lg text-(--bk-text)">{copy.payHeading}</h3>
+          <p className="mt-1 text-sm text-(--bk-text-muted)">{copy.payExplainer}</p>
+          <PaymentMethodBadges className="mt-3" methods={methods} />
         </div>
 
         {locked ? (
@@ -470,6 +620,33 @@ export default function PaymentStep({
               <span className="whitespace-nowrap">4111 1111 1111 1111</span> - no real payment is taken and no reservation is made.
             </p>
           </div>
+        ) : paymentMode === "stripe-mock" ? (
+          <div className="flex items-start gap-3 rounded-(--bk-radius-control) border border-(--bk-banner-border) bg-(--bk-warning-soft) p-4 text-sm text-(--bk-text)">
+            <FlaskConical size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-warning)" />
+            <p>
+              <strong>MOCK mode:</strong> the next page is a <strong>fake</strong> Stripe checkout and the reservation is{" "}
+              <strong>simulated</strong> - nothing is charged and nothing reaches Cloudbeds.
+            </p>
+          </div>
+        ) : paymentMode === "stripe-test" ? (
+          <div className="flex items-start gap-3 rounded-(--bk-radius-control) border border-(--bk-banner-border) bg-(--bk-warning-soft) p-4 text-sm text-(--bk-text)">
+            <FlaskConical size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-warning)" />
+            <p>
+              <strong>Stripe test mode:</strong> use a Stripe test card such as <span className="whitespace-nowrap">4242 4242 4242 4242</span>{" "}
+              - no real money moves.{" "}
+              {config?.cloudbedsWrites === "live" ? (
+                <>
+                  A <strong>real</strong> Cloudbeds reservation is held, then confirmed or cancelled
+                  {config.testGuard
+                    ? `; test bookings need an arrival ${config.testGuard.minArrivalMonths}+ months ahead and the owner's test email`
+                    : ""}
+                  .
+                </>
+              ) : (
+                <>The reservation is simulated - nothing reaches Cloudbeds.</>
+              )}
+            </p>
+          </div>
         ) : paymentMode === "beam-playground" ? (
           <div className="flex items-start gap-3 rounded-(--bk-radius-control) border border-(--bk-banner-border) bg-(--bk-warning-soft) p-4 text-sm text-(--bk-text)">
             <FlaskConical size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-warning)" />
@@ -482,13 +659,13 @@ export default function PaymentStep({
         ) : null}
 
         {/* While the checkout runs the button stays focusable (aria-disabled + early return), so keyboard
-            focus isn't dropped to <body>; BookingApp announces "Taking you to Beam". `disabled` only when locked. */}
+            focus isn't dropped to <body>; BookingApp announces where the guest is going. `disabled` only when locked. */}
         <button
           type="button"
           onClick={() => {
             if (!submitting) onPay();
           }}
-          disabled={locked}
+          disabled={locked || paused}
           aria-disabled={submitting || undefined}
           aria-busy={submitting || undefined}
           className="inline-flex min-h-13 w-full items-center justify-center gap-2 rounded-(--bk-radius-pill) bg-(--bk-accent) px-6 py-3 text-base font-semibold text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover) disabled:cursor-not-allowed disabled:opacity-(--bk-disabled-opacity) disabled:hover:bg-(--bk-accent) aria-disabled:cursor-wait aria-disabled:opacity-(--bk-disabled-opacity)"
@@ -496,21 +673,28 @@ export default function PaymentStep({
           {submitting ? (
             <>
               <LoaderCircle size={20} aria-hidden="true" className="shrink-0 animate-spin" />
-              Taking you to Beam...
+              {busyLabel ?? copy.busyLabel}
+            </>
+          ) : paused ? (
+            <>
+              <Lock size={18} aria-hidden="true" className="shrink-0" />
+              Online payment paused
             </>
           ) : (
             <>
               <Lock size={18} aria-hidden="true" className="shrink-0" />
-              {/* One line on phones: "Pay THB x" (+ "securely with Beam" under the button); the full label from sm. */}
+              {/* One line on phones: "Pay THB x" (+ "securely with <provider>" under the button); the full label from sm. */}
               <span className="whitespace-nowrap sm:hidden">Pay {dueNow}</span>
-              <span className="hidden sm:inline">Pay {dueNow} securely with Beam</span>
+              <span className="hidden sm:inline">
+                Pay {dueNow} {copy.payButtonSuffix}
+              </span>
               <ArrowRight size={18} aria-hidden="true" className="shrink-0" />
             </>
           )}
         </button>
         <p className="-mt-2 flex items-center justify-center gap-1 text-xs font-medium text-(--bk-text-muted) sm:hidden" aria-hidden="true">
           <Lock size={12} className="shrink-0" />
-          Securely with Beam
+          Securely with {copy.brand}
         </p>
         <p className="flex items-start gap-1.5 text-xs text-(--bk-text-subtle)">
           <ShieldCheck size={14} aria-hidden="true" className="mt-px shrink-0" />
@@ -518,6 +702,13 @@ export default function PaymentStep({
             By paying you agree to the booking and cancellation policy. {HOUSE_POLICIES.cancellation} Prices are in Thai baht; your bank may
             convert them.
           </span>
+        </p>
+        {/* Phones: the floating WhatsApp button is hidden on this step (it would cover Pay), so the link lives here. */}
+        <p className="text-xs text-(--bk-text-muted) md:hidden">
+          Questions before you pay?{" "}
+          <a href={whatsappHref(HELP_MESSAGE)} target="_blank" rel="noopener noreferrer" className="font-medium underline underline-offset-2">
+            WhatsApp us
+          </a>
         </p>
       </div>
     </div>

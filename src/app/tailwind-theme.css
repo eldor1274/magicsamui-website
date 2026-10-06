@@ -1,0 +1,20 @@
+/*
+ * Site theme tokens for Tailwind (bg-pool, text-ink, font-serif, ...). Shared by
+ * globals.css and the booking engine's own sheet (components/booking/booking.css),
+ * so both generate the same utilities from the same tokens. The values live in
+ * :root in globals.css.
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-stone-50: var(--color-stone-50);
+  --color-stone-100: var(--color-stone-100);
+  --color-ink: var(--color-ink);
+  --color-ink-soft: var(--color-ink-soft);
+  --color-pool: var(--color-pool);
+  --color-pool-dark: var(--color-pool-dark);
+  --color-sand: var(--color-sand);
+  --color-sand-light: var(--color-sand-light);
+  --font-sans: var(--font-sans);
+  --font-serif: var(--font-serif);
+}

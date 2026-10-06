@@ -5,22 +5,26 @@
 // loads) with the frosted hero SearchBar overlapping its lower edge, then a
 // short row of reasons to book direct. Keep SearchStepProps stable.
 
+import { useContext } from "react";
 import Image from "next/image";
 import { BadgePercent, Car, MessageCircle, ShieldCheck } from "lucide-react";
+import { DEMO_COPY_CONFIG, providerCopy } from "@/lib/booking/paymentCopy";
+import { BookingContext } from "../state";
 import SearchBar from "./SearchBar";
 import type { SearchBarProps } from "./SearchBar";
 
 export type SearchStepProps = Omit<SearchBarProps, "variant">;
 
 const PROMO_PERK = { icon: BadgePercent, title: "Best direct rate", text: "Use code DIRECT for our best price on every room." };
-/** Shown instead when promo codes are switched off (every Beam mode), so the page never suggests a code that fails. */
+/** Shown instead when promo codes are switched off (every Beam/Stripe mode), so the page never suggests a code that fails. */
 const OWNER_PERK = { icon: MessageCircle, title: "Talk to the owner", text: "Questions before you book? Eldor answers on WhatsApp." };
-const PERKS = [
-  { icon: Car, title: "Free airport pickup", text: "Included on stays of 2 nights or more." },
-  { icon: ShieldCheck, title: "Secure payment by Beam", text: "Cards from any country, or Thai PromptPay." },
-];
+const PICKUP_PERK = { icon: Car, title: "Free airport pickup", text: "Included on stays of 2 nights or more." };
 
 export default function SearchStep(props: SearchStepProps) {
+  const config = useContext(BookingContext)?.config;
+  // The payment perk names the provider the guest will actually pay with (Stripe or Beam).
+  const pay = providerCopy(config ?? DEMO_COPY_CONFIG).perk;
+  const perks = [PICKUP_PERK, { icon: ShieldCheck, title: pay.title, text: pay.text }];
   return (
     <section aria-labelledby="booking-search-title" className="space-y-6">
       <div className="relative">
@@ -52,7 +56,7 @@ export default function SearchStep(props: SearchStepProps) {
       </div>
 
       <ul className="grid gap-3 sm:grid-cols-3">
-        {[props.promoEnabled === false ? OWNER_PERK : PROMO_PERK, ...PERKS].map(({ icon: Icon, title, text }) => (
+        {[props.promoEnabled === false ? OWNER_PERK : PROMO_PERK, ...perks].map(({ icon: Icon, title, text }) => (
           <li key={title} className="flex items-start gap-3 rounded-(--bk-radius-card) bg-(--bk-surface) p-4 shadow-(--bk-shadow-card)">
             <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-(--bk-accent-soft) text-(--bk-accent-soft-text)">
               <Icon size={18} aria-hidden="true" />

@@ -64,6 +64,8 @@ export default function ResultsList({
   }
 
   const { search, nights, offers } = availability;
+  // Every online payment adds this fee (cards, wallets and PromptPay alike): said with the first prices shown.
+  const feePct = availability.config.cardFeePct;
   const stay = formatStayRange(search.checkIn, search.checkOut);
   const refreshing = status === "loading";
 
@@ -91,6 +93,7 @@ export default function ResultsList({
           blockedReason={blockedReason(offer.slug)}
           onAdd={(ratePlanId, adults) => onAdd({ slug: offer.slug, ratePlanId, adults })}
           promo={availability.promo?.valid ? { code: availability.promo.code, pct: availability.promo.pct } : null}
+          feePct={feePct}
           enquiryHref={
             offer.unavailableReason === "not-bookable"
               ? whatsappHref(
@@ -115,6 +118,11 @@ export default function ResultsList({
             {" "}
             · {stay} · {formatNights(nights)} · {search.adults} {search.adults === 1 ? "guest" : "guests"}
           </span>
+          {feePct > 0 && (
+            <span className="block text-(--bk-frame-text-muted)">
+              Prices are for the stay; a {feePct}% payment processing fee is added to every online payment.
+            </span>
+          )}
         </p>
         <button
           type="button"

@@ -6,6 +6,7 @@ import { createContext, useContext } from "react";
 import type { Dispatch } from "react";
 import { ADDONS, cartConflict, getCatalogueRoom, hasUnitConflict, isAddonId, isBookableSlug, isRatePlanId } from "@/lib/booking/catalogue";
 import type { BookingAnalytics } from "@/lib/booking/clientAnalytics";
+import { isRestrictionMessage } from "@/lib/booking/checkoutMessages";
 import { isIsoDate } from "@/lib/booking/dates";
 import { EMPTY_GUEST, isGuestValid } from "@/lib/booking/guest";
 import type { GuestDetails } from "@/lib/booking/guest";
@@ -86,6 +87,8 @@ export interface CheckoutErrorView {
   issues?: string[];
   /** For invalid_request: the step where the guest can fix it. */
   fixStep?: "addons";
+  /** For rate_limited: roughly how long to wait. */
+  retryAfterMinutes?: number;
 }
 
 export interface CheckoutState {
@@ -104,6 +107,12 @@ const RESUME_NOTICES: Record<ResumeReason, { kind: NoticeKind; message: string }
     kind: "info",
     message: "Your reservation is still here. If you've already paid, please message us before paying again.",
   },
+};
+
+/** Stripe's back link: the session was expired and the Cloudbeds hold released - the room is NOT held any more. */
+const STRIPE_CANCELLED_NOTICE: { kind: NoticeKind; message: string } = {
+  kind: "payment-cancelled",
+  message: "Payment cancelled - nothing was charged. Your selection is saved, but the room is no longer held - pay again to reserve it.",
 };
 
 export interface Notice {
@@ -212,6 +221,8 @@ export type BookingAction =
       resume: "payment" | null;
       /** Why the guest is back on the payment step (default "cancelled"). */
       resumeReason?: ResumeReason | null;
+      /** Stripe's back link: the hold is being released (the notice must not say the room is still held). */
+      holdReleased?: boolean;
       /** Fingerprint of this page load's one-shot URL params (null when there are none). */
       landingKey?: string | null;
       today: IsoDate;
@@ -293,7 +304,8 @@ export function bookingReducer(state: BookingState, action: BookingAction): Book
       const guest = usable?.guest ?? base.guest;
       if (resume === "payment" && cart.length > 0) {
         step = "payment";
-        notice = RESUME_NOTICES[action.resumeReason ?? "cancelled"];
+        const reason = action.resumeReason ?? "cancelled";
+        notice = action.holdReleased && reason === "cancelled" ? STRIPE_CANCELLED_NOTICE : RESUME_NOTICES[reason];
       } else if (unverifiedWarning) {
         notice = RESUME_NOTICES.unverified;
       }
@@ -444,7 +456,10 @@ export function bookingReducer(state: BookingState, action: BookingAction): Book
         const cart = state.cart.filter((c) => !gone.includes(c.slug));
         const name = (slug: string) => getCatalogueRoom(slug)?.name ?? slug;
         const parts: string[] = [];
-        if (sold.length > 0) {
+        if (sold.length === 1 && forParty.size === 0 && isRestrictionMessage(error.message)) {
+          // Not sold: a Cloudbeds stay rule (minimum stay, closed to arrival...) - say which, so the guest can change dates.
+          parts.push(`${error.message} It was removed from your reservation.`);
+        } else if (sold.length > 0) {
           const one = sold.length === 1;
           parts.push(
             `Sorry - ${sold.map(name).join(", ")} ${one ? "is" : "are"} no longer available for your dates and ${one ? "was" : "were"} removed from your reservation.`,
@@ -587,6 +602,7 @@ export function toCheckoutErrorView(e: ApiError & { quote?: Quote; unavailableSl
     occupancySlugs: e.occupancySlugs,
     issues: e.issues,
     fixStep: e.fixStep,
+    retryAfterMinutes: e.retryAfterMinutes,
   };
 }
 

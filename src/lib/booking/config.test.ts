@@ -57,8 +57,8 @@ test("live mode is locked unless every condition holds", () => {
   assert.equal(resolvePaymentMode(full, { liveFulfilmentReady: true }), "beam-live");
 });
 
-test("live mode is hard-stopped in code until fulfilment exists", () => {
-  assert.equal(LIVE_FULFILMENT_READY, false);
+test("beam live mode is hard-stopped in code (no Beam fulfilment)", () => {
+  assert.equal(LIVE_FULFILMENT_READY.beam, false, "Beam has no fulfilment: beam-live stays locked");
   const full = { ...KEYS, ...SECRET, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production", CLOUDBEDS_API_KEY: "cbat_x" };
   assert.throws(
     () => resolvePaymentMode(full),
