@@ -15,7 +15,7 @@ const STAY = ["2027-12-05", "2027-12-06", "2027-12-07"];
 type Json = Record<string, unknown>;
 
 /** Runs the script with every Cloudbeds call answered from `answers` (by endpoint; getRatePlans by roomTypeID). */
-function runScript(answers: { getAvailableRoomTypes: Json; getRatePlans?: Record<string, Json> }): string {
+function runScript(answers: { getAvailableRoomTypes: Json; getRatePlans?: Record<string, Json>; getSources?: Json }, extraEnv: Record<string, string> = {}): string {
   const stub = `
 const ANSWERS = ${JSON.stringify(answers)};
 globalThis.fetch = async (url, init) => {
@@ -32,6 +32,7 @@ globalThis.fetch = async (url, init) => {
   for (const k of Object.keys(env)) if (/^(CLOUDBEDS_|BOOKING_|STRIPE_)/.test(k)) delete env[k];
   env.CLOUDBEDS_API_KEY_BOOKING = "stub-no-network";
   env.CLOUDBEDS_PROPERTY_ID = "235064";
+  Object.assign(env, extraEnv);
   const run = spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(stub)}`, SCRIPT, CHECK_IN, "3"], {
     env,
     encoding: "utf8",
@@ -124,4 +125,37 @@ test("WI-0 section 5 counts a room type as available only on its base row (what 
   // A type not returned at all keeps the old verdict.
   assert.match(lineFor(s5, "462962"), /not offered -> NO RATE/);
   assert.match(out, /Nothing was written to Cloudbeds\./);
+});
+
+test("WI-0 section 4b reads getSources rows nested inside data, as live on 2026-10-06", () => {
+  const fee = { name: "Card Charging Fee", amount: "5.00000", amountType: "percentage", type: "exclusive" };
+  const out = runScript(
+    {
+      getAvailableRoomTypes: {
+        success: true,
+        data: [{ propertyID: "235064", propertyCurrency: { currencyCode: "THB" }, propertyRooms: [row("462958", "default", null)] }],
+      },
+      // Live shape: the source rows sit in an array inside `data`.
+      getSources: {
+        success: true,
+        data: [
+          [
+            { sourceID: "s-1", sourceName: "Website/Booking Engine", isThirdParty: false, status: true, taxes: [], fees: [fee] },
+            { sourceID: "s-1192402", sourceName: "magicsamui.com own booking page", isThirdParty: false, status: true, taxes: [], fees: [] },
+            { sourceID: "ss-644910-1", sourceName: "Booking.com (Hotel Collect Booking)", isThirdParty: true, status: true, taxes: [], fees: [fee] },
+          ],
+        ],
+      },
+    },
+    { CLOUDBEDS_SOURCE_ID: "s-1192402" },
+  );
+  const start = out.indexOf("=== 4b.");
+  const s4b = out.slice(start, out.indexOf("=== 4c.", start));
+
+  assert.match(s4b, /"Website\/Booking Engine" \(s-1\): API holds without sourceID get this source/);
+  assert.match(s4b, /exclusive % on it = 5%/);
+  assert.match(s4b, /"magicsamui\.com own booking page" \(s-1192402\): candidate for CLOUDBEDS_SOURCE_ID/);
+  assert.match(s4b, /CLOUDBEDS_SOURCE_ID="s-1192402": "magicsamui\.com own booking page" \(s-1192402\) active; exclusive % = 0%/);
+  assert.doesNotMatch(s4b, /sourceID=null/);
+  assert.doesNotMatch(s4b, /NOT FOUND/);
 });

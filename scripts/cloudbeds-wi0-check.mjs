@@ -238,7 +238,10 @@ section("4b. Taxes and fees per reservation source (getSources, needs read:reser
 const sources = await get("getSources", { propertyIDs: propertyId });
 httpLine(sources);
 noteIfRefused(sources, "getSources?propertyIDs=... (the documented parameter)");
-const sourceRows = rowsOf(sources);
+// Live (2026-10-06) getSources nests its rows one level deeper than the other endpoints (an array inside
+// `data`), so walk down to the objects that carry a sourceID instead of reading `data` as the row list.
+const sourceRowsIn = (v) => (Array.isArray(v) ? v.flatMap(sourceRowsIn) : v && typeof v === "object" ? ("sourceID" in v ? [v] : Object.values(v).flatMap(sourceRowsIn)) : []);
+const sourceRows = sourceRowsIn(sources.json?.data);
 const baseRow3 = firstBaseRow(avail);
 const primaryRows = sourceRows.filter((s) => !truthy(s.isThirdParty));
 const website = primaryRows.find((s) => /booking engine/i.test(String(s.sourceName ?? ""))) ?? primaryRows.find((s) => /website/i.test(String(s.sourceName ?? ""))) ?? null;
