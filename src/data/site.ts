@@ -2,14 +2,11 @@ export const site = {
   name: "Magic Suites & Villas",
   tagline: "Magic Private Pool Villas, Koh Samui",
   domain: "magicsamui.com",
-  legalName: "บริษัท เคเซม จำกัด (KaSem Co., Ltd.)",
-  registrationNumber: "0845558001502",
-  // Operating entity for the villas (DBD certificate, reg. 10 June 2009).
-  // Distinct from the KaSem details on /legal, which are kept for banking and
-  // payment-provider verification.
-  operatorLegalName: 'หจก. ปากหวาน สมุย (Pakwan Samui Limited Partnership)',
-  operatorRegistrationNumber: '0843552001444',
-  operatorAddress: '42/9 Moo 5, Bo Phut, Ko Samui District, Surat Thani 84320, Thailand',
+  // The operating entity for the villas and the holder of the Stripe account (owner, 6 Oct 2026),
+  // as on its DBD certificate (reg. 10 June 2009). Shown on /legal, /about and /privacy and in the JSON-LD.
+  legalName: "หจก. ปากหวาน สมุย (Pakwan Samui Limited Partnership)",
+  registrationNumber: "0843552001444",
+  registeredAddress: "42/9 Moo 5, Bo Phut, Ko Samui District, Surat Thani 84320, Thailand",
   address: "Bo Put Moo 5, 51/140, Ko Samui District, Surat Thani, Thailand",
   mapsUrl: "https://maps.app.goo.gl/xA3ZEtKskyzr532x8",
   phones: [

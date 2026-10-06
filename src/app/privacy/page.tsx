@@ -41,9 +41,9 @@ export default function PrivacyPage() {
 
       <Section title="Who we are">
         <p>
-          {site.name} is operated by {site.operatorLegalName}, registration
-          number {site.operatorRegistrationNumber}, registered office{" "}
-          {site.operatorAddress}. We are the data controller for the information
+          {site.name} is operated by {site.legalName}, registration
+          number {site.registrationNumber}, registered office{" "}
+          {site.registeredAddress}. We are the data controller for the information
           described here. The villas themselves are at {site.address}.
         </p>
         <p>
