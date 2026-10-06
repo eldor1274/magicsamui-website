@@ -64,7 +64,7 @@ test("postReservation: v1.3, form body, auth + property headers, the exact field
   assert.equal(h.has("x-msv-mock-expected-total"), false, "the mock hint never reaches the real API");
   const body = new URLSearchParams(String(c.init.body));
   assert.equal(body.get("thirdPartyIdentifier"), HOLD.ref);
-  assert.equal(body.get("sendEmailConfirmation"), "false");
+  assert.equal(body.get("sendEmailConfirmation"), "0");
   assert.equal(body.get("rooms[0][roomRateID]"), "r-1");
   assert.equal(body.has("rooms[1][roomRateID]"), false);
   assert.equal(body.get("adults[1][quantity]"), "1");
@@ -146,7 +146,7 @@ test("satang <-> baht ONLY at the Cloudbeds boundary: exact strings out, numbers
   const pay = new URLSearchParams(String(s.calls[0].init.body));
   assert.equal(pay.get("amount"), "28350.00");
   assert.equal(pay.get("type"), "stripe");
-  assert.equal(pay.get("isDeposit"), "false");
+  assert.equal(pay.get("isDeposit"), "0");
   const item = new URLSearchParams(String(s.calls[1].init.body));
   assert.equal(item.get("items[0][itemPrice]"), "1350.00");
   assert.equal(item.get("referenceID"), "MSV-x-fee");
@@ -187,7 +187,7 @@ test("status changes use putReservation with the right spelling and email flag",
   await w.markPending("42");
   const bodies = s.calls.map((c) => new URLSearchParams(String(c.init.body)));
   assert.deepEqual(bodies.map((b) => b.get("status")), ["confirmed", "canceled", "not_confirmed"]);
-  assert.deepEqual(bodies.map((b) => b.get("sendStatusChangeEmail")), ["true", "false", "false"]);
+  assert.deepEqual(bodies.map((b) => b.get("sendStatusChangeEmail")), ["1", "0", "0"]);
   assert.ok(s.calls.every((c) => c.init.method === "PUT"));
 });
 

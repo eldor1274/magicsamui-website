@@ -234,6 +234,16 @@ type FormInput = Record<string, FormValue | FormValue[] | Record<string, FormVal
  * Form-encodes Cloudbeds style: arrays of objects become rooms[0][roomTypeID]=..,
  * null/undefined fields are left out.
  */
+/**
+ * A form value as Cloudbeds reads it. Booleans go as "1"/"0": Stage B (2026-10-07) showed
+ * sendStatusChangeEmail=false (sent as the word "false") still emailed the guest, i.e. Cloudbeds
+ * reads any non-empty word as true. "0" is false however the value is parsed.
+ */
+function formText(value: string | number | boolean): string {
+  if (typeof value === "boolean") return value ? "1" : "0";
+  return String(value);
+}
+
 export function toCloudbedsForm(input: FormInput): URLSearchParams {
   const out = new URLSearchParams();
   for (const [key, value] of Object.entries(input)) {
@@ -242,15 +252,15 @@ export function toCloudbedsForm(input: FormInput): URLSearchParams {
       value.forEach((item, i) => {
         if (item !== null && typeof item === "object") {
           for (const [k, v] of Object.entries(item)) {
-            if (v !== null && v !== undefined) out.append(`${key}[${i}][${k}]`, String(v));
+            if (v !== null && v !== undefined) out.append(`${key}[${i}][${k}]`, formText(v as string | number | boolean));
           }
         } else if (item !== null && item !== undefined) {
-          out.append(`${key}[${i}]`, String(item));
+          out.append(`${key}[${i}]`, formText(item));
         }
       });
       continue;
     }
-    out.append(key, String(value));
+    out.append(key, formText(value));
   }
   return out;
 }

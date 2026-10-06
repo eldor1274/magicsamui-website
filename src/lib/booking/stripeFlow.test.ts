@@ -36,7 +36,7 @@ test("checkout holds first: Cloudbeds reservation (pending, MSV ref, no email) t
   assert.equal(post.params["children[0][quantity]"], "0");
   // Outside live the identifier is tagged, so a live sweeper never touches a test hold (and staff can tell them apart).
   assert.equal(post.params.thirdPartyIdentifier, `${body.ref}-TEST`);
-  assert.equal(post.params.sendEmailConfirmation, "false");
+  assert.equal(post.params.sendEmailConfirmation, "0");
   assert.equal(post.params.guestEmail, TEST_EMAIL);
   assert.equal(post.params.guestZip, "84320");
   assert.equal(post.params.guestPhone, "+66 952466011");
