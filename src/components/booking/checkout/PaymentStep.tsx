@@ -484,12 +484,12 @@ export default function PaymentStep({
             <div>
               <dt className="text-(--bk-text-subtle)">Check-in</dt>
               <dd className="font-medium text-(--bk-text)">{formatDisplayDateWithWeekday(checkIn)}</dd>
-              <dd className="text-xs text-(--bk-text-muted)">From 3:00 PM</dd>
+              <dd className="text-xs text-(--bk-text-muted)">From {HOUSE_POLICIES.checkInTime}</dd>
             </div>
             <div>
               <dt className="text-(--bk-text-subtle)">Check-out</dt>
               <dd className="font-medium text-(--bk-text)">{formatDisplayDateWithWeekday(checkOut)}</dd>
-              <dd className="text-xs text-(--bk-text-muted)">By 11:00 AM</dd>
+              <dd className="text-xs text-(--bk-text-muted)">By {HOUSE_POLICIES.checkOutTime}</dd>
             </div>
           </dl>
           <p className="mt-2 text-sm text-(--bk-text-muted)">{formatNights(quote.nights)}</p>

@@ -150,8 +150,15 @@ export interface BookingConfig {
   promoPct: number;
   ratePlans: RatePlanId[];
   addonsEnabled: boolean;
-  /** Custom Cloudbeds payment method code used by postPayment (created once in Cloudbeds as "Stripe"). */
-  cloudbedsPaymentMethod: string;
+  /**
+   * postPayment `type`: the exact `method` value of the property's custom Stripe payment method
+   * (see resolveCloudbedsPaymentMethod). null = not usable: checkouts with real Cloudbeds writes are refused.
+   */
+  cloudbedsPaymentMethod: string | null;
+  /** Why cloudbedsPaymentMethod is null (names the env var); null when it is usable. */
+  cloudbedsPaymentMethodProblem: string | null;
+  /** postReservation sourceID (CLOUDBEDS_SOURCE_ID, a fee-free primary source); null = Cloudbeds' default source. */
+  cloudbedsSourceId: string | null;
   /** postReservation paymentMethod for the hold. */
   reservationPaymentMethod: ReservationPaymentMethod;
   /** putReservation sendStatusChangeEmail on confirm (Stage B test 12 decides). */
@@ -400,6 +407,72 @@ function depositFor(env: Env, provider: PaymentProvider): number {
   return provider === "stripe" ? 100 : parsePct(env.BOOKING_DEPOSIT_PCT, 100, 1, 100);
 }
 
+/**
+ * Cloudbeds' built-in payment methods (getPaymentMethods `method` and `code` values). Stripe money
+ * recorded under one of them would be filed as cash, PayPal, a transfer...; "credit" also needs a
+ * cardType, so postPayment would refuse it. Only the property's own custom method is accepted.
+ */
+const BUILT_IN_PAYMENT_METHODS = new Set(["credit", "cards", "cash", "bank_transfer", "ebanking", "pay_pal", "debit", "check", "check_true", "bill"]);
+/** 1-64 characters, no whitespace, no control or invisible format characters (custom codes carry punctuation, e.g. "Stripe(website)"). */
+const PAYMENT_METHOD_RE = /^[^\s\p{Cc}\p{Cf}]{1,64}$/u;
+const COPY_METHOD_HINT =
+  "Copy the exact 'method' value that scripts/cloudbeds-wi0-check.mjs prints for the custom Stripe payment method (case included) and redeploy.";
+
+/**
+ * postPayment `type` for Stripe money. stripe-live: CLOUDBEDS_STRIPE_PAYMENT_METHOD only. Otherwise
+ * CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD when set (an invalid one is a problem: it never falls through to
+ * the live method), else CLOUDBEDS_STRIPE_PAYMENT_METHOD. The value is kept exactly (case included);
+ * there is no default. An unusable value is reported as `problem`, never thrown, so fulfilment,
+ * release and the sweeper keep loading the config; checkout refuses instead (stripeCheckout.ts).
+ * Deliberately NOT a live-lock condition: stripeLiveBlockers also gates the fulfilment and drain
+ * configs, and holds must still be released while the value is fixed. Method values are not secrets.
+ */
+export function resolveCloudbedsPaymentMethod(env: Env, paymentMode: PaymentMode): { method: string | null; problem: string | null } {
+  const name =
+    paymentMode !== "stripe-live" && trimmed(env.CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD) !== ""
+      ? "CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD"
+      : "CLOUDBEDS_STRIPE_PAYMENT_METHOD";
+  const value = trimmed(env[name]);
+  if (value === "") return { method: null, problem: `${name} is not set, so Stripe payments can't be recorded in Cloudbeds. ${COPY_METHOD_HINT}` };
+  const shown = JSON.stringify(value.slice(0, 80));
+  if (!PAYMENT_METHOD_RE.test(value)) {
+    return { method: null, problem: `${name} ${shown} is not a Cloudbeds payment method value (1-64 characters, no spaces). ${COPY_METHOD_HINT}` };
+  }
+  if (BUILT_IN_PAYMENT_METHODS.has(value.toLowerCase())) {
+    return {
+      method: null,
+      problem: `${name} ${shown} is a Cloudbeds built-in method: Stripe money must be recorded under the property's own custom Stripe method. ${COPY_METHOD_HINT}`,
+    };
+  }
+  return { method: value, problem: null };
+}
+
+/** A PRIMARY source id: s-{id} (v1.3 spec) or s-{id}-1 (Reservation FAQ). Never a third-party ss- source. */
+const SOURCE_ID_RE = /^s-\d{1,12}(-1)?$/;
+
+const warnedConfig = new Set<string>();
+
+/** An optional value that is set but unusable: logged once per process, by NAME only (never the value). */
+function configWarning(name: string, reason: string): void {
+  if (warnedConfig.has(name)) return;
+  warnedConfig.add(name);
+  console.warn("[booking] config_warning", JSON.stringify({ name, reason }));
+}
+
+/**
+ * postReservation sourceID: a primary source the owner created for the own booking page with NO
+ * taxes or fees (Cloudbeds applies taxes/fees per source). null = unset or unusable: Cloudbeds then
+ * files the hold under its default "Website / Booking engine" source, whose fees make the price
+ * check refuse the hold. Not a live-lock condition.
+ */
+export function resolveCloudbedsSourceId(env: Env): string | null {
+  const raw = trimmed(env.CLOUDBEDS_SOURCE_ID);
+  if (raw === "") return null;
+  if (SOURCE_ID_RE.test(raw)) return raw;
+  configWarning("CLOUDBEDS_SOURCE_ID", "not a primary source id (s-<number> or s-<number>-1): ignored, holds get Cloudbeds' default source");
+  return null;
+}
+
 const STRIPE_METHOD_TYPES_DEFAULT = ["card", "promptpay"];
 
 function allowedMethodTypes(env: Env): string[] | null {
@@ -498,10 +571,8 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
   const testGuardEmail = trimmed(env.BOOKING_TEST_GUEST_EMAIL).toLowerCase();
   const testAccessKey = trimmed(env.BOOKING_TEST_ACCESS_KEY);
   const reservationMethod = trimmed(env.CLOUDBEDS_RESERVATION_PAYMENT_METHOD) as ReservationPaymentMethod;
-  const methodCode = (v: string | undefined) => (/^[A-Za-z0-9_-]{1,40}$/.test(trimmed(v)) ? trimmed(v) : null);
-  // Outside live, CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD (e.g. a "Stripe TEST" method) keeps test money out of the real one.
-  const paymentMethodCode =
-    (paymentMode !== "stripe-live" ? methodCode(env.CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD) : null) ?? methodCode(env.CLOUDBEDS_STRIPE_PAYMENT_METHOD) ?? "stripe";
+  // Outside live, CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD (a separate test method) keeps test money out of the real one.
+  const paymentMethod = resolveCloudbedsPaymentMethod(env, paymentMode);
   const zip = trimmed(env.BOOKING_GUEST_ZIP_PLACEHOLDER);
   const alertEmail = trimmed(env.BOOKING_ALERT_EMAIL);
 
@@ -530,7 +601,9 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
     promoPct: promoPctFor(env, paymentMode),
     ratePlans: ratePlansFor(provider),
     addonsEnabled: provider !== "stripe",
-    cloudbedsPaymentMethod: paymentMethodCode,
+    cloudbedsPaymentMethod: paymentMethod.method,
+    cloudbedsPaymentMethodProblem: paymentMethod.problem,
+    cloudbedsSourceId: resolveCloudbedsSourceId(env),
     reservationPaymentMethod: RESERVATION_PAYMENT_METHODS.includes(reservationMethod) ? reservationMethod : "credit",
     sendCloudbedsStatusEmail: env.CLOUDBEDS_SEND_STATUS_EMAIL === "true",
     guestZipPlaceholder: /^[A-Za-z0-9 -]{1,12}$/.test(zip) ? zip : DEFAULT_GUEST_ZIP_PLACEHOLDER,

@@ -62,6 +62,8 @@ export interface HoldInput {
   estimatedArrivalTime: string | null;
   /** postReservation paymentMethod enum value. */
   paymentMethod: "cash" | "credit" | "ebanking" | "pay_pal";
+  /** postReservation sourceID (config.cloudbedsSourceId); null/absent = not sent (Cloudbeds' default source). */
+  sourceId?: string | null;
   /**
    * The room subtotal we quoted (satang). Never sent to the real Cloudbeds;
    * only the mock writer passes it to the in-repo fake, which prices the hold
@@ -79,6 +81,8 @@ export interface HoldResult {
    * cancels the hold at once if it still can't be read).
    */
   grandTotalSatang: number | null;
+  /** The response's dateCreated as Cloudbeds sent it (no zone; logged to calibrate Cloudbeds' clock), or null. */
+  dateCreated: string | null;
 }
 
 export interface ReservationInfo {
@@ -91,7 +95,14 @@ export interface ReservationInfo {
    * that would post a payment or cancel a hold must treat null with caution.
    */
   paidSatang: number | null;
+  /** balanceDetailed: the rooms, additional items (e.g. our fee line) and Cloudbeds' taxes/fees; null = unreadable. */
+  subTotalSatang: number | null;
+  additionalItemsSatang: number | null;
+  taxesFeesSatang: number | null;
   thirdPartyIdentifier: string | null;
+  /** The reservation source's name and id (e.g. "s-41" or "s-41-1"; the format is not documented), or null. */
+  source: string | null;
+  sourceId: string | null;
 }
 
 export interface ListedReservation {
@@ -130,7 +141,7 @@ export interface CloudbedsWriter {
   readonly mode: "live" | "mock";
   createHold(input: HoldInput): Promise<HoldResult>;
   getReservation(reservationId: string): Promise<ReservationInfo>;
-  /** postPayment with the custom payment method (e.g. "stripe"). Returns the Cloudbeds paymentID. */
+  /** postPayment with the custom payment method (its exact `method` value, e.g. "Stripe(website)"). Returns the Cloudbeds paymentID. */
   recordPayment(input: { reservationId: string; amountSatang: number; method: string; description: string }): Promise<{ paymentId: string | null }>;
   /**
    * postCustomItem; referenceID makes Cloudbeds refuse a duplicate. Cloudbeds
@@ -252,12 +263,18 @@ function asRecord(v: unknown): Record<string, unknown> | null {
 
 /**
  * balanceDetailed is an object OR an array of objects (v1.3 schema: oneOf).
- * Sums `paid` and `grandTotal` over the entries; a figure is null unless every
- * entry carries it readably.
+ * Sums each figure over the entries (grandTotal = subTotal + additionalItems +
+ * taxesFees per the spec); a figure is null unless every entry carries it readably.
  */
-export function readBalanceDetailed(v: unknown): { paid: number | null; grandTotal: number | null } {
+export function readBalanceDetailed(v: unknown): {
+  paid: number | null;
+  grandTotal: number | null;
+  subTotal: number | null;
+  additionalItems: number | null;
+  taxesFees: number | null;
+} {
   const entries = Array.isArray(v) ? v.map(asRecord) : [asRecord(v)];
-  if (entries.length === 0 || entries.some((e) => e === null)) return { paid: null, grandTotal: null };
+  if (entries.length === 0 || entries.some((e) => e === null)) return { paid: null, grandTotal: null, subTotal: null, additionalItems: null, taxesFees: null };
   const sum = (field: string): number | null => {
     let total = 0;
     for (const e of entries) {
@@ -267,7 +284,7 @@ export function readBalanceDetailed(v: unknown): { paid: number | null; grandTot
     }
     return total;
   };
-  return { paid: sum("paid"), grandTotal: sum("grandTotal") };
+  return { paid: sum("paid"), grandTotal: sum("grandTotal"), subTotal: sum("subTotal"), additionalItems: sum("additionalItems"), taxesFees: sum("taxesFees") };
 }
 
 function str(v: unknown): string | null {
@@ -414,6 +431,7 @@ export function createCloudbedsWriter(options: CloudbedsWriterOptions): Cloudbed
         adults: input.rooms.map((r) => ({ roomTypeID: r.roomTypeId, quantity: r.adults })),
         children: input.rooms.map((r) => ({ roomTypeID: r.roomTypeId, quantity: 0 })),
         paymentMethod: input.paymentMethod,
+        sourceID: input.sourceId ?? null,
         thirdPartyIdentifier: input.identifier ?? input.ref,
         sendEmailConfirmation: false,
         estimatedArrivalTime: input.estimatedArrivalTime,
@@ -426,7 +444,12 @@ export function createCloudbedsWriter(options: CloudbedsWriterOptions): Cloudbed
         throw new CloudbedsWriteError("postReservation", "invalid_response", "missing reservationID", 200, null, true);
       }
       // A usable id without a readable total is returned as such: the caller can still cancel it right away.
-      return { reservationId, status: str(json.status) ?? "unknown", grandTotalSatang: cloudbedsMoneyToSatang(json.grandTotal) };
+      return {
+        reservationId,
+        status: str(json.status) ?? "unknown",
+        grandTotalSatang: cloudbedsMoneyToSatang(json.grandTotal),
+        dateCreated: str(json.dateCreated)?.slice(0, 40) ?? null,
+      };
     },
 
     async getReservation(reservationId) {
@@ -443,7 +466,12 @@ export function createCloudbedsWriter(options: CloudbedsWriterOptions): Cloudbed
         balanceSatang,
         // Unreadable "paid": derive it from total - balance when both are known, else UNKNOWN (null), never 0.
         paidSatang: detailed.paid ?? (grandTotalSatang !== null && balanceSatang !== null ? grandTotalSatang - balanceSatang : null),
+        subTotalSatang: detailed.subTotal,
+        additionalItemsSatang: detailed.additionalItems,
+        taxesFeesSatang: detailed.taxesFees,
         thirdPartyIdentifier: str(data.thirdPartyIdentifier),
+        source: str(data.source)?.slice(0, 80) ?? null,
+        sourceId: str(data.sourceID)?.slice(0, 40) ?? null,
       };
     },
 

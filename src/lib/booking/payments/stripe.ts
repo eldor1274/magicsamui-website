@@ -6,7 +6,8 @@
 //   replaced payment_method_types); Apple Pay / Google Pay come via card.
 //   A Thai Stripe account takes Visa and Mastercard only.
 // - client_reference_id = MSV ref; metadata (and payment_intent_data.metadata)
-//   carry the ref, the Cloudbeds reservationID and amounts - NO personal data.
+//   carry the ref, the Cloudbeds reservationID, amounts and yes/no guest
+//   flags (late arrival, requests entered, note saved) - NO personal data.
 // - customer_email = the guest's email (Stripe receipt), submit_type=book,
 //   expires_at = now + 30 min (+1 min clock margin; Stripe's minimum is 30),
 //   locale auto, Adaptive Pricing off (always THB), one idempotency key per
@@ -62,11 +63,20 @@ export interface SessionMeta {
   checkIn: string;
   checkOut: string;
   mode: string;
+  /**
+   * Yes/no guest flags (NEVER the request text or other personal data): arrival after midnight,
+   * special requests entered, and whether the pre-payment Cloudbeds note carrying them was saved.
+   * null/absent = unknown (sessions created before the flags existed): nothing is done on them.
+   */
+  arrivalLate?: boolean | null;
+  hasRequests?: boolean | null;
+  noteSaved?: boolean | null;
 }
 
 const META_PREFIX = "msv_";
 
 export function sessionMetadata(m: SessionMeta): Record<string, string> {
+  const flags = { msv_arrival_late: m.arrivalLate, msv_has_requests: m.hasRequests, msv_note_saved: m.noteSaved };
   return {
     msv_ref: m.ref,
     msv_cb_reservation_id: m.reservationId,
@@ -76,6 +86,7 @@ export function sessionMetadata(m: SessionMeta): Record<string, string> {
     msv_checkin: m.checkIn,
     msv_checkout: m.checkOut,
     msv_mode: m.mode,
+    ...Object.fromEntries(Object.entries(flags).flatMap(([k, v]) => (typeof v === "boolean" ? [[k, v ? "1" : "0"]] : []))),
   };
 }
 
@@ -88,6 +99,7 @@ const REF_RE = /^MSV-\d{8}-[A-HJ-NP-Z2-9]{4}$/;
 export function parseSessionMeta(session: Pick<CheckoutSession, "metadata" | "client_reference_id">): SessionMeta | null {
   const md = session.metadata ?? {};
   const int = (v: unknown) => (typeof v === "string" && /^\d{1,12}$/.test(v) ? Number(v) : NaN);
+  const flag = (v: unknown) => (v === "1" ? true : v === "0" ? false : null);
   const ref = md[`${META_PREFIX}ref`];
   const reservationId = md[`${META_PREFIX}cb_reservation_id`];
   const m: SessionMeta = {
@@ -99,6 +111,9 @@ export function parseSessionMeta(session: Pick<CheckoutSession, "metadata" | "cl
     checkIn: String(md.msv_checkin ?? ""),
     checkOut: String(md.msv_checkout ?? ""),
     mode: String(md.msv_mode ?? ""),
+    arrivalLate: flag(md.msv_arrival_late),
+    hasRequests: flag(md.msv_has_requests),
+    noteSaved: flag(md.msv_note_saved),
   };
   if (!REF_RE.test(m.ref) || session.client_reference_id !== m.ref) return null;
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(m.reservationId)) return null;
@@ -123,6 +138,8 @@ export interface SessionInput {
   allowedPaymentMethodTypes: string[] | null;
   merchantName: string;
   mode: string;
+  /** Yes/no guest flags for fulfilment (see SessionMeta); never the request text. */
+  guestFlags?: { arrivalLate: boolean; hasRequests: boolean; noteSaved: boolean };
 }
 
 /**
@@ -175,6 +192,7 @@ export function buildCheckoutSessionParams(input: SessionInput): Stripe.Checkout
     checkIn: quote.checkIn,
     checkOut: quote.checkOut,
     mode: input.mode,
+    ...input.guestFlags,
   });
   return {
     mode: "payment",

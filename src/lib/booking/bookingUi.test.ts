@@ -232,7 +232,7 @@ test("restriction refusals are recognised (so the page names the rule), sales ar
   for (const reason of ["closed_to_arrival", "closed_to_departure", "min_stay", "max_stay"]) {
     assert.equal(isRestrictionMessage(RESTRICTION_MESSAGES[reason](name, 3)), true, reason);
   }
-  for (const reason of ["blocked", "sold_out"]) assert.equal(isRestrictionMessage(RESTRICTION_MESSAGES[reason](name)), false, reason);
+  for (const reason of ["blocked", "sold_out", "derived_rate"]) assert.equal(isRestrictionMessage(RESTRICTION_MESSAGES[reason](name)), false, reason);
   assert.equal(isRestrictionMessage("Sorry - a room in your reservation was just booked by someone else. Please choose again."), false);
   assert.equal(isRestrictionMessage(undefined), false);
 });

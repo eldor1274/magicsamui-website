@@ -42,6 +42,8 @@ export const STRIPE_TEST_ENV: Env = {
   CLOUDBEDS_PROPERTY_ID: "235064",
   BOOKING_TEST_GUEST_EMAIL: TEST_EMAIL,
   BOOKING_TEST_ACCESS_KEY: TEST_ACCESS_KEY,
+  // The owner's custom Cloudbeds method, exactly as getPaymentMethods lists it (the fake's postPayment refuses others).
+  CLOUDBEDS_STRIPE_PAYMENT_METHOD: "Stripe(website)",
   // Real Cloudbeds writes need the shared lock (the kit itself uses an in-memory store).
   UPSTASH_REDIS_REST_URL: "https://example-redis.upstash.io",
   UPSTASH_REDIS_REST_TOKEN: "token-testkit",

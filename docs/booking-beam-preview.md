@@ -264,8 +264,8 @@ Personal data shown or typed on screen (the whole guest details form, lead guest
 - How does `postReservation` behave at zero availability?
 - Do `not_confirmed` reservations block OTA inventory?
 - Does getAvailableRoomTypes already enforce min-stay and closed-to-arrival restrictions?
-- What is the room type id for tuxedo-3br?
-- Do the combination room types share inventory inside Cloudbeds?
+- What is the room type id for tuxedo-3br? **Answered (WI-0, 2026-10-06):** none was returned by `getRoomTypes`, so it stays enquiry-only; see `docs/booking-engine.md` section 3, row 4.
+- Do the combination room types share inventory inside Cloudbeds? Consistent with it on 2026-10-06, not yet proven: see `docs/booking-engine.md` section 3, row 3 (and Stage B tests 10 and 11).
 - What does the existing key's scope list contain?
 - Is there a safe test property?
 

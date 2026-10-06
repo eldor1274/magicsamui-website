@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CATALOGUE, cartConflict, getBookableRooms, hasUnitConflict, isBookableSlug, sharedUnits } from "./catalogue.ts";
+import { readFileSync } from "node:fs";
+import { CATALOGUE, HOUSE_POLICIES, ROOM_UNITS, cartConflict, getBookableRooms, hasUnitConflict, isBookableSlug, sharedUnits } from "./catalogue.ts";
 import { ROOM_TYPE_TO_SLUG } from "../../data/cloudbeds.ts";
 
 test("bookable rooms are exactly the 11 with a Cloudbeds room type", () => {
@@ -29,6 +30,25 @@ test("combination rooms conflict with the suites they contain", () => {
   assert.equal(hasUnitConflict(["tuxedo", "tuxedo-seaview-unit"]), false);
   assert.equal(hasUnitConflict(["honeymoon-suite", "sunrise-suite", "garden-suite", "seaview-2br"]), false);
   assert.equal(hasUnitConflict(["garden-suite", "garden-suite"]), true);
+});
+
+test("every room sold online occupies at least one physical unit (else it would skip the unit lock)", () => {
+  for (const slug of Object.values(ROOM_TYPE_TO_SLUG)) {
+    assert.ok((ROOM_UNITS[slug] ?? []).length > 0, slug);
+    assert.ok((CATALOGUE.find((r) => r.slug === slug)?.units ?? []).length > 0, slug);
+  }
+});
+
+test("booking UI copy for check-in/out times and children comes from HOUSE_POLICIES", () => {
+  assert.equal(HOUSE_POLICIES.checkIn, `Check-in from ${HOUSE_POLICIES.checkInTime}`);
+  assert.equal(HOUSE_POLICIES.checkOut, `Check-out by ${HOUSE_POLICIES.checkOutTime}`);
+  const source = (path: string) => readFileSync(new URL(`../../components/booking/${path}`, import.meta.url), "utf8");
+  const occupancy = source("results/OccupancyPopover.tsx");
+  assert.ok(occupancy.includes("{HOUSE_POLICIES.children}"));
+  assert.ok(!occupancy.includes(HOUSE_POLICIES.children), "no hard-coded copy of the children rule");
+  const payment = source("checkout/PaymentStep.tsx");
+  assert.ok(payment.includes("From {HOUSE_POLICIES.checkInTime}") && payment.includes("By {HOUSE_POLICIES.checkOutTime}"));
+  assert.ok(!payment.includes(`From ${HOUSE_POLICIES.checkInTime}`) && !payment.includes(`By ${HOUSE_POLICIES.checkOutTime}`), "no hard-coded times");
 });
 
 test("cartConflict explains why a room can't be added", () => {

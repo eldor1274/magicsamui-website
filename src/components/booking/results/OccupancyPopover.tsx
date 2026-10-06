@@ -9,6 +9,7 @@
 
 import { useState } from "react";
 import type { RefObject } from "react";
+import { HOUSE_POLICIES } from "@/lib/booking/catalogue";
 import PickerOverlay, { PickerActions } from "../ui/PickerOverlay";
 import Stepper from "../ui/Stepper";
 import { BTN_OUTLINE, BTN_PRIMARY } from "../ui/styles";
@@ -72,7 +73,7 @@ function OccupancyPicker({ onClose, onConfirm, roomName, ratePlanName, maxAdults
         maxReachedLabel="Add guest, maximum occupancy reached"
         note={`Max: ${max} per room`}
       />
-      <p className="text-xs leading-relaxed text-(--bk-text-subtle)">Children are not accommodated - all guests are counted as adults.</p>
+      <p className="text-xs leading-relaxed text-(--bk-text-subtle)">{HOUSE_POLICIES.children}</p>
     </PickerOverlay>
   );
 }

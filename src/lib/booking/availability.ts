@@ -8,6 +8,7 @@ import { demoInventory } from "./demoProvider.ts";
 import { logEvent } from "./routeUtils.ts";
 import { buildRateOffers, occupancyExtraSatang } from "./quote.ts";
 import type { BookingConfig } from "./config.ts";
+import type { AlertFn } from "./stripeDeps.ts";
 import type { CartItemInput, DataSource, IsoDate, RatePlanId, RoomInventory, RoomOffer } from "./types.ts";
 
 /** Search answers from Cloudbeds are reused this long (per server instance). */
@@ -38,10 +39,61 @@ export interface InventoryOptions {
   cacheTtlMs?: number;
   /** How long a call may wait for the preview's Cloudbeds call budget (0 = refuse at once). */
   budgetWaitMs?: number;
+  /** Clock for the no-base-rate error window (tests). */
+  nowMs?: number;
+  /**
+   * Stripe search only: called with the error line `cloudbeds_no_base_rate_all`
+   * (same window) so the owner is alerted (alertNoBaseRateAll). Never fails the search.
+   * Without it (cart checks) neither the line nor the window is used: only a call
+   * that can alert the owner may take the window.
+   */
+  onNoBaseRateAll?: (slugs: string[]) => void | Promise<void>;
 }
 
 /** Checkout waits this long, at most, for the Cloudbeds call budget before refusing. */
 export const CHECKOUT_BUDGET_WAIT_MS = 3_000;
+
+/** At most one cloudbeds_no_base_rate_all error line per server instance in this window. */
+export const NO_BASE_RATE_ERROR_WINDOW_MS = 15 * 60_000;
+let lastNoBaseRateErrorMs: number | null = null;
+
+/**
+ * Stripe sells the base (BAR) row only: when Cloudbeds offered rooms but NONE
+ * of them had a base row, the page shows every room sold out and no booking
+ * can be made. An error-level line with its own tag, at most once per instance
+ * per window, plus the search's owner alert (onNoBaseRateAll) in the same window.
+ */
+async function noteNoBaseRateAll(
+  slugs: string[],
+  checkIn: IsoDate,
+  checkOut: IsoDate,
+  nowMs: number,
+  onAll: NonNullable<InventoryOptions["onNoBaseRateAll"]>,
+): Promise<void> {
+  if (lastNoBaseRateErrorMs !== null && nowMs - lastNoBaseRateErrorMs < NO_BASE_RATE_ERROR_WINDOW_MS) return;
+  lastNoBaseRateErrorMs = nowMs;
+  console.error(
+    "[booking] cloudbeds_no_base_rate_all",
+    JSON.stringify({ message: "Online search shows every room sold out: Cloudbeds returned no base-rate row", slugs, checkIn, checkOut }),
+  );
+  try {
+    await onAll(slugs);
+  } catch {
+    // Best effort only: the error line above stays the signal.
+  }
+}
+
+/** The owner's alert behind onNoBaseRateAll (Stripe search). No guest data: room slugs and dates only. */
+export async function alertNoBaseRateAll(alert: AlertFn, slugs: string[], checkIn: IsoDate, checkOut: IsoDate): Promise<void> {
+  await alert(
+    "Online bookings stopped: Cloudbeds returned no base rate for any room",
+    [
+      `A search for ${checkIn} to ${checkOut} showed every room sold out: Cloudbeds offered ${slugs.join(", ")}, but none of them on the base (BAR) rate, the only rate the own booking page sells. Guests can't book online while this lasts.`,
+      "Check in Cloudbeds that getAvailableRoomTypes still returns each room type's base rate as a non-derived row named \"default\" (scripts/cloudbeds-wi0-check.mjs section 3). Guests can still book on /booking/classic or WhatsApp.",
+    ],
+    { key: "no-base-rate-all", severity: "warning" },
+  );
+}
 
 /** Live availability could not be confirmed and demo data is not allowed to stand in. */
 export class InventoryUnavailableError extends Error {
@@ -59,6 +111,7 @@ export async function getInventory(
 ): Promise<InventoryResult> {
   if (config.dataSource === "cloudbeds" && config.cloudbeds) {
     try {
+      const noBaseRate: string[] = [];
       const inventory = await cloudbedsInventory(checkIn, checkOut, {
         apiKey: config.cloudbeds.apiKey,
         propertyId: config.cloudbeds.propertyId,
@@ -68,8 +121,15 @@ export async function getInventory(
         budgetWaitMs: options.budgetWaitMs,
         baseRateOnly: config.cloudbeds.baseRateOnly === true,
         // Stripe sells the base (BAR) row only: a room type offered only on another plan is shown as unavailable.
-        onNoBaseRate: (slug) => logEvent("cloudbeds_no_base_rate", { slug, checkIn, checkOut }),
+        onNoBaseRate: (slug) => {
+          noBaseRate.push(slug);
+          logEvent("cloudbeds_no_base_rate", { slug, checkIn, checkOut });
+        },
       });
+      // Search only: a cart check (no alert to send, and at a gate party size "every room" may be wrong) must not take the window.
+      if (options.onNoBaseRateAll && noBaseRate.length > 0 && !inventory.some((i) => i.available)) {
+        await noteNoBaseRateAll(noBaseRate, checkIn, checkOut, options.nowMs ?? Date.now(), options.onNoBaseRateAll);
+      }
       return { inventory, dataSource: "cloudbeds" };
     } catch (error) {
       if (options.allowDemoFallback === false) throw new InventoryUnavailableError(error);
@@ -118,7 +178,7 @@ export async function getCartInventory(
   checkOut: IsoDate,
   items: CartItemInput[],
   config: Pick<BookingConfig, "dataSource" | "cloudbeds">,
-  options: Omit<InventoryOptions, "adults" | "cacheTtlMs"> & { onOccupancyPricing?: (note: OccupancyPricingNote) => void } = {},
+  options: Omit<InventoryOptions, "adults" | "cacheTtlMs" | "onNoBaseRateAll"> & { onOccupancyPricing?: (note: OccupancyPricingNote) => void } = {},
 ): Promise<InventoryResult> {
   const { onOccupancyPricing, ...inventoryOptions } = options;
   const gateSizes = config.dataSource === "cloudbeds" ? [...new Set(items.map((i) => i.adults))].filter((a) => a !== 1).sort((a, b) => a - b) : [];

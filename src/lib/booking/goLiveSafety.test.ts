@@ -216,11 +216,12 @@ test("after an unclear postPayment, a folio whose paid amount can't be read goes
 /* ---------------------------- folio figures ---------------------------- */
 
 test("balanceDetailed as an object OR an array (v1.3 oneOf); an unreadable paid figure is unknown, never 0", async () => {
-  assert.deepEqual(readBalanceDetailed({ paid: "100.00", grandTotal: 300 }), { paid: 10_000, grandTotal: 30_000 });
-  assert.deepEqual(readBalanceDetailed([{ paid: "100.00", grandTotal: 300 }, { paid: 50, grandTotal: "200.50" }]), { paid: 15_000, grandTotal: 50_050 });
-  assert.deepEqual(readBalanceDetailed([{ paid: 1 }, { grandTotal: 2 }]), { paid: null, grandTotal: null });
-  assert.deepEqual(readBalanceDetailed(undefined), { paid: null, grandTotal: null });
-  assert.deepEqual(readBalanceDetailed([]), { paid: null, grandTotal: null });
+  const none = { subTotal: null, additionalItems: null, taxesFees: null };
+  assert.deepEqual(readBalanceDetailed({ paid: "100.00", grandTotal: 300 }), { paid: 10_000, grandTotal: 30_000, ...none });
+  assert.deepEqual(readBalanceDetailed([{ paid: "100.00", grandTotal: 300 }, { paid: 50, grandTotal: "200.50" }]), { paid: 15_000, grandTotal: 50_050, ...none });
+  assert.deepEqual(readBalanceDetailed([{ paid: 1 }, { grandTotal: 2 }]), { paid: null, grandTotal: null, ...none });
+  assert.deepEqual(readBalanceDetailed(undefined), { paid: null, grandTotal: null, ...none });
+  assert.deepEqual(readBalanceDetailed([]), { paid: null, grandTotal: null, ...none });
 
   const answer = (data: unknown) => (async () => Response.json({ success: true, data })) as unknown as typeof fetch;
   const w = (data: unknown) => createCloudbedsWriter({ apiKey: "k", propertyId: "1", fetchImpl: answer(data), budget: null });

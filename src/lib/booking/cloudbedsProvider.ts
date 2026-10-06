@@ -20,6 +20,7 @@ import { ROOM_TYPE_TO_SLUG } from "../../data/cloudbeds.ts";
 import { getBookableRooms } from "./catalogue.ts";
 import { addDays, eachNight } from "./dates.ts";
 import { thbToSatang } from "./quote.ts";
+import { logEvent } from "./routeUtils.ts";
 import type { IsoDate, NightRate, RoomInventory } from "./types.ts";
 
 // v1.3: same read endpoints as v1.2 (which /api/rates still uses); v1.3 is
@@ -106,6 +107,8 @@ export interface CloudbedsDeps {
   baseRateOnly?: boolean;
   /** A room type had sellable rows but no base row (baseRateOnly): logged by the caller. */
   onNoBaseRate?: (slug: string) => void;
+  /** Log lines for odd but harmless answers (default logEvent). */
+  log?: (message: string, data?: Record<string, unknown>) => void;
 }
 
 /** Longest Retry-After honoured before the single 429 retry of a read. */
@@ -213,15 +216,26 @@ export function parseAdultsExtraCharge(raw: unknown, adultsIncluded: unknown): R
 }
 
 /**
+ * The base (BAR) rate's public plan name: getAvailableRoomTypes sends the
+ * string "default" (live, 2026-10-06), getRatePlans sends null for the same
+ * rate. Absent, empty or "default" (any case, trimmed) = base.
+ */
+export function isBasePlanName(v: unknown): boolean {
+  if (v === null || v === undefined) return true;
+  return typeof v === "string" && ["", "default"].includes(v.trim().toLowerCase());
+}
+
+/**
  * Which row to sell when Cloudbeds returns several for one room type:
- * 2 = base rate (no plan name, not derived) - what the live site sells;
- * 1 = a non-derived plan row; 0 = a derived row (e.g. non-refundable, promo).
+ * 2 = base rate (not derived, plan name absent/""/"default") - what the live
+ * site sells; 1 = a non-derived row with another plan name (e.g. "Long stay");
+ * 0 = a derived row (derivedType set: Breakfast package, non-refundable, promo).
  * A higher tier always wins; within a tier the cheaper row wins. So a cheaper
  * derived row can never undercut the base row, whatever the row order.
  */
 function rowTier(row: CbRoom): number {
   if (row.derivedType) return 0;
-  return row.ratePlanNamePublic ? 1 : 2;
+  return isBasePlanName(row.ratePlanNamePublic) ? 2 : 1;
 }
 
 function stayTotal(nightly: NightRate[]): number {
@@ -230,15 +244,23 @@ function stayTotal(nightly: NightRate[]): number {
 
 export interface ParseOptions {
   /**
-   * Sell ONLY the base (BAR) row - Stripe modes, where the guest pays for the
-   * "Standard Rate - Room only" under the house policy and the hold is made on
-   * the row's roomRateID. A room type that comes back with only derived or
-   * named-plan rows (package, long stay, non-refundable...) is then unavailable
-   * instead of being sold as another plan under the Standard label.
+   * Sell ONLY the base (BAR) row (tier 2: not derived, plan name absent, ""
+   * or "default") - Stripe modes, where the guest pays for the
+   * "Standard Rate - Room only" under the house policy and the hold is made
+   * on the row's roomRateID. A room type that comes back with only derived or
+   * other-plan rows (Breakfast package, long stay, non-refundable...) is then
+   * unavailable instead of being sold as another plan under the Standard label.
    */
   baseRateOnly?: boolean;
   /** Called with each room type that had sellable rows but no base row (baseRateOnly). */
   onNoBaseRate?: (slug: string) => void;
+  /** Odd but harmless answers (e.g. no propertyCurrency): logged, never refused. */
+  log?: (message: string, data?: Record<string, unknown>) => void;
+}
+
+/** propertyCurrency's code: an array per the spec, a single object live (2026-10-06). */
+function currencyCode(raw: unknown): unknown {
+  return asRecord(Array.isArray(raw) ? raw[0] : raw)?.currencyCode;
 }
 
 /** Pure parser for a getAvailableRoomTypes response (exported for tests). */
@@ -255,10 +277,10 @@ export function parseAvailableRoomTypes(json: unknown, checkIn: IsoDate, checkOu
   for (const p of properties) {
     const prop = asRecord(p);
     if (!prop) continue;
-    const currency = Array.isArray(prop.propertyCurrency) ? asRecord(prop.propertyCurrency[0])?.currencyCode : undefined;
-    if (currency !== undefined && currency !== "THB") {
-      throw new CloudbedsError(`Unexpected property currency ${String(currency)}`);
-    }
+    const currency = currencyCode(prop.propertyCurrency);
+    // Rates are read as THB: another currency refuses the answer; a missing one is only logged.
+    if (currency === undefined || currency === null) options.log?.("cloudbeds_currency_missing", { propertyID: String(prop.propertyID ?? "") });
+    else if (currency !== "THB") throw new CloudbedsError(`Unexpected property currency ${String(currency)}`);
     const rows = Array.isArray(prop.propertyRooms) ? (prop.propertyRooms as CbRoom[]) : [];
     for (const row of rows) {
       const slug = ROOM_TYPE_TO_SLUG[String(row.roomTypeID ?? "")];
@@ -332,7 +354,11 @@ export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, de
 
   const res = await readCall(url, { headers: cloudbedsReadHeaders(deps.apiKey, deps.propertyId), cache: "no-store" }, deps, budget ?? null);
   if (!res.ok) throw new CloudbedsError(`getAvailableRoomTypes HTTP ${res.status}`);
-  const inventory = parseAvailableRoomTypes(await res.json(), checkIn, checkOut, { baseRateOnly: deps.baseRateOnly, onNoBaseRate: deps.onNoBaseRate });
+  const inventory = parseAvailableRoomTypes(await res.json(), checkIn, checkOut, {
+    baseRateOnly: deps.baseRateOnly,
+    onNoBaseRate: deps.onNoBaseRate,
+    log: deps.log ?? logEvent,
+  });
 
   if (ttl > 0) {
     if (searchCache.size >= CACHE_MAX_ENTRIES) {
@@ -351,9 +377,14 @@ export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, de
 
 /* --------------------------- restrictions ---------------------------- */
 
-export type RestrictionResult =
+/**
+ * `derived`: the row checked (the sold rateId's) is a DERIVED plan in getRatePlans. The Stripe
+ * checkout refuses it whatever the rules say: Stripe modes sell the base (BAR) row only.
+ */
+export type RestrictionResult = (
   | { ok: true; checked: boolean }
-  | { ok: false; reason: "closed_to_arrival" | "closed_to_departure" | "min_stay" | "max_stay" | "blocked" | "sold_out"; minNights?: number; maxNights?: number };
+  | { ok: false; reason: "closed_to_arrival" | "closed_to_departure" | "min_stay" | "max_stay" | "blocked" | "sold_out"; minNights?: number; maxNights?: number }
+) & { derived?: true };
 
 interface CbRateDay {
   date?: unknown;
@@ -370,15 +401,30 @@ function truthy(v: unknown): boolean {
 }
 
 /**
+ * getRatePlans' base (BAR) row: isDerived false, no derivedType, no parent
+ * plan (ratePlanID null/absent) and a base plan name (null, "" or "default").
+ */
+function isBaseRatePlanRow(r: Record<string, unknown>): boolean {
+  const notDerived = r.isDerived === false || r.isDerived === "false" || r.isDerived === 0 || r.isDerived === "0";
+  return notDerived && !r.derivedType && (r.ratePlanID === null || r.ratePlanID === undefined || r.ratePlanID === "") && isBasePlanName(r.ratePlanNamePublic);
+}
+
+/**
  * Pure check of a getRatePlans (detailedRates=true) answer for one room type
- * against the stay (exported for tests). Picks the row with `rateId` when
- * given, else the base (non-derived, unnamed) row. Rules: arrival day not
- * closedToArrival; departure day (queried with endDate = check-out + 1, so it
- * is normally returned) not closedToDeparture;
- * nights >= arrival-day minLos; nights <= maxLos when maxLos > 0 (0 = none);
- * every night not blocked and roomsAvailable >= 1. A missing row, or a row
- * without the arrival day, means the answer can't be evaluated: { ok: true, checked: false } (availability itself
- * already came from getAvailableRoomTypes).
+ * against the stay (exported for tests). The answer is for a request filtered
+ * by that roomTypeID, so rows without a roomTypeID count as that type's (the
+ * spec sends it only "if not specified in request"). Picks the row with `rateId`, else
+ * the base row (isBaseRatePlanRow) - never another plan's row, whose rules
+ * (e.g. a promo with minLos 150) would judge the stay wrongly. Rules: arrival
+ * day not closedToArrival; departure day (queried with endDate = check-out
+ * + 1, so it is normally returned) not closedToDeparture - a missing
+ * departure row is logged (restrictions_no_departure_row), not refused;
+ * nights >= the HIGHEST minLos over the stay nights (as Cloudbeds applies it)
+ * and <= the lowest maxLos above 0 (0 = no limit); every night not blocked
+ * and roomsAvailable >= 1. No such row, or a row without the arrival day,
+ * means the answer can't be evaluated: { ok: true, checked: false }
+ * (availability itself already came from getAvailableRoomTypes). A derived
+ * row is checked like any other and marked `derived`.
  */
 export function evaluateRestrictions(
   json: unknown,
@@ -386,16 +432,27 @@ export function evaluateRestrictions(
   rateId: string | null,
   checkIn: IsoDate,
   checkOut: IsoDate,
+  options: { log?: (message: string, data?: Record<string, unknown>) => void } = {},
 ): RestrictionResult {
   const root = asRecord(json);
   if (!root || root.success !== true) throw new CloudbedsError(`getRatePlans failed: ${String(root?.message ?? "no success flag")}`);
   const rows = (Array.isArray(root.data) ? root.data : []).map(asRecord).filter((r): r is Record<string, unknown> => r !== null);
-  const forType = rows.filter((r) => String(r.roomTypeID ?? "") === roomTypeId);
-  const row =
-    (rateId ? forType.find((r) => String(r.rateID ?? "") === rateId) : undefined) ??
-    forType.find((r) => !r.isDerived && !r.derivedType && !r.ratePlanNamePublic) ??
-    forType[0];
+  // The request is filtered by roomTypeID, and the v1.3 spec returns that field only "if not specified in request":
+  // a row without it is the requested type's.
+  const forType = rows.filter((r) => r.roomTypeID === undefined || r.roomTypeID === null || r.roomTypeID === "" || String(r.roomTypeID) === roomTypeId);
+  const row = (rateId ? forType.find((r) => String(r.rateID ?? "") === rateId) : undefined) ?? forType.find(isBaseRatePlanRow);
   if (!row) return { ok: true, checked: false };
+  const result = checkStay(row, roomTypeId, checkIn, checkOut, options.log);
+  return truthy(row.isDerived) ? { ...result, derived: true } : result;
+}
+
+function checkStay(
+  row: Record<string, unknown>,
+  roomTypeId: string,
+  checkIn: IsoDate,
+  checkOut: IsoDate,
+  log: ((message: string, data?: Record<string, unknown>) => void) | undefined,
+): RestrictionResult {
   const days = (Array.isArray(row.roomRateDetailed) ? row.roomRateDetailed : []) as CbRateDay[];
   const byDate = new Map<string, CbRateDay>();
   for (const d of days) if (typeof d?.date === "string") byDate.set(d.date.slice(0, 10), d);
@@ -405,11 +462,19 @@ export function evaluateRestrictions(
   if (!arrival) return { ok: true, checked: false };
   if (truthy(arrival.closedToArrival)) return { ok: false, reason: "closed_to_arrival" };
   const departure = byDate.get(checkOut);
-  if (departure && truthy(departure.closedToDeparture)) return { ok: false, reason: "closed_to_departure" };
-  const minLos = Number(arrival?.minLos);
-  if (Number.isFinite(minLos) && minLos > 0 && nights.length < minLos) return { ok: false, reason: "min_stay", minNights: minLos };
-  const maxLos = Number(arrival?.maxLos);
-  if (Number.isFinite(maxLos) && maxLos > 0 && nights.length > maxLos) return { ok: false, reason: "max_stay", maxNights: maxLos };
+  if (!departure) log?.("restrictions_no_departure_row", { roomTypeId, rateId: String(row.rateID ?? ""), checkOut });
+  else if (truthy(departure.closedToDeparture)) return { ok: false, reason: "closed_to_departure" };
+  let minLos = 0;
+  let maxLos = 0;
+  for (const night of nights) {
+    const d = byDate.get(night);
+    const min = Number(d?.minLos);
+    const max = Number(d?.maxLos);
+    if (Number.isFinite(min) && min > minLos) minLos = min;
+    if (Number.isFinite(max) && max > 0 && (maxLos === 0 || max < maxLos)) maxLos = max;
+  }
+  if (minLos > 0 && nights.length < minLos) return { ok: false, reason: "min_stay", minNights: minLos };
+  if (maxLos > 0 && nights.length > maxLos) return { ok: false, reason: "max_stay", maxNights: maxLos };
   for (const night of nights) {
     const d = byDate.get(night);
     if (!d) continue;
@@ -448,5 +513,5 @@ export async function cloudbedsRestrictions(
     budget ?? null,
   );
   if (!res.ok) throw new CloudbedsError(`getRatePlans HTTP ${res.status}`);
-  return evaluateRestrictions(await res.json(), roomTypeId, rateId, checkIn, checkOut);
+  return evaluateRestrictions(await res.json(), roomTypeId, rateId, checkIn, checkOut, { log: deps.log ?? logEvent });
 }

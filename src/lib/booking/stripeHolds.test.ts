@@ -376,7 +376,7 @@ test("config: real Cloudbeds writes need Redis even with test keys; live needs t
   assert.deepEqual(stripeLiveBlockers({ ...STRIPE_LIVE_ENV, BOOKING_SWEEP_SECRET: undefined, CRON_SECRET: "cron-secret-0123456789" }), []);
   // Test money can go to its own Cloudbeds payment method; live ignores that variable.
   assert.equal(getBookingConfig({ ...STRIPE_TEST_ENV, CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD: "stripe_test" }).cloudbedsPaymentMethod, "stripe_test");
-  assert.equal(getBookingConfig({ ...STRIPE_LIVE_ENV, CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD: "stripe_test" }).cloudbedsPaymentMethod, "stripe");
+  assert.equal(getBookingConfig({ ...STRIPE_LIVE_ENV, CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD: "stripe_test" }).cloudbedsPaymentMethod, "Stripe(website)");
 });
 
 /* ------------------------------- drain ------------------------------- */

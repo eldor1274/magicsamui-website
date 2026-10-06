@@ -215,9 +215,14 @@ export function isAddonId(v: unknown): v is AddonId {
 
 /* ------------------------------- policies ----------------------------- */
 
+const CHECK_IN_TIME = "3:00 PM";
+const CHECK_OUT_TIME = "11:00 AM";
+
 export const HOUSE_POLICIES = {
-  checkIn: "Check-in from 3:00 PM",
-  checkOut: "Check-out by 11:00 AM",
+  checkInTime: CHECK_IN_TIME,
+  checkOutTime: CHECK_OUT_TIME,
+  checkIn: `Check-in from ${CHECK_IN_TIME}`,
+  checkOut: `Check-out by ${CHECK_OUT_TIME}`,
   cancellation:
     "Full charge (100% of stay) if cancelled within 60 days of arrival; 50% of stay if cancelled within 90 days of arrival. The payment processing fee is refunded only when the whole stay is refunded.",
   children: "Children are not accommodated - all guests are counted as adults.",

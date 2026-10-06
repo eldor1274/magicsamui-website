@@ -105,7 +105,7 @@ test("paid -> fulfil: fee line + payment (baht) + confirmed, balance 0; replay c
   assert.ok(r);
   assert.equal(r.status, "confirmed");
   assert.equal(r.payments.length, 1);
-  assert.equal(r.payments[0].type, "stripe");
+  assert.equal(r.payments[0].type, "Stripe(website)", "the exact custom method value, case and punctuation kept");
   // Satang -> baht only at the Cloudbeds boundary: 28,350.00 THB.
   assert.equal(kit.fakeCb.calls.find((c) => c.method === "postPayment")?.params.amount, "28350.00");
   // Test money is labelled as such in the live PMS.
@@ -190,19 +190,19 @@ test("a lost postPayment response is not paid twice: the retry sees the folio al
   assert.equal(kit.fakeCb.reservations.get(reservationId)?.status, "confirmed");
 });
 
-test("Cloudbeds answers success:false with HTTP 200 during fulfil -> webhook 500 (Stripe retries), alert once, then succeeds", async () => {
+test("Cloudbeds answers success:false with HTTP 200 during fulfil -> webhook 500 (Stripe retries), CRITICAL alert at once, then succeeds", async () => {
   const { kit, sessionId } = await heldAndOpen();
   kit.fakeStripe.complete(sessionId);
   kit.fakeCb.failNext("postPayment", "rejected", "Payment type not found");
   const { payload, header } = kit.fakeStripe.signedEvent("checkout.session.completed", sessionId);
   const failed = await handleStripeWebhook(payload, header, kit.deps, { nowMs: NOW });
   assert.equal(failed.status, 500);
-  const failAlerts = kit.alerts.filter((a) => /^Paid booking MSV-\d{8}-\w{4} not yet confirmed/.test(a.subject));
+  const failAlerts = kit.alerts.filter((a) => /^URGENT: paid booking MSV-\d{8}-\w{4}: Cloudbeds refused to record the payment$/.test(a.subject));
   assert.equal(failAlerts.length, 1);
   // It names the booking, not only the Stripe session: ref, Cloudbeds reservation and amount.
-  assert.match(failAlerts[0].lines.join(" "), /Cloudbeds reservation \S+, THB [\d,.]+/);
+  assert.match(failAlerts[0].lines.join(" "), /Cloudbeds reservation \S+\) was PAID via Stripe \(THB [\d,.]+/);
   assert.match(failAlerts[0].lines.join(" "), /Do NOT cancel/);
-  assert.equal(failAlerts[0].severity, "warning");
+  assert.equal(failAlerts[0].severity, "critical", "a refused payment record repeats on every retry: no 2 h wait");
   const retried = await handleStripeWebhook(payload, header, kit.deps, { nowMs: NOW });
   assert.equal(retried.status, 200);
   assert.equal(kit.fakeCb.count("postPayment"), 2, "first was refused (nothing recorded), second recorded");

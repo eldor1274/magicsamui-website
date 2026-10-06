@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createAlerter } from "./alerts.ts";
+import { NO_BASE_RATE_ERROR_WINDOW_MS, alertNoBaseRateAll, getCartInventory, getInventory } from "./availability.ts";
 import { cloudbedsRestrictions, evaluateRestrictions, parseAvailableRoomTypes } from "./cloudbedsProvider.ts";
 import { CloudbedsWriteError, MIN_CALL_MS, createCloudbedsWriter } from "./cloudbedsWrite.ts";
 import { finishesLiveStripePayments, getBookingConfig, getInventoryConfig, sweepSecretOf, sweepSecretsOf } from "./config.ts";
@@ -17,7 +18,7 @@ import { keyScope, keys, recordHold } from "./lock.ts";
 import { OVERLAP_WINDOW_MS, slugsOverlappingOpenHolds } from "./stripeCheckout.ts";
 import { handleStripeWebhook } from "./stripeWebhook.ts";
 import { INDEX_PRUNE_MS, INDEX_SIZE_ALERT, STALE_HOLD_MS, SWEEP_LOOKBACK_MS, runSweep } from "./sweep.ts";
-import { FAR_CHECKIN, FAR_CHECKOUT, GUEST, HONEYMOON, NOW, STRIPE_LIVE_ENV, STRIPE_TEST_ENV, checkout, makeKit, sessionIdOf } from "./testkit.ts";
+import { FAR_CHECKIN, FAR_CHECKOUT, GUEST, HONEYMOON, NOW, ROOM_TYPES, STRIPE_LIVE_ENV, STRIPE_TEST_ENV, checkout, makeKit, sessionIdOf } from "./testkit.ts";
 import type { Kit } from "./testkit.ts";
 import type { CartItemInput, CheckoutSuccess } from "./types.ts";
 import { parseGuestInput } from "./validate.ts";
@@ -105,7 +106,12 @@ test("paid but Cloudbeds keeps refusing the payment: PAID note, never released, 
   assert.equal(s1.paidUnconfirmed, 1);
   assert.equal(s1.released, 0);
   assert.deepEqual(await kit.deps.kv.zrangeByScore(keys.holdIndex(), 0, Number.MAX_SAFE_INTEGER, 10), [reservationId], "kept until the done marker");
-  assert.equal(kit.alerts.filter((a) => a.severity === "critical").length, 0, "not yet escalated");
+  // The refusal itself is CRITICAL at once (it repeats until fixed); the "still not confirmed" escalation is not due yet.
+  assert.deepEqual(
+    kit.alerts.filter((a) => a.severity === "critical").map((a) => a.subject),
+    [`URGENT: paid booking ${ref}: Cloudbeds refused to record the payment`],
+    "not yet escalated",
+  );
 
   // 2+ hours after payment: CRITICAL (stored, re-sent until delivered) naming the booking.
   kit.now.ms = NOW + PAID_UNCONFIRMED_ESCALATE_MS + 60_000;
@@ -120,6 +126,16 @@ test("paid but Cloudbeds keeps refusing the payment: PAID note, never released, 
   assert.equal(urgent.length, 1);
   assert.match(urgent[0].lines.join(" "), new RegExp(`Cloudbeds reservation ${reservationId}`));
   assert.match(urgent[0].lines.join(" "), /Do NOT cancel/);
+  assert.match(
+    urgent[0].lines.join(" "),
+    /First open the folio: the sweeper keeps retrying it, so if a Stripe payment of THB [\d,.]+ is already listed, it was recorded automatically - do not add it again, only confirm the reservation if it is not Confirmed yet\. Otherwise record the FULL/,
+    "never recorded twice: the folio is checked before anything is added by hand",
+  );
+  assert.match(
+    urgent[0].lines.join(" "),
+    /recording the full amount leaves a credit equal to that fee: this is expected while the booking is still being retried\. Do NOT add the "Payment processing fee" line by hand/,
+    "a fee line added by hand while retrying would be doubled",
+  );
 
   // 3 days later - past the 48 h Stripe lookback and Stripe's own retries - the cause is fixed: the sweeper confirms it.
   kit.now.ms = NOW + SWEEP_LOOKBACK_MS + 24 * 3600_000;
@@ -265,12 +281,139 @@ test("Stripe sells the base (BAR) row only: a room with only package/derived row
   assert.equal(hm([plan, derived], true).available, false);
   assert.deepEqual(noBase, ["honeymoon-suite"]);
   assert.equal(hm([plan, derived, row({})], true).rateId, "base");
+  // Live (2026-10-06) the base row is named "default": still the base row.
+  assert.equal(hm([derived, plan, row({ roomRateID: "bar", ratePlanNamePublic: "default" })], true).rateId, "bar");
+  assert.deepEqual(noBase, ["honeymoon-suite"]);
   // Beam/demo keep the old tiering (a named plan stands in when no base row exists).
   assert.equal(hm([plan, derived], false).rateId, "longstay");
 
   assert.equal(getBookingConfig(STRIPE_TEST_ENV).cloudbeds?.baseRateOnly, true);
   assert.equal(getInventoryConfig(STRIPE_TEST_ENV).cloudbeds?.baseRateOnly, true);
   assert.equal(getInventoryConfig({ CLOUDBEDS_API_KEY: "k" }).cloudbeds?.baseRateOnly, false);
+});
+
+test("Stripe never holds a rate that getRatePlans lists as derived: refused before the hold, owner alerted once", async () => {
+  // The fake lists the derived Breakfast row first; here it carries the sold (base) rate id, as if Cloudbeds said that rate is a package.
+  const hmType = ROOM_TYPES["462958"];
+  const kit = makeKit({ cb: { roomTypes: { ...ROOM_TYPES, "462958": { ...hmType, breakfastRateId: hmType.rateId } } } });
+  for (let i = 0; i < 2; i++) {
+    const res = await checkout(kit);
+    assert.equal(res.status, 409);
+    assert.match(res.body.ok ? "" : res.body.message, /can't be booked online.*Nothing has been charged.*Message us on WhatsApp/);
+    assert.deepEqual(res.body.ok ? [] : res.body.unavailableSlugs, ["honeymoon-suite"]);
+  }
+  assert.equal(kit.fakeCb.count("postReservation"), 0, "nothing was held");
+  assert.equal(kit.logs.filter((l) => l.message === "checkout_refused_derived_rate").length, 2);
+  const derived = kit.alerts.filter((a) => a.subject.includes("derived rate"));
+  assert.equal(derived.length, 1);
+  // The page shows an "unavailable" refusal that is not a stay rule as "no longer available" (bookingUi: isRestrictionMessage), never this message: the alert says so.
+  assert.match(derived[0].lines[0], /the page showed the guest the room as no longer available for these dates\.$/);
+  assert.doesNotMatch(derived[0].lines.join(" "), /asked to message us/);
+  // The fake's normal answer (Breakfast under its own rate id): the base rate is held.
+  assert.equal((await checkout(makeKit())).status, 200);
+
+  // getRatePlans asked for one room type may leave roomTypeID out of its rows (spec): still checked, still refused.
+  const noType = makeKit({ cb: { roomTypes: { ...ROOM_TYPES, "462958": { ...hmType, breakfastRateId: hmType.rateId } }, ratePlansWithoutRoomTypeId: true } });
+  const res = await checkout(noType);
+  assert.equal(res.status, 409);
+  assert.equal(noType.fakeCb.count("postReservation"), 0, "nothing was held");
+  assert.equal(noType.alerts.some((a) => a.subject.startsWith("Stay rules not checked")), false);
+  assert.equal("roomTypeID" in (await (await noType.fakeCb.fetch("https://api.cloudbeds.com/api/v1.3/getRatePlans?roomTypeID=462958&startDate=2027-11-10&endDate=2027-11-14", { headers: { "x-api-key": "k" } })).json()).data[0], false);
+});
+
+test("Stripe search: rooms offered but none on the base rate log one error line per window; real sell-outs don't", async (t) => {
+  const errors = t.mock.method(console, "error", () => undefined);
+  t.mock.method(console, "info", () => undefined);
+  const nights = [{ date: "2026-12-05", rate: 15000 }, { date: "2026-12-06", rate: 15000 }];
+  const breakfastOnly = (roomTypeID: string) => ({ roomTypeID, roomRateID: `bf-${roomTypeID}`, roomsAvailable: 1, derivedType: "fixed", ratePlanNamePublic: "Breakfast", roomRateDetailed: nights });
+  const answer = (rows: unknown[]) => ({ success: true, data: [{ propertyCurrency: { currencyCode: "THB" }, propertyRooms: rows }] });
+  // The Stripe search always passes its owner alert (route.ts); the alert itself is the next test's.
+  const search = (rows: unknown[], nowMs: number, baseRateOnly = true) =>
+    getInventory("2026-12-05", "2026-12-07", { dataSource: "cloudbeds", cloudbeds: { apiKey: "k", propertyId: null, baseRateOnly } }, {
+      fetchImpl: (async () => Response.json(answer(rows))) as unknown as typeof fetch,
+      nowMs,
+      onNoBaseRateAll: () => undefined,
+    });
+  const derivedOnly = [breakfastOnly("462958"), breakfastOnly("462960")];
+  const r = await search(derivedOnly, NOW);
+  assert.equal(r.inventory.some((i) => i.available), false);
+  assert.equal(errors.mock.callCount(), 1);
+  assert.equal(errors.mock.calls[0].arguments[0], "[booking] cloudbeds_no_base_rate_all");
+  assert.match(String(errors.mock.calls[0].arguments[1]), /Online search shows every room sold out: Cloudbeds returned no base-rate row/);
+  await search(derivedOnly, NOW + 60_000);
+  assert.equal(errors.mock.callCount(), 1, "deduplicated within the window");
+  // One room still on its base rate, a real sell-out (no rows), or Beam/demo (any row sells): no error.
+  await search([breakfastOnly("462958"), { ...breakfastOnly("462960"), derivedType: null, ratePlanNamePublic: "default" }], NOW + NO_BASE_RATE_ERROR_WINDOW_MS + 1);
+  await search([], NOW + NO_BASE_RATE_ERROR_WINDOW_MS + 2);
+  await search(derivedOnly, NOW + NO_BASE_RATE_ERROR_WINDOW_MS + 3, false);
+  assert.equal(errors.mock.callCount(), 1);
+  await search(derivedOnly, NOW + NO_BASE_RATE_ERROR_WINDOW_MS + 4);
+  assert.equal(errors.mock.callCount(), 2, "logged again after the window");
+});
+
+test("Stripe search: every room dropped for lack of a base row alerts the owner (with the error line); not when a base row is left, not for Beam/demo", async (t) => {
+  t.mock.method(console, "error", () => undefined);
+  t.mock.method(console, "info", () => undefined);
+  const nights = [{ date: "2026-12-05", rate: 15000 }, { date: "2026-12-06", rate: 15000 }];
+  const breakfastOnly = (roomTypeID: string) => ({ roomTypeID, roomRateID: `bf-${roomTypeID}`, roomsAvailable: 1, derivedType: "fixed", ratePlanNamePublic: "Breakfast", roomRateDetailed: nights });
+  const answer = (rows: unknown[]) => ({ success: true, data: [{ propertyCurrency: { currencyCode: "THB" }, propertyRooms: rows }] });
+  const called: string[][] = [];
+  const search = (rows: unknown[], nowMs: number, baseRateOnly = true, onNoBaseRateAll: (slugs: string[]) => void | Promise<void> = (slugs) => void called.push(slugs)) =>
+    getInventory("2026-12-05", "2026-12-07", { dataSource: "cloudbeds", cloudbeds: { apiKey: "k", propertyId: null, baseRateOnly } }, {
+      fetchImpl: (async () => Response.json(answer(rows))) as unknown as typeof fetch,
+      nowMs,
+      onNoBaseRateAll,
+    });
+  // Past the previous test's error window (the window is per server instance).
+  const start = NOW + 10 * NO_BASE_RATE_ERROR_WINDOW_MS;
+  const derivedOnly = [breakfastOnly("462958"), breakfastOnly("462960")];
+  await search([breakfastOnly("462958"), { ...breakfastOnly("462960"), derivedType: null, ratePlanNamePublic: "default" }], start);
+  await search(derivedOnly, start + 1, false);
+  assert.deepEqual(called, [], "a base row left, or Beam/demo: no alert");
+  await search(derivedOnly, start + 2);
+  assert.deepEqual(called, [["honeymoon-suite", "sunrise-suite"]]);
+  await search(derivedOnly, start + 3);
+  assert.equal(called.length, 1, "at most once per instance per window, like the error line");
+  // A failing alert never fails the search.
+  const r = await search(derivedOnly, start + 2 + NO_BASE_RATE_ERROR_WINDOW_MS, true, async () => {
+    throw new Error("config locked");
+  });
+  assert.equal(r.dataSource, "cloudbeds");
+  assert.equal(r.inventory.some((i) => i.available), false);
+
+  // The alert: a warning naming the rooms and dates (no guest data), deduplicated per mode.
+  const kit = makeKit();
+  await alertNoBaseRateAll(kit.deps.alert, ["honeymoon-suite", "sunrise-suite"], "2026-12-05", "2026-12-07");
+  await alertNoBaseRateAll(kit.deps.alert, ["honeymoon-suite"], "2026-12-06", "2026-12-08");
+  const sent = kit.alerts.filter((a) => a.subject === "Online bookings stopped: Cloudbeds returned no base rate for any room");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].severity, "warning");
+  assert.match(sent[0].lines[0], /^A search for 2026-12-05 to 2026-12-07 showed every room sold out: Cloudbeds offered honeymoon-suite, sunrise-suite, but none of them on the base \(BAR\) rate/);
+  assert.match(sent[0].lines[1], /non-derived row named "default".*\/booking\/classic/);
+});
+
+test("Stripe checkout: a cart check with no base row for any room neither logs the error line nor takes the window, so the next search still alerts the owner", async (t) => {
+  const errors = t.mock.method(console, "error", () => undefined);
+  t.mock.method(console, "info", () => undefined);
+  const nights = [{ date: "2026-12-05", rate: 15000 }, { date: "2026-12-06", rate: 15000 }];
+  const breakfastOnly = (roomTypeID: string) => ({ roomTypeID, roomRateID: `bf-${roomTypeID}`, roomsAvailable: 1, derivedType: "fixed", ratePlanNamePublic: "Breakfast", roomRateDetailed: nights });
+  const answer = { success: true, data: [{ propertyCurrency: { currencyCode: "THB" }, propertyRooms: [breakfastOnly("462958"), breakfastOnly("462960")] }] };
+  const fetchImpl = (async () => Response.json(answer)) as unknown as typeof fetch;
+  const config = { dataSource: "cloudbeds" as const, cloudbeds: { apiKey: "k", propertyId: null, baseRateOnly: true } };
+  // Past the earlier tests' windows (the window is per server instance).
+  const start = NOW + 20 * NO_BASE_RATE_ERROR_WINDOW_MS;
+  // adults 2: the party-size gate is asked too.
+  const cart = await getCartInventory("2026-12-05", "2026-12-07", [{ slug: "honeymoon-suite", ratePlanId: "standard", adults: 2, addonIds: [] }], config, {
+    fetchImpl,
+    allowDemoFallback: false,
+    nowMs: start,
+  });
+  assert.equal(cart.inventory.some((i) => i.available), false);
+  assert.equal(errors.mock.callCount(), 0, "no error line from the cart check or its gate");
+  const called: string[][] = [];
+  await getInventory("2026-12-05", "2026-12-07", config, { fetchImpl, nowMs: start + 1, onNoBaseRateAll: (slugs) => void called.push(slugs) });
+  assert.deepEqual(called, [["honeymoon-suite", "sunrise-suite"]]);
+  assert.equal(errors.mock.callCount(), 1);
 });
 
 /* ------------------------ departure-day restrictions ------------------------ */

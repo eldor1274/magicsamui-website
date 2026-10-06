@@ -7,10 +7,11 @@
 //   restrictions + availability re-checked under the lock (no cache) ->
 //   postReservation (the HOLD: exact roomTypeID + priced roomRateID, guest
 //   details, thirdPartyIdentifier = MSV ref (+ -TEST outside live),
-//   sendEmailConfirmation=false) -> hold record (units + dates) -> unlock ->
-//   assert Cloudbeds grandTotal == our room subtotal (else cancel +
-//   price_changed) -> status "not_confirmed" -> Stripe Checkout Session ->
-//   redirect.
+//   sendEmailConfirmation=false, sourceID) -> hold record (units + dates) ->
+//   unlock -> assert Cloudbeds grandTotal AND the folio read back ==
+//   our room subtotal, with no Cloudbeds taxes/fees (else cancel +
+//   price_changed, or "message us" when Cloudbeds adds fees) -> status
+//   "not_confirmed" -> Stripe Checkout Session -> redirect.
 //
 // The route has 30 s (maxDuration): a deadline is passed in, and the chain
 // refuses to start a hold it may not have time to finish or cancel, and
@@ -25,7 +26,8 @@
 
 import { createHash } from "node:crypto";
 import { getCatalogueRoom } from "./catalogue.ts";
-import { CloudbedsWriteError, redactForLog } from "./cloudbedsWrite.ts";
+import { CloudbedsWriteError, MIN_CALL_MS, redactForLog } from "./cloudbedsWrite.ts";
+import type { ReservationInfo } from "./cloudbedsWrite.ts";
 import { MERCHANT_NAME, PAYMENT_LINK_TTL_MINUTES, TOKEN_TTL_HOURS } from "./config.ts";
 import { addMonths, compareIso } from "./dates.ts";
 import { releaseHold } from "./fulfil.ts";
@@ -36,6 +38,7 @@ import { acquireLock, closeIntent, holdIdentifier, keyScope, keys, readJson, rec
 import type { HoldRecord, Lock } from "./lock.ts";
 import { buildCheckoutSessionParams, isStripeCheckoutUrl, stripeErrorInfo } from "./payments/stripe.ts";
 import type { CheckoutSession } from "./payments/stripe.ts";
+import { satangToBahtString } from "./quote.ts";
 import type { StripeDeps } from "./stripeDeps.ts";
 import { STALE_HOLD_MS, SWEEP_STALE_ALERT_MS } from "./sweep.ts";
 import { hasTestAccess } from "./testAccess.ts";
@@ -61,6 +64,12 @@ export const HOLD_MIN_REMAINING_MS = 17_000;
 export const SESSION_MIN_REMAINING_MS = 4_000;
 /** Kept back from the Stripe call for cancelling the hold if it fails. */
 export const CANCEL_RESERVE_MS = 2_500;
+/** Time needed to read the hold's folio back and still make the Stripe call (or a cancel) afterwards. */
+export const FOLIO_CHECK_MIN_REMAINING_MS = MIN_CALL_MS + SESSION_MIN_REMAINING_MS + CANCEL_RESERVE_MS;
+/** Pause before the one retry of a failed folio read. */
+export const FOLIO_RETRY_PAUSE_MS = 400;
+/** Extra charges up to this share of the rooms read as a Cloudbeds source fee (the classic engine's is 5%). */
+export const MAX_SOURCE_FEE_PCT = 15;
 /** Checkouts refused on Cloudbeds reads within the window before the owner is alerted. */
 export const READ_FAILURE_ALERT_COUNT = 3;
 
@@ -152,6 +161,8 @@ export const RESTRICTION_MESSAGES: Record<string, (name: string, n?: number) => 
   max_stay: (name, n) => `${name} can be booked for at most ${n} nights for these dates.`,
   blocked: (name) => `Sorry - ${name} is no longer available for these dates.`,
   sold_out: (name) => `Sorry - ${name} is no longer available for these dates.`,
+  // Not a stay rule: the rate found is a derived plan (Stripe sells the base rate only).
+  derived_rate: (name) => `Sorry - ${name} can't be booked online for these dates right now. ${NOTHING_CHARGED} ${MESSAGE_US}`,
 };
 
 /**
@@ -163,6 +174,52 @@ export const RESTRICTION_MESSAGES: Record<string, (name: string, n?: number) => 
  */
 export function isAvailabilityRefusal(message: string): boolean {
   return /availab|sold.?out|no rooms|not enough rooms|overbook|fully booked|no inventory|allotment/i.test(message);
+}
+
+/** The hold next to the quote (classifyHoldTotal). */
+export type HoldTotalCheck =
+  | { kind: "match" }
+  /** No total could be verified: never charge on it. */
+  | { kind: "unreadable" }
+  /** Cloudbeds put its own taxes/fees on the hold: a source setting that hits EVERY online booking. */
+  | { kind: "cloudbeds_fees"; extraSatang: number; pctOfRooms: string }
+  /** Any other difference (a rate changed, another rate plan): price_changed. */
+  | { kind: "price_changed"; totalSatang: number; pctOfQuote: string };
+
+/** part/whole in percent with 2 decimals ("5.00"), via basis points. */
+function pct2(part: number, whole: number): string {
+  return (Math.round((part * 10_000) / whole) / 100).toFixed(2);
+}
+
+/**
+ * The price check on a hold (pure). Exact satang equality with the quoted room subtotal is the ONLY
+ * pass: postReservation's grandTotal (when given) AND the folio read back with getReservation must both
+ * equal it, and the folio must carry no taxes/fees or additional items (when readable). A refusal is
+ * classified so the owner hears what to fix: taxes/fees on the folio, or a total at most
+ * MAX_SOURCE_FEE_PCT above the quote while the rooms equal it, is Cloudbeds adding fees for the
+ * reservation's source; anything else is a price change.
+ */
+export function classifyHoldTotal(input: {
+  quotedRoomsSatang: number;
+  /** postReservation's grandTotal; null = not given. */
+  holdTotalSatang: number | null;
+  /** The folio read back; null = not read (or the read failed). */
+  folio: Pick<ReservationInfo, "grandTotalSatang" | "subTotalSatang" | "taxesFeesSatang" | "additionalItemsSatang"> | null;
+}): HoldTotalCheck {
+  const quoted = input.quotedRoomsSatang;
+  const folioTotal = input.folio?.grandTotalSatang ?? null;
+  const added = (input.folio?.taxesFeesSatang ?? 0) + (input.folio?.additionalItemsSatang ?? 0);
+  const differing = [folioTotal, input.holdTotalSatang].find((t): t is number => t !== null && t !== quoted) ?? null;
+  const rooms = input.folio?.subTotalSatang ?? null;
+  // Cloudbeds' own charges on the folio: never a pass, whatever the totals say.
+  if (added > 0) return { kind: "cloudbeds_fees", extraSatang: added, pctOfRooms: pct2(added, rooms !== null && rooms > 0 ? rooms : quoted) };
+  // Nothing differs: a pass only once the folio itself was read back.
+  if (differing === null) return folioTotal === null ? { kind: "unreadable" } : { kind: "match" };
+  const extra = differing - quoted;
+  if (extra > 0 && rooms === quoted && extra * 100 <= quoted * MAX_SOURCE_FEE_PCT) {
+    return { kind: "cloudbeds_fees", extraSatang: extra, pctOfRooms: pct2(extra, quoted) };
+  }
+  return { kind: "price_changed", totalSatang: differing, pctOfQuote: `${extra > 0 ? "+" : ""}${pct2(extra, quoted)}` };
 }
 
 /** Opaque per-client key: a keyed hash of the IP (the IP itself is never stored). */
@@ -301,6 +358,19 @@ async function checkBeforeHold(input: StripeCheckoutInput, deps: StripeDeps, now
         await noteCheckoutReadFailure(deps, "getRatePlans", error);
         return fail(503, { error: "payment_unavailable", message: LIVE_UNCONFIRMED });
       }
+      if (r.derived && deps.config.cloudbeds?.baseRateOnly) {
+        // Defence in depth: whatever the search-side row choice did, never hold (and charge for) a derived plan.
+        deps.log("checkout_refused_derived_rate", { slug: item.slug, roomTypeId: room.cloudbedsRoomTypeId, rateId: inv?.rateId ?? null });
+        await deps.alert(
+          `Online booking refused: ${room.name} was offered on a derived rate`,
+          [
+            `Cloudbeds' getRatePlans lists rate ${inv?.rateId ?? "(none)"} of room type ${room.cloudbedsRoomTypeId} (${room.name}) as a DERIVED plan (a package or discount), but the own booking page sells only the base (BAR) rate. The checkout was refused before anything was reserved or charged; the page showed the guest the room as no longer available for these dates.`,
+            "Check the room type's rate plans in Cloudbeds: getAvailableRoomTypes must return the base rate as a non-derived row (named \"default\").",
+          ],
+          { key: `derived-rate:${room.cloudbedsRoomTypeId}`, severity: "warning" },
+        );
+        return fail(409, { error: "unavailable", message: RESTRICTION_MESSAGES.derived_rate(room.name), unavailableSlugs: [item.slug] });
+      }
       if (r.ok && !r.checked) {
         // No rate row for this room type: min stay / closed to arrival can't be enforced for it.
         deps.log("restrictions_unchecked", { slug: item.slug, roomTypeId: room.cloudbedsRoomTypeId });
@@ -379,6 +449,20 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
   if (deps.writer.mode === "live" && input.dataSource !== "cloudbeds") {
     deps.log("checkout_refused_data_source", { mode: config.paymentMode, dataSource: input.dataSource });
     return fail(503, { error: "payment_unavailable", message: LIVE_UNCONFIRMED });
+  }
+
+  // Without a usable Cloudbeds payment method EVERY paid booking would stay unconfirmed: refuse before anything is held.
+  if (deps.writer.mode === "live" && config.cloudbedsPaymentMethodProblem) {
+    deps.log("checkout_refused_payment_method", { mode: config.paymentMode });
+    await deps.alert(
+      "Online bookings stopped: the Cloudbeds payment method is not set up",
+      [
+        config.cloudbedsPaymentMethodProblem,
+        "Every online checkout is refused before anything is reserved or charged until this is fixed; guests are asked to message us on WhatsApp.",
+      ],
+      { key: "payment-method-config", severity: "warning" },
+    );
+    return fail(503, { error: "payment_unavailable", message: `Online payment is not available right now. ${NOTHING_CHARGED} ${MESSAGE_US}` });
   }
 
   // 1. Test-mode guard (Cloudbeds has no sandbox: test holds block real OTA inventory).
@@ -493,6 +577,7 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
         },
         estimatedArrivalTime: cloudbedsArrivalTime(input.guest.arrivalTime),
         paymentMethod: config.reservationPaymentMethod,
+        sourceId: config.cloudbedsSourceId,
         expectedRoomsSatang: quote.roomsSubtotalSatang,
       });
     } catch (e) {
@@ -542,37 +627,82 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
     return fail(503, { error: "payment_unavailable", message: `We couldn't start your booking safely just now. ${NOTHING_CHARGED} Please try again in a moment.` });
   }
   await settleIntent(); // the open-holds index tracks it from here
-  deps.log("hold_created", { ref, reservationId, status: hold.status, mode: config.paymentMode });
+  // Cloudbeds' own creation stamp (no zone) next to our log time calibrates its clock (Stage B).
+  deps.log("hold_created", { ref, reservationId, status: hold.status, mode: config.paymentMode, cloudbedsDateCreated: hold.dateCreated });
 
-  // 6. Price assertion: Cloudbeds prices the reservation itself; we only ever charge what it holds.
-  let holdTotal = hold.grandTotalSatang;
-  if (holdTotal === null) {
-    // A usable id without a readable total: read it back once; never charge on a total we haven't seen.
-    holdTotal = await deps.writer
+  // 6. Price assertion: Cloudbeds prices the reservation itself; we only ever charge what it holds. The folio is
+  // ALWAYS read back before the payment page (a failed read is tried once more when time allows): postReservation's
+  // total may leave out taxes/fees that the folio carries (the guest would pay our fee AND be asked for Cloudbeds' at check-in).
+  const quoted = quote.roomsSubtotalSatang;
+  const timeForFolio = remaining() >= FOLIO_CHECK_MIN_REMAINING_MS;
+  let folio: ReservationInfo | null = null;
+  if (timeForFolio) {
+    // The read must leave time for the Stripe call or a cancel.
+    const reader =
+      ctx.deadlineMs !== undefined && deps.writer.bounded ? deps.writer.bounded(ctx.deadlineMs - SESSION_MIN_REMAINING_MS - CANCEL_RESERVE_MS, clock) : deps.writer;
+    folio = await reader
       .getReservation(reservationId)
-      .then((r) => r.grandTotalSatang)
-      .catch(() => null);
+      .catch(async (e) => {
+        // One blip must not cost a correctly priced hold: a GET is never ambiguous, so read once more when that still fits.
+        if (!(e instanceof CloudbedsWriteError) || e.kind === "budget" || remaining() < FOLIO_CHECK_MIN_REMAINING_MS + FOLIO_RETRY_PAUSE_MS) throw e;
+        deps.log("hold_folio_read_retry", { ref, reservationId, error: redactForLog(e.message) });
+        await sleep(FOLIO_RETRY_PAUSE_MS);
+        return reader.getReservation(reservationId);
+      })
+      .catch((e) => {
+        deps.log("hold_folio_read_failed", { ref, reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) });
+        return null;
+      });
   }
-  if (holdTotal === null) {
+  const check = classifyHoldTotal({ quotedRoomsSatang: quoted, holdTotalSatang: hold.grandTotalSatang, folio });
+  if (check.kind === "unreadable" && !timeForFolio) {
+    deps.log("checkout_out_of_time", { ref, reservationId, step: "before_folio_check", remainingMs: Math.round(remaining()) });
+    await cancelHold("out of time before the folio check");
+    return fail(503, { error: "payment_unavailable", message: `Our systems are slow right now. ${NOTHING_CHARGED} Please try again in a moment.` });
+  }
+  if (check.kind === "unreadable") {
     deps.log("hold_total_unreadable", { ref, reservationId });
     await cancelHold("hold total unreadable");
     await deps.alert(
       "Booking stopped: Cloudbeds returned no price for the hold",
       [
-        `Booking ${ref}: Cloudbeds created reservation ${reservationId} but its total could not be read (postReservation and getReservation). The hold was cancelled and nothing was charged.`,
+        `Booking ${ref}: Cloudbeds created reservation ${reservationId} but its total could not be verified (the folio read back with getReservation was unreadable or failed). The hold was cancelled and nothing was charged.`,
         "If this repeats, every online booking is failing: check the booking API key's scopes (read:reservation) and the Cloudbeds API status.",
       ],
       { key: "hold-total-unreadable", severity: "warning" },
     );
     return fail(502, { error: "upstream_error", message: `We couldn't get an answer from our reservation system. ${NOTHING_CHARGED} Please try again in a minute.` });
   }
-  if (holdTotal !== quote.roomsSubtotalSatang) {
-    deps.log("hold_price_mismatch", { ref, reservationId, cloudbeds: holdTotal, quoted: quote.roomsSubtotalSatang });
+  if (check.kind === "cloudbeds_fees") {
+    const source = config.cloudbedsSourceId
+      ? `CLOUDBEDS_SOURCE_ID ${config.cloudbedsSourceId}`
+      : "Website / Booking engine (default; CLOUDBEDS_SOURCE_ID is not set or not a primary source id)";
+    const shown = folio?.sourceId ? ` Cloudbeds shows the hold under ${folio.source ?? "source"} ${folio.sourceId}.` : "";
+    // A source already configured: the fee is on that source, or Cloudbeds ignored the id's form (s-N vs s-N-1).
+    const fix = config.cloudbedsSourceId
+      ? `Fix: in Cloudbeds (Settings > Property > Sources; scripts/cloudbeds-wi0-check.mjs section 4b) check that source ${config.cloudbedsSourceId} carries no taxes or fees, and remove any that was added. If it carries none, Cloudbeds probably ignored the id: switch CLOUDBEDS_SOURCE_ID to the other form (s-N or s-N-1, Stage B case 19) and redeploy.`
+      : "Fix: in Cloudbeds go to Settings > Property > Sources and add a primary source for the own booking page with NO taxes or fees; put its id (s-<number>) in CLOUDBEDS_SOURCE_ID and redeploy.";
+    deps.log("hold_taxes_fees", { ref, reservationId, quoted, extra: check.extraSatang, pct: check.pctOfRooms, sourceId: config.cloudbedsSourceId });
+    await cancelHold("Cloudbeds taxes/fees on the hold");
+    await deps.alert(
+      "Online bookings blocked: Cloudbeds adds taxes/fees to online holds",
+      [
+        `Booking ${ref} (${input.checkIn} to ${input.checkOut}): Cloudbeds added THB ${satangToBahtString(check.extraSatang)} of taxes/fees (${check.pctOfRooms}% of the rooms) on top of the THB ${satangToBahtString(quoted)} the page quoted for the rooms. The hold was cancelled and nothing was charged; the guest was asked to message us on WhatsApp. Every online booking is refused this way until it is fixed.`,
+        `Reservation source used: ${source}.${shown}`,
+        `${fix} Never remove the Card Charging Fee from the "Website / Booking Engine" source while the classic booking engine uses it.`,
+      ],
+      // One alert per mode (the alerter scopes keys by mode), not per room and date: it hits every booking.
+      { key: "hold-taxes-fees", severity: "warning" },
+    );
+    return fail(503, { error: "payment_unavailable", message: `We couldn't reserve this room online just now. ${NOTHING_CHARGED} ${MESSAGE_US}` });
+  }
+  if (check.kind === "price_changed") {
+    deps.log("hold_price_mismatch", { ref, reservationId, cloudbeds: check.totalSatang, quoted, pct: check.pctOfQuote });
     await cancelHold("price mismatch");
     await deps.alert(
       "Booking stopped: Cloudbeds price differs from the quote",
       [
-        `Booking ${ref} (${input.checkIn} to ${input.checkOut}): Cloudbeds priced the hold at ${holdTotal} satang, the page quoted ${quote.roomsSubtotalSatang} satang for the rooms.`,
+        `Booking ${ref} (${input.checkIn} to ${input.checkOut}): Cloudbeds priced the hold at ${check.totalSatang} satang (${check.pctOfQuote}% against the quote), the page quoted ${quoted} satang for the rooms.`,
         "The hold was cancelled and nothing was charged. A repeat of this means taxes/fees or a rate plan in Cloudbeds differ from what getAvailableRoomTypes returns (WI-0).",
       ],
       { key: `price-mismatch:${input.items.map((i) => i.slug).join(",")}:${input.checkIn}`, severity: "warning" },
@@ -594,14 +724,21 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
     }
   }
   const testLabel = config.paymentMode === "stripe-live" ? "" : "TEST MODE - NOT REAL MONEY. ";
+  // "After midnight" (estimatedArrivalTime null) and the guest's requests reach Cloudbeds ONLY through this note.
+  const guestFlags = { arrivalLate: input.guest.arrivalTime === "late", hasRequests: input.guest.specialRequests.trim() !== "", noteSaved: false };
   const noteParts = [
     `${testLabel}Online booking ${ref} via magicsamui.com (Stripe). Awaiting payment - the hold is cancelled automatically if unpaid after ${PAYMENT_LINK_TTL_MINUTES} minutes.`,
-    input.guest.arrivalTime === "late" ? "Estimated arrival: after midnight." : "",
-    input.guest.specialRequests.trim() ? `Guest requests: ${input.guest.specialRequests.trim()}` : "",
+    guestFlags.arrivalLate ? "Estimated arrival: after midnight." : "",
+    guestFlags.hasRequests ? `Guest requests: ${input.guest.specialRequests.trim()}` : "",
   ].filter(Boolean);
   if (remaining() >= SESSION_MIN_REMAINING_MS + CANCEL_RESERVE_MS + 4_000) {
-    await deps.writer.addNote(reservationId, noteParts.join("\n")).catch((e) =>
-      deps.log("hold_note_failed", { ref, reservationId, error: e instanceof Error ? e.message : String(e) }),
+    // Best effort; whether it was saved goes into the session metadata, so fulfil can flag a PAID booking that lacks it.
+    guestFlags.noteSaved = await deps.writer.addNote(reservationId, noteParts.join("\n")).then(
+      () => true,
+      (e) => {
+        deps.log("hold_note_failed", { ref, reservationId, error: e instanceof Error ? e.message : String(e) });
+        return false;
+      },
     );
   } else {
     deps.log("hold_note_skipped_time", { ref, reservationId });
@@ -653,6 +790,7 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
       allowedPaymentMethodTypes: config.stripe.allowedPaymentMethodTypes,
       merchantName: MERCHANT_NAME,
       mode: config.paymentMode,
+      guestFlags,
     });
     session = await deps.stripe.checkout.sessions.create(params, {
       idempotencyKey: stripeIdempotencyKey(ref, config.paymentMode, (ctx.nonce ?? generateNonce)()),
@@ -755,7 +893,7 @@ async function holdFailed(
       "Booking stopped: Cloudbeds refused the reservation",
       [
         `Booking ${ref}: postReservation answered success:false - "${message}"${err.requestId ? ` (request ${err.requestId})` : ""}.`,
-        "A fresh availability check still showed the room as free (or could not be made), so this is likely a setup or data problem (a required field, the guestZip placeholder, the rate id, the payment method, the key's scopes) that will hit every booking. Nothing was charged.",
+        "A fresh availability check still showed the room as free (or could not be made), so this is likely a setup or data problem (a required field, the guestZip placeholder, the rate id, the payment method, the reservation source (CLOUDBEDS_SOURCE_ID), the key's scopes) that will hit every booking. Nothing was charged.",
       ],
       { key: `hold-refused:${createHash("sha256").update(err.message).digest("hex").slice(0, 12)}`, severity: "warning" },
     );

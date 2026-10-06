@@ -53,7 +53,7 @@ test("form encoding: bracket-indexed arrays, nulls left out", () => {
 test("postReservation: v1.3, form body, auth + property headers, the exact fields of the hold", async () => {
   const { calls, fetchImpl } = scripted([ok({ success: true, reservationID: "6954439751495", status: "confirmed", grandTotal: 36000 })]);
   const hold = await writer(fetchImpl).createHold(HOLD);
-  assert.deepEqual(hold, { reservationId: "6954439751495", status: "confirmed", grandTotalSatang: 3_600_000 });
+  assert.deepEqual(hold, { reservationId: "6954439751495", status: "confirmed", grandTotalSatang: 3_600_000, dateCreated: null });
   const [c] = calls;
   assert.equal(c.url, "https://api.cloudbeds.com/api/v1.3/postReservation");
   assert.equal(c.init.method, "POST");
@@ -167,7 +167,12 @@ test("getReservation parses numbers and strings; postCustomItem duplicate notice
     grandTotalSatang: 2_835_000,
     balanceSatang: 2_835_000,
     paidSatang: 0,
+    subTotalSatang: null,
+    additionalItemsSatang: null,
+    taxesFeesSatang: null,
     thirdPartyIdentifier: "MSV-1",
+    source: null,
+    sourceId: null,
   });
   assert.match(s.calls[0].url, /getReservation\?propertyID=235064&reservationID=42$/);
   assert.deepEqual(await w.addFeeItem({ reservationId: "42", amountSatang: 1, referenceId: "r", ...feeItemFor("stripe-test") }), { duplicate: true });

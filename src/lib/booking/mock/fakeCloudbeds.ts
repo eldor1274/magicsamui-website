@@ -20,6 +20,15 @@ export interface FakeRoomType {
   minLos?: number;
   closedToArrival?: boolean;
   maxGuests?: number;
+  /** roomRateID of the derived "Breakfast" row (default `${rateId}-breakfast`). */
+  breakfastRateId?: string;
+}
+
+/** The live Breakfast plan: derived, fixed +2,000 THB per night on the base rate (2026-10-06). */
+export const BREAKFAST_FIXED_BAHT = 2000;
+
+function breakfastRateId(rt: FakeRoomType): string {
+  return rt.breakfastRateId ?? `${rt.rateId}-breakfast`;
 }
 
 export interface FakeReservation {
@@ -28,8 +37,12 @@ export interface FakeReservation {
   startDate: string;
   endDate: string;
   thirdPartyIdentifier: string | null;
-  /** Major-unit baht, as Cloudbeds holds it. */
-  grandTotal: number;
+  /** The rooms (balanceDetailed.subTotal), major-unit baht as Cloudbeds holds it. */
+  subTotal: number;
+  /** Taxes/fees Cloudbeds applied for the reservation's source (balanceDetailed.taxesFees), baht. */
+  taxesFees: number;
+  /** The sourceID sent with postReservation; null = Cloudbeds' default source. */
+  sourceID: string | null;
   rooms: { roomTypeID: string; roomRateID: string | null; adults: number }[];
   payments: { paymentID: string; type: string; amount: number; description: string }[];
   items: { referenceID: string | null; itemPrice: number; itemName: string }[];
@@ -51,7 +64,7 @@ export interface FakeCloudbedsOptions {
   /**
    * Treat unknown reservation ids as existing not_confirmed placeholders
    * (the app's mock writer on serverless, where a webhook may reach another
-   * instance). Tests leave this off.
+   * instance), and take any postPayment type. Tests leave this off.
    */
   lenient?: boolean;
   /** Read side: room types keyed by roomTypeID (getAvailableRoomTypes / getRatePlans). */
@@ -62,8 +75,52 @@ export interface FakeCloudbedsOptions {
    * our own unit lock + re-check stop two of our checkouts double-booking.
    */
   overbook?: boolean;
+  /**
+   * Exclusive % fees per reservation SOURCE, keyed by the sourceID sent ("default" when none), like a
+   * property whose "Website / Booking engine" source carries the classic engine's 5% Card Charging Fee.
+   * The fee is that % of each night's rate, rounded half-up to the satang, summed.
+   */
+  sourceFeePct?: Record<string, number>;
+  /** postReservation's grandTotal leaves the source fee out; only the folio (getReservation) shows it. */
+  feeOnlyOnFolio?: boolean;
+  /** getPaymentMethods (the active methods); default FAKE_PAYMENT_METHODS. */
+  paymentMethods?: FakePaymentMethod[];
+  /** getRatePlans rows leave roomTypeID out when the request filters by it (the v1.3 spec: "if not specified in request"). */
+  ratePlansWithoutRoomTypeId?: boolean;
   now?: () => number;
 }
+
+export interface FakePaymentMethod {
+  method: string;
+  code: string;
+  name: string;
+}
+
+/**
+ * The live property's methods as getPaymentMethods listed them on 2026-10-06 (built-ins and the
+ * property's additional methods), its custom "Stripe (website)" method, and the test method the
+ * test kit uses for CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD.
+ */
+export const FAKE_PAYMENT_METHODS: FakePaymentMethod[] = [
+  { method: "credit", code: "cards", name: "Credit Card" },
+  { method: "bank_transfer", code: "ebanking", name: "Bank Transfer" },
+  { method: "pay_pal", code: "pay_pal", name: "PayPal" },
+  { method: "cash", code: "cash", name: "Cash" },
+  { method: "check", code: "check_true", name: "Check" },
+  { method: "debit", code: "check", name: "Debit Card" },
+  { method: "bill", code: "bill", name: "Bill" },
+  { method: "Voucher", code: "Voucher", name: "Voucher" },
+  { method: "RoomChange", code: "RoomChange", name: "Room Change" },
+  { method: "Permuta", code: "Permuta", name: "Exchange" },
+  { method: "Paidatanotherlocation", code: "Paidatanotherlocation", name: "Paid at another location." },
+  { method: "Prepago", code: "Prepago", name: "Prepaid" },
+  { method: "1", code: "1", name: "With Cash On Arrival" },
+  { method: "thirdparty", code: "Terceiros", name: "Third-party payment" },
+  { method: "airbnb", code: "airbnb", name: "Airbnb" },
+  { method: "OnsiteTerminal", code: "OnsiteTerminal", name: "Onsite Terminal" },
+  { method: "Stripe(website)", code: "Stripe(website)", name: "Stripe (website)" },
+  { method: "Stripe_TEST", code: "Stripe_TEST", name: "Stripe TEST" },
+];
 
 /**
  * - network: the request never reaches the fake (nothing happens).
@@ -74,11 +131,12 @@ export interface FakeCloudbedsOptions {
  *   lands after our timeout, while a retry is already reading the folio.
  * - pass: answered normally (only `effect` runs first, e.g. to move a clock).
  * - no_total: answered normally but without grandTotal (postReservation).
+ * - http403: refused with HTTP 403 (e.g. the key lacks the scope for this call).
  * `effect` runs first (e.g. an OTA booking takes the unit just before the refusal).
  */
 type Forced = {
   method: string;
-  kind: "rejected" | "http500" | "rate_limit" | "network" | "network_after" | "network_late" | "pass" | "no_total";
+  kind: "rejected" | "http500" | "http403" | "rate_limit" | "network" | "network_after" | "network_late" | "pass" | "no_total";
   message?: string;
   effect?: () => void;
 };
@@ -114,6 +172,7 @@ function indexed(params: URLSearchParams, name: string): Record<string, string>[
 export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
   const now = options.now ?? Date.now;
   const reservations = new Map<string, FakeReservation>();
+  const paymentMethods = options.paymentMethods ?? FAKE_PAYMENT_METHODS;
   const calls: { method: string; verb: string; params: Record<string, string> }[] = [];
   const forced: Forced[] = [];
   const late: { method: string; headers: Headers; params: URLSearchParams }[] = [];
@@ -136,7 +195,9 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
       startDate: "",
       endDate: "",
       thirdPartyIdentifier: null,
-      grandTotal: 0,
+      subTotal: 0,
+      taxesFees: 0,
+      sourceID: null,
       rooms: [],
       payments: [],
       items: [],
@@ -161,7 +222,9 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
   };
 
   const paidOf = (r: FakeReservation) => r.payments.reduce((s, p) => s + p.amount, 0);
-  const totalOf = (r: FakeReservation) => r.grandTotal + r.items.reduce((s, i) => s + i.itemPrice, 0);
+  const itemsOf = (r: FakeReservation) => r.items.reduce((s, i) => s + i.itemPrice, 0);
+  /** balanceDetailed.grandTotal: rooms + additional items (our fee line) + Cloudbeds' taxes/fees. */
+  const totalOf = (r: FakeReservation) => r.subTotal + itemsOf(r) + r.taxesFees;
   const round2 = (n: number) => Math.round(n * 100) / 100;
 
   async function handle(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -195,6 +258,7 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
       }
       if (hit.kind === "rate_limit") return reply({ success: false, message: "Too many requests" }, 429);
       if (hit.kind === "http500") return reply({ success: false, message: "Internal error" }, 500);
+      if (hit.kind === "http403") return reply({ success: false, message: "Forbidden" }, 403);
       return reply({ success: false, message: hit.message ?? "Rejected (simulated)" }, 200);
     }
     return respond(method, headers, params);
@@ -223,14 +287,29 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         }
         const hintRaw = headers.get("x-msv-mock-expected-total");
         const hint = hintRaw === null ? NaN : Number(hintRaw);
-        const nightsCount = eachNight(start, end).length;
-        const grandTotal = options.pricer
+        const nights = eachNight(start, end);
+        const ratesKnown = !options.pricer && options.roomTypes !== undefined;
+        const roomsTotal = options.pricer
           ? options.pricer({ rooms: resRooms, startDate: start, endDate: end, hintSatang: Number.isFinite(hint) ? hint : null })
-          : options.roomTypes
-            ? resRooms.reduce((sum, r) => sum + (options.roomTypes?.[r.roomTypeID]?.rate ?? 0) * nightsCount, 0)
+          : ratesKnown
+            ? resRooms.reduce((sum, r) => sum + (options.roomTypes?.[r.roomTypeID]?.rate ?? 0) * nights.length, 0)
             : Number.isFinite(hint)
               ? hint / 100
               : 0;
+        // Each room's price per night (satang): the property's rates, else the priced total spread evenly.
+        const totalSatang = Math.round(roomsTotal * 100);
+        const cells = Math.max(1, resRooms.length * nights.length);
+        const nightly = resRooms.map((r, i) =>
+          nights.map((_, n) =>
+            ratesKnown
+              ? Math.round((options.roomTypes?.[r.roomTypeID]?.rate ?? 0) * 100)
+              : Math.floor(totalSatang / cells) + (i === 0 && n === 0 ? totalSatang % cells : 0),
+          ),
+        );
+        // Taxes/fees come with the SOURCE: a % of each night's rate, half-up to the satang (basis points keep it exact).
+        const sourceID = params.get("sourceID");
+        const feeBp = Math.round((options.sourceFeePct?.[sourceID ?? "default"] ?? 0) * 100);
+        const feeSatang = nightly.flat().reduce((s, v) => s + Math.round((v * feeBp) / 10_000), 0);
         const id = String(nextId++);
         const r: FakeReservation = {
           reservationID: id,
@@ -238,7 +317,9 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
           startDate: params.get("startDate")!,
           endDate: params.get("endDate")!,
           thirdPartyIdentifier: params.get("thirdPartyIdentifier"),
-          grandTotal: round2(grandTotal),
+          subTotal: round2(roomsTotal),
+          taxesFees: feeSatang / 100,
+          sourceID,
           rooms: resRooms,
           payments: [],
           items: [],
@@ -255,8 +336,8 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
           startDate: r.startDate,
           endDate: r.endDate,
           dateCreated: cbDateTime(Date.parse(r.dateCreated), 7),
-          grandTotal: r.grandTotal,
-          unassigned: [],
+          grandTotal: options.feeOnlyOnFolio ? r.subTotal : round2(r.subTotal + r.taxesFees),
+          unassigned: resRooms.map((x, i) => ({ roomTypeID: x.roomTypeID, roomTotal: round2(nightly[i].reduce((s, v) => s + v, 0) / 100) })),
         });
       }
       case "getReservation": {
@@ -273,20 +354,37 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
             reservationID: r.reservationID,
             status: r.status,
             thirdPartyIdentifier: r.thirdPartyIdentifier,
+            // The default source's real id is unknown; "s-1" stands in for it.
+            source: r.sourceID === null ? "Website / Booking engine" : `Own booking page (${r.sourceID})`,
+            sourceID: r.sourceID ?? "s-1",
             total,
             balance: round2(total - paid),
-            balanceDetailed: { suggestedDeposit: "0.00", subTotal: r.grandTotal, grandTotal: total, paid },
+            balanceDetailed: {
+              suggestedDeposit: "0.00",
+              subTotal: r.subTotal,
+              additionalItems: round2(itemsOf(r)),
+              taxesFees: r.taxesFees,
+              grandTotal: total,
+              paid,
+            },
           },
         });
       }
+      case "getPaymentMethods":
+        return reply({ success: true, data: { methods: paymentMethods.map((m) => ({ ...m })) } });
       case "postPayment": {
         const r = find(params.get("reservationID"));
         if (!r) return reply({ success: false, message: "Reservation not found" });
         const amount = Number(params.get("amount"));
         if (!Number.isFinite(amount) || amount <= 0) return reply({ success: false, message: "Invalid amount" });
-        if (!params.get("type")) return reply({ success: false, message: "Payment type is required" });
+        const type = params.get("type");
+        if (!type) return reply({ success: false, message: "Payment type is required" });
+        // ASSUMPTION (undocumented; Stage B case 1 is the real proof): Cloudbeds records a payment only under
+        // the exact `method` value of an ACTIVE method (case-sensitive) and refuses anything else with
+        // success:false. The lenient fake (the app's mock writer, which can't know the property's methods) takes any type.
+        if (!options.lenient && !paymentMethods.some((m) => m.method === type)) return reply({ success: false, message: "Invalid payment type" });
         const paymentID = `pay-${nextPayment++}`;
-        r.payments.push({ paymentID, type: params.get("type")!, amount, description: params.get("description") ?? "" });
+        r.payments.push({ paymentID, type, amount, description: params.get("description") ?? "" });
         return reply({ success: true, paymentID });
       }
       case "postCustomItem": {
@@ -320,21 +418,29 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         const start = params.get("startDate") ?? "";
         const end = params.get("endDate") ?? "";
         const nights = eachNight(start, end);
+        // Like the live answer (2026-10-06): per room type the base (BAR) row, named "default", and a derived
+        // "Breakfast" row (+2,000 THB per night, its own roomRateID); propertyCurrency is a single object.
         const rooms = Object.entries(options.roomTypes ?? {})
           .filter(([id]) => freeUnits(id, start, end) > 0)
-          .map(([id, rt]) => ({
-            roomTypeID: id,
-            roomRateID: rt.rateId,
-            roomsAvailable: freeUnits(id, start, end),
-            roomRate: rt.rate * nights.length,
-            roomRateDetailed: nights.map((date) => ({ date, rate: rt.rate })),
-            adultsIncluded: 2,
-            adultsExtraCharge: [],
-            maxGuests: rt.maxGuests ?? 10,
-            derivedType: null,
-            ratePlanNamePublic: null,
-          }));
-        return reply({ success: true, data: [{ propertyID: "235064", propertyCurrency: [{ currencyCode: "THB" }], propertyRooms: rooms }] });
+          .flatMap(([id, rt]) => {
+            const row = (roomRateID: string, rate: number, ratePlanNamePublic: string, derivedType: string | null) => ({
+              roomTypeID: id,
+              roomRateID,
+              roomsAvailable: freeUnits(id, start, end),
+              roomRate: rate * nights.length,
+              roomRateDetailed: nights.map((date) => ({ date, rate })),
+              adultsIncluded: 2,
+              adultsExtraCharge: [],
+              maxGuests: rt.maxGuests ?? 10,
+              derivedType,
+              ratePlanNamePublic,
+            });
+            return [row(rt.rateId, rt.rate, "default", null), row(breakfastRateId(rt), rt.rate + BREAKFAST_FIXED_BAHT, "Breakfast", "fixed")];
+          });
+        return reply({
+          success: true,
+          data: [{ propertyID: "235064", propertyCurrency: { currencyCode: "THB", currencySymbol: "฿", currencyPosition: "before" }, propertyRooms: rooms }],
+        });
       }
       case "getRatePlans": {
         const start = params.get("startDate") ?? "";
@@ -343,18 +449,28 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         const rt = options.roomTypes?.[id];
         if (!rt) return reply({ success: true, data: [] });
         // Like the real API as we read it: one row per date in [startDate, endDate) - the caller asks one day past check-out.
-        const days = eachNight(start, end).map((date, i) => ({
-          date,
-          rateBase: rt.rate,
-          totalRate: rt.rate,
-          roomsAvailable: freeUnits(id, date, addDays(date, 1)),
-          closedToArrival: i === 0 ? rt.closedToArrival === true : false,
-          closedToDeparture: false,
-          blocked: false,
-          minLos: rt.minLos ?? 0,
-          maxLos: 0,
-        }));
-        return reply({ success: true, data: [{ rateID: rt.rateId, roomTypeID: id, isDerived: false, roomRateDetailed: days }] });
+        const days = (rate: number) =>
+          eachNight(start, end).map((date, i) => ({
+            date,
+            rateBase: rate,
+            totalRate: rate,
+            roomsAvailable: freeUnits(id, date, addDays(date, 1)),
+            closedToArrival: i === 0 ? rt.closedToArrival === true : false,
+            closedToDeparture: false,
+            blocked: false,
+            minLos: rt.minLos ?? 0,
+            maxLos: 0,
+          }));
+        // The derived Breakfast row first, so the restriction check must pick its row by rateID, not by order. The
+        // base row has no plan name here (live: null), unlike in getAvailableRoomTypes.
+        const typeOf = options.ratePlansWithoutRoomTypeId ? {} : { roomTypeID: id };
+        return reply({
+          success: true,
+          data: [
+            { rateID: breakfastRateId(rt), ...typeOf, isDerived: true, ratePlanID: "fake-plan-breakfast", ratePlanNamePublic: "Breakfast", roomRateDetailed: days(rt.rate + BREAKFAST_FIXED_BAHT) },
+            { rateID: rt.rateId, ...typeOf, isDerived: false, ratePlanID: null, ratePlanNamePublic: null, roomRateDetailed: days(rt.rate) },
+          ],
+        });
       }
       case "getReservations": {
         // Like the real API as we read it: the window is property-local (Bangkok) creation time.
@@ -412,7 +528,9 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         startDate,
         endDate,
         thirdPartyIdentifier,
-        grandTotal: 0,
+        subTotal: 0,
+        taxesFees: 0,
+        sourceID: null,
         rooms: [{ roomTypeID, roomRateID: null, adults: 2 }],
         payments: [],
         items: [],

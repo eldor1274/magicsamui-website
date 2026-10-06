@@ -1,6 +1,7 @@
 // Cloudbeds room type IDs for the room slugs on this site. Shared by
 // /api/rates (live "tonight" prices on room cards) and the booking preview.
-// tuxedo-3br has no Cloudbeds room type yet, so it is not sold online.
+// tuxedo-3br: no Cloudbeds room type was returned by getRoomTypes (WI-0,
+// 2026-10-06), so it is enquiry-only (not sold online).
 export const ROOM_TYPE_TO_SLUG: Record<string, string> = {
   "462958": "honeymoon-suite",
   "462960": "sunrise-suite",
@@ -19,7 +20,7 @@ export const SLUG_TO_ROOM_TYPE: Record<string, string> = Object.fromEntries(
   Object.entries(ROOM_TYPE_TO_SLUG).map(([id, slug]) => [slug, id])
 );
 
-/** Public Cloudbeds property id (seen in the booking engine's analytics). */
+/** Public Cloudbeds property id (confirmed by getHotelDetails, WI-0, 2026-10-06). */
 export const CLOUDBEDS_PROPERTY_ID = "235064";
 
 /**
