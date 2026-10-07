@@ -95,6 +95,29 @@ export function demoReturnUrl(origin: string, ref: string, token: string, proof:
   return `${origin}${RETURN_PATH}?${q.toString()}`;
 }
 
+/** A code as the booking page accepts it from ?promo= (OwnBookingPage), already upper-cased. */
+const LANDING_PROMO_RE = /^[A-Z0-9_-]{1,32}$/;
+
+/**
+ * Where the homepage search (BOOKING_ENGINE=own) sends the guest: the own
+ * booking page with exactly the one-shot parameters OwnBookingPage prefills -
+ * ?checkin ?checkout ?adults, plus ?promo only when the guest entered a code
+ * where the code pill is offered - so the page opens straight on the results.
+ * A code is never added on the guest's behalf.
+ */
+export function homeSearchPath(
+  search: { checkIn: string; checkOut: string; adults: number; promo: string },
+  promoOffered: boolean,
+  /** One-shot search id (?s): makes every homepage search a fresh landing, even when the same dates are searched again after a change on /booking. */
+  searchId: string = Date.now().toString(36),
+): string {
+  const q = new URLSearchParams({ checkin: search.checkIn, checkout: search.checkOut, adults: String(search.adults) });
+  const promo = search.promo.trim().toUpperCase();
+  if (promoOffered && LANDING_PROMO_RE.test(promo)) q.set("promo", promo);
+  if (/^[a-z0-9]{1,16}$/.test(searchId)) q.set("s", searchId);
+  return `/booking?${q.toString()}`;
+}
+
 /**
  * Query parameters a booking page may keep in the address bar after its
  * one-shot cleanup: the theme, the ?staff device flag, and ad-click / cross-

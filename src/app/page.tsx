@@ -16,8 +16,9 @@ import JsonLd from "@/components/JsonLd";
 import { resortJsonLd } from "@/lib/structuredData";
 import BookNowButton from "@/components/BookNowButton";
 import CloudbedsDatePicker from "@/components/CloudbedsDatePicker";
-import OwnDatePicker from "@/components/OwnDatePickerLazy";
-import { BOOKING_WINDOW_MONTHS, MAX_NIGHTS, directCopySwapped, resolveBookingEngine } from "@/lib/booking/config";
+import HomeSearch from "@/components/HomeSearchLazy";
+import { directCopySwapped, getPublicBookingConfig, resolveBookingEngine } from "@/lib/booking/config";
+import { promoCodeHint, promoInputOffered } from "@/lib/booking/quote";
 import DesktopVideo from "@/components/DesktopVideo";
 import ReviewsSection from "@/components/ReviewsSection";
 import RoomCard from "@/components/RoomCard";
@@ -72,6 +73,23 @@ const essentials = [
 export const metadata: Metadata = {
   alternates: { canonical: "/", languages: LANG_ALTERNATES },
 };
+
+/**
+ * BOOKING_ENGINE=own: the booking page's own search bar, with /booking's limits
+ * and its code pill and hint (exactly as BookingApp passes them to SearchBar).
+ */
+function OwnHomeSearch() {
+  const config = getPublicBookingConfig();
+  return (
+    <HomeSearch
+      maxNights={config.maxNights}
+      bookingWindowMonths={config.bookingWindowMonths}
+      maxAdults={config.maxSearchAdults}
+      promoEnabled={promoInputOffered(config)}
+      promoCodeHint={promoCodeHint(config)}
+    />
+  );
+}
 
 export default function Home() {
   const latestPosts = getAllBlogPosts().slice(0, 3);
@@ -132,9 +150,9 @@ export default function Home() {
       </section>
 
       <section className="mx-auto -mt-9 max-w-3xl px-5">
-        {/* BOOKING_ENGINE=own: our own quick search (same reserved height) sending to /booking; otherwise the Cloudbeds widget. */}
+        {/* BOOKING_ENGINE=own: the booking page's search bar (height reserved) sending to /booking; otherwise the Cloudbeds widget. */}
         {resolveBookingEngine() === "own" ? (
-          <OwnDatePicker maxNights={MAX_NIGHTS} bookingWindowMonths={BOOKING_WINDOW_MONTHS} />
+          <OwnHomeSearch />
         ) : (
           <CloudbedsDatePicker />
         )}

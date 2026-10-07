@@ -39,7 +39,8 @@ function prefill(sp: BookingSearchParams, today: string, promoEnabled: boolean):
 }
 
 /** Parameters BookingApp applies once (see ONE_SHOT_PARAMS there). */
-const ONE_SHOT_PARAMS = ["checkin", "checkout", "adults", "promo", "resume", "reason", "ref", "t"];
+// "s": the homepage search id - only part of the landing fingerprint, so a repeated homepage search is applied again.
+const ONE_SHOT_PARAMS = ["checkin", "checkout", "adults", "promo", "s", "resume", "reason", "ref", "t"];
 
 /**
  * Fingerprint of this load's one-shot parameters (null when there are none).

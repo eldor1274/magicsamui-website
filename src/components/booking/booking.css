@@ -210,9 +210,11 @@ body:has(.bk-hosted-page) > footer {
  * bottomBars.ts publishes as --bk-fab-lift on <html>). Browsers honour
  * scroll-padding when they scroll a newly focused element into view, so a
  * field under the bars is scrolled clear instead of counting as "visible"
- * (WCAG 2.4.11 Focus Not Obscured).
+ * (WCAG 2.4.11 Focus Not Obscured). Not on the homepage, whose search bar
+ * (.bk-home-search, components/HomeSearch.tsx) loads this sheet too: the rest
+ * of that page keeps its own scrolling.
  */
-html:has(.booking-app) {
+html:has(.booking-app):not(:has(.bk-home-search)) {
   scroll-padding-top: 6rem;
   scroll-padding-bottom: calc(var(--bk-fab-lift, 0px) + 1rem);
 }

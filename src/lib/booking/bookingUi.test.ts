@@ -6,6 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { isRestrictionMessage } from "./checkoutMessages.ts";
 import { getPublicBookingConfig, resolveBookingEngine } from "./config.ts";
 import type { Env } from "./config.ts";
@@ -14,7 +15,7 @@ import { canRetryPayment, isPollingView, pollPlan, returnViewKind } from "./retu
 import { RESTRICTION_MESSAGES } from "./stripeCheckout.ts";
 import { STRIPE_LIVE_ENV, STRIPE_TEST_ENV, checkout, makeKit, sessionIdOf } from "./testkit.ts";
 import type { CheckoutSuccess, FulfilmentState, PaymentMode, PaymentStatus, PublicBookingConfig, StatusResponse } from "./types.ts";
-import { resumePaymentPath, returnPagePath, safeBookingBasePath, stripeCancelUrl } from "./urls.ts";
+import { homeSearchPath, resumePaymentPath, returnPagePath, safeBookingBasePath, stripeCancelUrl } from "./urls.ts";
 
 const MOCK_ENV: Env = { BOOKING_PAYMENT_PROVIDER: "stripe", BOOKING_STRIPE_MOCK: "true" };
 const BEAM_ENV: Env = {
@@ -235,6 +236,69 @@ test("restriction refusals are recognised (so the page names the rule), sales ar
   for (const reason of ["blocked", "sold_out", "derived_rate"]) assert.equal(isRestrictionMessage(RESTRICTION_MESSAGES[reason](name)), false, reason);
   assert.equal(isRestrictionMessage("Sorry - a room in your reservation was just booked by someone else. Please choose again."), false);
   assert.equal(isRestrictionMessage(undefined), false);
+});
+
+/* ---------------------------- homepage search ----------------------------- */
+
+const repoSrc = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+
+test("homepage: the booking page's SearchBar under the own engine, the Cloudbeds widget otherwise", () => {
+  const page = repoSrc("app/page.tsx");
+  assert.match(page, /resolveBookingEngine\(\) === "own" \? \(\s*<OwnHomeSearch \/>\s*\) : \(\s*<CloudbedsDatePicker \/>\s*\)/);
+  assert.ok(page.includes('import HomeSearch from "@/components/HomeSearchLazy";'));
+  // Same limits, code pill and hint as BookingApp hands its SearchBar.
+  for (const prop of [
+    "maxNights={config.maxNights}",
+    "bookingWindowMonths={config.bookingWindowMonths}",
+    "maxAdults={config.maxSearchAdults}",
+    "promoEnabled={promoInputOffered(config)}",
+    "promoCodeHint={promoCodeHint(config)}",
+  ]) {
+    assert.ok(page.includes(prop), `homepage passes ${prop}`);
+  }
+  assert.doesNotMatch(page, /OwnDatePicker/);
+
+  // Code-split twice: the default homepage ships only a loader; the bar (and booking.css) loads in the browser only.
+  assert.match(repoSrc("components/HomeSearchLazy.tsx"), /dynamic<HomeSearchProps>\(\(\) => import\("\.\/HomeSearch"\)\);/);
+  const shell = repoSrc("components/HomeSearch.tsx");
+  assert.equal(shell.match(/dynamic<HomeSearchBarProps>\(\(\) => import\("\.\/HomeSearchBar"\), \{\s*ssr: false,/g)?.length, 2);
+  assert.doesNotMatch(shell, /^import (?!type )[^;]*(HomeSearchBar|components\/booking|booking\.css)/m, "no static import of the booking engine");
+  // Server HTML / no JavaScript: a placeholder link to /booking, at the bar's exact height.
+  assert.ok(shell.includes('<a href="/booking" aria-label="Search availability"'));
+  assert.ok(shell.includes("bk-home-search relative z-10 min-h-[240px] md:min-h-[116px]"));
+  assert.ok(shell.includes("<PlaceholderOnError fallback={<HomeSearchPlaceholder"), "a chunk that fails to load leaves the link");
+  assert.ok(shell.includes('track("date_picker_interact")'), "same GA4 event as the earlier form");
+
+  const bar = repoSrc("components/HomeSearchBar.tsx");
+  assert.ok(bar.includes('import SearchBar from "@/components/booking/search/SearchBar";'));
+  assert.ok(bar.includes('variant="hero"') && bar.includes("promoResult={null}"), "hero look; no code is ever applied on the homepage");
+  assert.ok(bar.includes('track("date_picker_submit")'), "same GA4 event as the earlier form");
+  assert.ok(bar.includes("window.location.assign(homeSearchPath("));
+  assert.ok(bar.includes('promo: "" }'), "the code starts empty");
+
+  // booking.css's page-wide scroll padding stays off the homepage.
+  assert.ok(repoSrc("components/booking/booking.css").includes("html:has(.booking-app):not(:has(.bk-home-search)) {"));
+});
+
+test("homepage search URL: exactly the parameters the booking page prefills, the code only when entered and offered", () => {
+  const stay = { checkIn: "2026-11-02", checkOut: "2026-11-05", adults: 3, promo: "" };
+  assert.equal(homeSearchPath(stay, true, "k1"), "/booking?checkin=2026-11-02&checkout=2026-11-05&adults=3&s=k1");
+  assert.equal(homeSearchPath({ ...stay, promo: " direct " }, true, "k1"), "/booking?checkin=2026-11-02&checkout=2026-11-05&adults=3&promo=DIRECT&s=k1");
+  assert.equal(homeSearchPath({ ...stay, promo: "DIRECT" }, false, "k1"), "/booking?checkin=2026-11-02&checkout=2026-11-05&adults=3&s=k1", "no code pill (Beam): no code");
+  assert.equal(homeSearchPath({ ...stay, promo: "DI RECT!" }, true, "k1"), "/booking?checkin=2026-11-02&checkout=2026-11-05&adults=3&s=k1", "a code the page would drop");
+  // Every homepage search gets a fresh one-shot id, so the same dates searched again are applied again on /booking.
+  assert.notEqual(new URL(homeSearchPath(stay, true, "a"), "https://x").searchParams.get("s"), new URL(homeSearchPath(stay, true, "b"), "https://x").searchParams.get("s"));
+  assert.match(new URL(homeSearchPath(stay, true), "https://x").searchParams.get("s") ?? "", /^[a-z0-9]{1,16}$/);
+  const url = new URL(homeSearchPath({ ...stay, promo: "summer_26" }, true), "https://magicsamui.com");
+  assert.equal(url.pathname, "/booking");
+  assert.deepEqual([...url.searchParams.keys()].sort(), ["adults", "checkin", "checkout", "promo", "s"]);
+  assert.equal(url.searchParams.get("promo"), "SUMMER_26");
+  // ...which are the one-shot landing parameters OwnBookingPage reads.
+  const own = readFileSync(new URL("../../components/booking/OwnBookingPage.tsx", import.meta.url), "utf8");
+  for (const k of ["checkin", "checkout", "adults", "promo"]) {
+    assert.ok(own.includes(`one(sp.${k})`), `OwnBookingPage reads ?${k}`);
+  }
+  assert.ok(own.includes('const ONE_SHOT_PARAMS = ["checkin", "checkout", "adults", "promo", "s",'), "?s is a one-shot landing parameter (fingerprinted and cleaned from the address bar)");
 });
 
 /* ------------------------------ engine switch ----------------------------- */
