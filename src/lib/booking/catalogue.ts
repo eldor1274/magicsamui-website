@@ -147,7 +147,7 @@ export function hasUnitConflict(slugs: string[]): boolean {
  * the terms the guest actually saw. bookingTerms.test.ts pins a fingerprint of
  * HOUSE_POLICIES per version, so a text change without a new version fails.
  */
-export const POLICY_VERSION = "2026-10-06";
+export const POLICY_VERSION = "2026-10-07";
 
 /** Free transfer on arrival for stays of at least this many nights. */
 export const FREE_PICKUP_MIN_NIGHTS = 2;
@@ -189,8 +189,8 @@ export const HOUSE_POLICIES = {
     "No smoking inside (the terrace is fine) - 2,000 THB fee.",
     "No toilet paper or sanitary items in the toilet - 2,000 THB fee.",
     "Photo ID is required at check-in.",
-    "Late check-out is not available.",
-    "Cleaning during your stay: 300 THB per suite (sheets and towels are changed free every 3 days).",
+    "Late check-out is rarely possible: every suite is one of a kind, so there is no identical room to move the next guests to.",
+    "Cleaning is included, with fresh sheets and towels every 3 days. Extra cleaning on request: 300 THB for a general clean, 500 THB for a full clean.",
     "A lost key or access card is 500 THB; damage or missing items are charged.",
   ],
   /** What the guest agrees to (the checkbox and the payment fine print). */

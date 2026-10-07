@@ -34,7 +34,7 @@ const component = (name: string) => componentSources.find((c) => c.name.replaceA
 /* ------------------------------- the copy ------------------------------- */
 
 test("HOUSE_POLICIES holds the owner's terms of 6 Oct 2026", () => {
-  assert.equal(POLICY_VERSION, "2026-10-06");
+  assert.equal(POLICY_VERSION, "2026-10-07");
   assert.deepEqual([HOUSE_POLICIES.checkInTime, HOUSE_POLICIES.checkInEndTime, HOUSE_POLICIES.checkOutTime], ["3:00 PM", "11:00 PM", "11:00 AM"]);
   assert.equal(HOUSE_POLICIES.checkIn, "Check-in 3:00 PM - 11:00 PM");
   assert.equal(HOUSE_POLICIES.arrivalHint, "Check-in is 3:00 PM - 11:00 PM. Arriving later? Message us on WhatsApp first so we can arrange it.");
@@ -61,8 +61,8 @@ test("HOUSE_POLICIES holds the owner's terms of 6 Oct 2026", () => {
     /^No smoking inside \(the terrace is fine\) - 2,000 THB fee\.$/m,
     /^No toilet paper or sanitary items in the toilet - 2,000 THB fee\.$/m,
     /^Photo ID is required at check-in\.$/m,
-    /^Late check-out is not available\.$/m,
-    /300 THB per suite \(sheets and towels are changed free every 3 days\)/,
+    /^Late check-out is rarely possible: every suite is one of a kind, so there is no identical room to move the next guests to\.$/m,
+    /^Cleaning is included, with fresh sheets and towels every 3 days\. Extra cleaning on request: 300 THB for a general clean, 500 THB for a full clean\.$/m,
     /lost key or access card is 500 THB; damage or missing items are charged/,
   ]) {
     assert.match(rules, re);
@@ -74,6 +74,7 @@ test("HOUSE_POLICIES holds the owner's terms of 6 Oct 2026", () => {
 // One entry per terms version. Never edit an existing entry: any change to HOUSE_POLICIES needs a new POLICY_VERSION.
 const TERMS_FINGERPRINTS: Record<string, string> = {
   "2026-10-06": "d6d99e184c1121b6d66ca17b7579c5150330a74ad6851c0622f461c209c5ca1d",
+  "2026-10-07": "a4f2c6ee4109ba3b69f8a6b039a6c2cffcec275c61c55d759f15238e9171a3b1",
 };
 
 test("the terms text is pinned to POLICY_VERSION: any change to HOUSE_POLICIES needs a new version", () => {
