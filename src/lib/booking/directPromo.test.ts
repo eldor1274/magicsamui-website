@@ -414,8 +414,8 @@ test("happy path: DIRECT books the Direct rate - hold on its roomRateID with the
   const afterLock = kit.fakeCb.calls.slice(restrictionsAt + 1);
   assert.equal(afterLock.some((c) => c.method === "getRatePlans" && c.params.roomTypeID === undefined), false, "no promo-rate read in the re-check");
   const recheckReads = afterLock.filter((c) => c.method === "getAvailableRoomTypes");
-  assert.equal(recheckReads.length, 4, "the re-check: adults=1 and the 2-adult gate, each plain + with the code");
-  assert.equal(recheckReads.filter((c) => c.params.promoCode === FAKE_DIRECT_PROMO_CODE).length, 2, "the re-check still asks with the promo code");
+  assert.equal(recheckReads.length, 2, "the re-check: adults=1 and the 2-adult gate, availability only");
+  assert.equal(recheckReads.some((c) => c.params.promoCode !== undefined), false, "the re-check reads without the code (the stay-rule read re-confirms the Direct row)");
   const reservation = kit.fakeCb.reservations.get(body.holdReservationId!)!;
   assert.match(reservation.notes.join("\n"), /Direct rate \(code DIRECT\)\./);
 

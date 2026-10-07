@@ -251,17 +251,17 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
       });
     }
     // Re-read under the unit lock just before the hold: another checkout may have taken the unit since.
-    // With the code it reuses the re-quote's promo-rate index (no second getRatePlans read before the hold):
-    // it only tests availability, and the stay-rule read under the same lock (restrictions with the
-    // promo) re-confirms the Direct row - its promo code and its base row - on fresh data.
-    const recheckPromo = cloudbedsPromo ? { ...cloudbedsPromo, ...(inventoryResult.promoRates ? { rates: inventoryResult.promoRates } : {}) } : undefined;
+    // It reads WITHOUT the code even for a Direct cart: it only tests availability, which the Direct rows
+    // can't change (a Direct row sells only next to its base row), and every extra Cloudbeds read here is
+    // one more way to refuse a checkout right before the hold. The stay-rule read under the same lock
+    // (restrictions with the promo) re-confirms the Direct row - its promo code and its base row - on
+    // fresh data, and the folio read-back checks the price.
     const recheckAvailability =
       dataSource === "cloudbeds"
         ? async (): Promise<string[]> => {
             const fresh = await getCartInventory(req.checkIn, req.checkOut, req.items, config, {
               fetchImpl: deps.fetchImpl,
               allowDemoFallback: false,
-              ...(recheckPromo ? { promo: recheckPromo } : {}),
             });
             if (fresh.dataSource !== "cloudbeds") throw new Error("live availability unavailable");
             return unavailableCartSlugs(req.items, buildOffers(fresh.inventory, 1, config.ratePlans));
