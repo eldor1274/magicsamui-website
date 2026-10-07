@@ -244,7 +244,12 @@ const repoSrc = (path: string) => readFileSync(new URL(`../../${path}`, import.m
 
 test("homepage: the booking page's SearchBar under the own engine, the Cloudbeds widget otherwise", () => {
   const page = repoSrc("app/page.tsx");
-  assert.match(page, /resolveBookingEngine\(\) === "own" \? \(\s*<OwnHomeSearch \/>\s*\) : \(\s*<CloudbedsDatePicker \/>\s*\)/);
+  assert.ok(page.includes('const ownEngine = resolveBookingEngine() === "own";'));
+  assert.match(page, /ownEngine \? \(\s*<OwnHomeSearch \/>\s*\) : \(\s*<CloudbedsDatePicker \/>\s*\)/);
+  // From md up the bar sits inside the bottom of the hero video (the hero text moves up to make room), like the booking
+  // page's bar over its photo; the Cloudbeds path keeps the old classes exactly.
+  assert.ok(page.includes('ownEngine ? " md:pb-48" : ""'));
+  assert.ok(page.includes('ownEngine ? "relative z-10 mx-auto -mt-9 max-w-3xl px-5 md:-mt-40" : "mx-auto -mt-9 max-w-3xl px-5"'));
   assert.ok(page.includes('import HomeSearch from "@/components/HomeSearchLazy";'));
   // Same limits, code pill and hint as BookingApp hands its SearchBar.
   for (const prop of [

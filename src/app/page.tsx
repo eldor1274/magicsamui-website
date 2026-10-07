@@ -93,6 +93,9 @@ function OwnHomeSearch() {
 
 export default function Home() {
   const latestPosts = getAllBlogPosts().slice(0, 3);
+  // Own engine: the search bar sits inside the bottom of the hero video from md up, like the booking page's
+  // bar over its photo (the hero text moves up to make room); on phones it stays just under the hero.
+  const ownEngine = resolveBookingEngine() === "own";
 
   return (
     <>
@@ -126,7 +129,7 @@ export default function Home() {
           <Star size={12} className="text-sand" fill="currentColor" strokeWidth={0} />
           {reviewStats.booking.score} Booking.com · {reviewStats.airbnb.score} Airbnb
         </a>
-        <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 text-ink sm:text-stone-50">
+        <div className={`relative mx-auto w-full max-w-6xl px-5 pb-16 text-ink sm:text-stone-50${ownEngine ? " md:pb-48" : ""}`}>
           <p className="text-base font-semibold uppercase tracking-[0.3em] text-ink sm:text-stone-100/90">
             Koh Samui, Thailand
           </p>
@@ -149,9 +152,9 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="mx-auto -mt-9 max-w-3xl px-5">
+      <section className={ownEngine ? "relative z-10 mx-auto -mt-9 max-w-3xl px-5 md:-mt-40" : "mx-auto -mt-9 max-w-3xl px-5"}>
         {/* BOOKING_ENGINE=own: the booking page's search bar (height reserved) sending to /booking; otherwise the Cloudbeds widget. */}
-        {resolveBookingEngine() === "own" ? (
+        {ownEngine ? (
           <OwnHomeSearch />
         ) : (
           <CloudbedsDatePicker />
