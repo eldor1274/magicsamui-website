@@ -430,6 +430,40 @@ export function cloudbedsReadHeaders(apiKey: string, propertyId: string | null):
   return { "x-api-key": apiKey, accept: "application/json", ...(propertyId ? { "X-PROPERTY-ID": propertyId } : {}) };
 }
 
+/**
+ * A plain getAvailableRoomTypes answer plus the rows only the promo-code answer has (the Direct rows),
+ * matched by property and deduplicated by roomTypeID + roomRateID. Either answer failing fails the read.
+ * Exported for tests.
+ */
+export function mergePromoAnswer(plain: unknown, withCode: unknown, log?: (message: string, data?: Record<string, unknown>) => void): unknown {
+  const base = asRecord(plain);
+  const promo = asRecord(withCode);
+  if (!base || base.success !== true) return plain; // the parser reports the failed answer
+  if (!promo || promo.success !== true) {
+    throw new CloudbedsError(`getAvailableRoomTypes (promo code) failed: ${String(promo?.message ?? "no success flag")}`);
+  }
+  const key = (row: unknown) => `${String(asRecord(row)?.roomTypeID ?? "")}|${String(asRecord(row)?.roomRateID ?? "")}`;
+  const baseProps = (Array.isArray(base.data) ? base.data : []).map((p) => ({ ...(asRecord(p) ?? {}) }));
+  let added = 0;
+  for (const p of Array.isArray(promo.data) ? promo.data : []) {
+    const prop = asRecord(p);
+    if (!prop) continue;
+    const target = baseProps.find((b) => String(b.propertyID ?? "") === String(prop.propertyID ?? "")) ?? baseProps[0];
+    if (!target) continue;
+    const rows = Array.isArray(target.propertyRooms) ? [...target.propertyRooms] : [];
+    const seen = new Set(rows.map(key));
+    for (const row of Array.isArray(prop.propertyRooms) ? prop.propertyRooms : []) {
+      if (seen.has(key(row))) continue;
+      seen.add(key(row));
+      rows.push(row);
+      added += 1;
+    }
+    target.propertyRooms = rows;
+  }
+  log?.("cloudbeds_promo_rows", { added });
+  return { ...base, data: baseProps };
+}
+
 const searchCache = new Map<string, { expiresAt: number; inventory: RoomInventory[] }>();
 
 export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, deps: CloudbedsDeps): Promise<RoomInventory[]> {
@@ -444,25 +478,31 @@ export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, de
     pageSize: "50",
   });
   if (deps.propertyId) params.set("propertyIDs", deps.propertyId);
-  // The Direct rate plan is a promo-code plan: Cloudbeds returns its rows only when asked with the code.
-  if (deps.promo) params.set("promoCode", deps.promo.cloudbedsCode);
   const url = `${CLOUDBEDS_API_BASE}/getAvailableRoomTypes?${params.toString()}`;
+  // The Direct rate plan is a promo-code plan: Cloudbeds returns its rows only when asked with the code,
+  // and then WITHOUT the base rows (live, Stage B 2026-10-07: every room looked sold out). So a search
+  // with the code asks twice - plain for the base rows, with the code for the Direct rows - and parses both.
+  const promoUrl = deps.promo ? `${url}&${new URLSearchParams({ promoCode: deps.promo.cloudbedsCode }).toString()}` : null;
 
   const nowMs = deps.nowMs ?? Date.now();
   const ttl = deps.cacheTtlMs ?? 0;
   const promoKey = deps.promo ? JSON.stringify(deps.promo.rates) : "-";
-  const cacheKey = `${deps.apiKey.slice(-6)}|${deps.baseRateOnly ? "base" : "any"}|${promoKey}|${url}`;
+  const cacheKey = `${deps.apiKey.slice(-6)}|${deps.baseRateOnly ? "base" : "any"}|${promoKey}|${promoUrl ?? url}`;
   if (ttl > 0) {
     const hit = searchCache.get(cacheKey);
     if (hit && hit.expiresAt > nowMs) return hit.inventory;
   }
 
   const budget = deps.budget ?? (deps.fetchImpl ? null : CLOUDBEDS_PREVIEW_BUDGET);
-  if (budget && !(await acquire(budget, deps.budgetWaitMs ?? 0))) throw new CloudbedsBudgetError();
-
-  const res = await readCall(url, { headers: cloudbedsReadHeaders(deps.apiKey, deps.propertyId), cache: "no-store" }, deps, budget ?? null);
-  if (!res.ok) throw new CloudbedsError(`getAvailableRoomTypes HTTP ${res.status}`);
-  const inventory = parseAvailableRoomTypes(await res.json(), checkIn, checkOut, {
+  const read = async (target: string): Promise<unknown> => {
+    if (budget && !(await acquire(budget, deps.budgetWaitMs ?? 0))) throw new CloudbedsBudgetError();
+    const res = await readCall(target, { headers: cloudbedsReadHeaders(deps.apiKey, deps.propertyId), cache: "no-store" }, deps, budget ?? null);
+    if (!res.ok) throw new CloudbedsError(`getAvailableRoomTypes HTTP ${res.status}`);
+    return res.json();
+  };
+  const [plain, withCode] = await Promise.all([read(url), promoUrl ? read(promoUrl) : Promise.resolve(null)]);
+  const answer = withCode === null ? plain : mergePromoAnswer(plain, withCode, deps.log ?? logEvent);
+  const inventory = parseAvailableRoomTypes(answer, checkIn, checkOut, {
     baseRateOnly: deps.baseRateOnly,
     onNoBaseRate: deps.onNoBaseRate,
     log: deps.log ?? logEvent,

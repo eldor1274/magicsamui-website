@@ -108,6 +108,12 @@ export interface FakeCloudbedsOptions {
    * (postReservation ignores rate plans and promos) - unconfirmed until Stage B; the engine must refuse it.
    */
   directPricedAtBase?: boolean;
+  /**
+   * getAvailableRoomTypes asked with the promo code also returns the base and Breakfast rows. Default false,
+   * as live (Stage B 2026-10-07): with the code Cloudbeds returns only the promo plan's rows, so the engine
+   * must ask once without the code for the base rows (cloudbedsInventory).
+   */
+  promoAnswerKeepsBase?: boolean;
   now?: () => number;
 }
 
@@ -464,11 +470,9 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
               derivedType,
               ratePlanNamePublic,
             });
-            return [
-              row(rt.rateId, rt.rate, "default", null),
-              row(breakfastRateId(rt), rt.rate + BREAKFAST_FIXED_BAHT, "Breakfast", "fixed"),
-              ...(promoAsked && rt.directRateId ? [row(rt.directRateId, fakeDirectRate(rt), "Direct booking rate", "percentage")] : []),
-            ];
+            const direct = promoAsked && rt.directRateId ? [row(rt.directRateId, fakeDirectRate(rt), "Direct booking rate", "percentage")] : [];
+            if (promoAsked && options.promoAnswerKeepsBase !== true) return direct;
+            return [row(rt.rateId, rt.rate, "default", null), row(breakfastRateId(rt), rt.rate + BREAKFAST_FIXED_BAHT, "Breakfast", "fixed"), ...direct];
           });
         return reply({
           success: true,

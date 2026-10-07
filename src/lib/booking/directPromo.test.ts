@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { NO_BASE_RATE_ERROR_WINDOW_MS, buildOffers, getInventory, promoVerdictForInventory } from "./availability.ts";
 import { runCheckout } from "./checkout.ts";
 import { couponOf, purchaseParams } from "./clientAnalytics.ts";
-import { evaluateRestrictions, parseAvailableRoomTypes, parsePromoRatePlans } from "./cloudbedsProvider.ts";
+import { evaluateRestrictions, mergePromoAnswer, parseAvailableRoomTypes, parsePromoRatePlans } from "./cloudbedsProvider.ts";
 import type { PromoRateIndex } from "./cloudbedsProvider.ts";
 import { directCopySwapped, getBookingConfig, getInventoryConfig, getPublicBookingConfig } from "./config.ts";
 import type { Env } from "./config.ts";
@@ -161,7 +161,9 @@ test("availability with the code: Cloudbeds is asked with its promo code and the
   assert.equal(kit.fakeCb.count("getRatePlans"), 0);
 
   const withCode = await getInventory(FAR_CHECKIN, FAR_CHECKOUT, kit.config, { fetchImpl: kit.fakeCb.fetch, allowDemoFallback: false, promo: { cloudbedsCode: "Direct" } });
-  assert.equal(kit.fakeCb.calls.filter((c) => c.method === "getAvailableRoomTypes")[1].params.promoCode, "Direct");
+  // Live, Cloudbeds' answer WITH the code has no base rows (Stage B 2026-10-07), so the search asks twice: plain and with the code.
+  const withCodeReads = kit.fakeCb.calls.filter((c) => c.method === "getAvailableRoomTypes").slice(1);
+  assert.deepEqual(withCodeReads.map((c) => c.params.promoCode ?? null).sort(), ["Direct", null]);
   assert.equal(unfilteredRatePlanReads(kit), 1, "one getRatePlans read for every room type");
   const hm = withCode.inventory.find((i) => i.slug === "honeymoon-suite")!;
   assert.equal(hm.rateId, "rate-hm-direct");
@@ -412,8 +414,8 @@ test("happy path: DIRECT books the Direct rate - hold on its roomRateID with the
   const afterLock = kit.fakeCb.calls.slice(restrictionsAt + 1);
   assert.equal(afterLock.some((c) => c.method === "getRatePlans" && c.params.roomTypeID === undefined), false, "no promo-rate read in the re-check");
   const recheckReads = afterLock.filter((c) => c.method === "getAvailableRoomTypes");
-  assert.equal(recheckReads.length, 2, "the re-check: adults=1 and the 2-adult gate");
-  assert.ok(recheckReads.every((c) => c.params.promoCode === FAKE_DIRECT_PROMO_CODE), "the re-check still asks with the promo code");
+  assert.equal(recheckReads.length, 4, "the re-check: adults=1 and the 2-adult gate, each plain + with the code");
+  assert.equal(recheckReads.filter((c) => c.params.promoCode === FAKE_DIRECT_PROMO_CODE).length, 2, "the re-check still asks with the promo code");
   const reservation = kit.fakeCb.reservations.get(body.holdReservationId!)!;
   assert.match(reservation.notes.join("\n"), /Direct rate \(code DIRECT\)\./);
 
@@ -672,4 +674,17 @@ test("production wiring: runtime.ts passes the selected Direct rate into the sta
   const rt = readFileSync(new URL("./runtime.ts", import.meta.url), "utf8");
   assert.match(rt, /restrictions:\s*\([^)]*promo\?:\s*PromoRestrictionInput \| null\)\s*=>/);
   assert.match(rt, /cloudbedsRestrictions\(\s*roomTypeId,\s*rateId,\s*checkIn,\s*checkOut,\s*adults,\s*\{[^}]*\},\s*promo \?\? null,?\s*\)/);
+});
+
+test("mergePromoAnswer: the plain answer's base rows plus the rows only the promo-code answer has (live: no base rows with the code); a failed promo answer fails the read", () => {
+  const plain = { success: true, data: [{ propertyID: "235064", propertyRooms: [{ roomTypeID: "462958", roomRateID: "hm-base" }, { roomTypeID: "462960", roomRateID: "sr-base" }] }] };
+  const withCode = { success: true, data: [{ propertyID: "235064", propertyRooms: [{ roomTypeID: "462958", roomRateID: "hm-direct" }, { roomTypeID: "462958", roomRateID: "hm-base" }] }] };
+  const logged: unknown[] = [];
+  const merged = mergePromoAnswer(plain, withCode, (_m, d) => void logged.push(d)) as typeof plain;
+  assert.deepEqual(merged.data[0].propertyRooms.map((r) => r.roomRateID), ["hm-base", "sr-base", "hm-direct"]);
+  assert.deepEqual(logged, [{ added: 1 }]);
+  assert.deepEqual(plain.data[0].propertyRooms.length, 2, "the plain answer itself is not modified");
+  // An empty promo answer (the code applies to nothing) leaves the base rows.
+  assert.deepEqual((mergePromoAnswer(plain, { success: true, data: [] }) as typeof plain).data[0].propertyRooms.length, 2);
+  assert.throws(() => mergePromoAnswer(plain, { success: false, message: "Invalid promo code" }), /promo code\) failed: Invalid promo code/);
 });
