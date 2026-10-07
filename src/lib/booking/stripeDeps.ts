@@ -19,7 +19,7 @@ export type AlertFn = (subject: string, lines: string[], options?: { key?: strin
 
 export type LogFn = (message: string, data?: Record<string, unknown>) => void;
 
-/** `promo`: the Direct rate this checkout selected for the room (checked with its base row; see evaluateRestrictions). */
+/** `promo`: the discounted rate (a promo code's or automatic) this checkout selected for the room (checked with its base row; see evaluateRestrictions). */
 export type RestrictionsFn = (
   roomTypeId: string,
   rateId: string | null,

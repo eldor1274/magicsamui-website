@@ -31,8 +31,9 @@ function prefill(sp: BookingSearchParams, today: string, promoEnabled: boolean):
   const adults = Number(one(sp.adults));
   if (Number.isInteger(adults) && adults >= 1 && adults <= MAX_SEARCH_ADULTS) out.adults = adults;
   // Where no code input is offered (Beam modes) a ?promo= from an ad link (e.g. ?promo=DIRECT) is dropped
-  // quietly. On the own engine it is applied (Cloudbeds' Direct rate) or, where the Direct rate can't be sold,
-  // answered with a note linking the classic booking page.
+  // quietly. On the own engine any well-formed code is applied (DIRECT: Cloudbeds' Direct rate; any other code:
+  // the plan the owner set up for it in Cloudbeds, e.g. ?promo=LONGSTAY) or answered with a note (unknown code,
+  // or a page that can't apply codes: the classic booking page).
   const promo = one(sp.promo);
   if (promoEnabled && promo && /^[A-Za-z0-9_-]{1,32}$/.test(promo)) out.promo = promo.toUpperCase();
   return Object.keys(out).length > 0 ? out : null;

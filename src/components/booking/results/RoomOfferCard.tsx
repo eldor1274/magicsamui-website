@@ -41,8 +41,9 @@ export interface RoomOfferCardProps {
   /** A valid promo from the search: rate rows show the discounted price, as the summary will. */
   promo?: { code: string; pct: number } | null;
   /**
-   * The guest's code when it sells Cloudbeds' Direct rate: rates on it show the base price struck
-   * through and "Direct rate - code X"; a room without it says the code doesn't apply to it.
+   * The guest's code when it sells a Cloudbeds promo-code rate (the Direct rate, or another code's plan): rates on it
+   * show the base price struck through and "Direct rate - code X" (or "<plan> - code X"); a room without it says the
+   * code doesn't apply to it.
    */
   directCode?: string | null;
   /**
@@ -259,9 +260,10 @@ function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason,
   const plan = RATE_PLANS[rate.ratePlanId];
   const hasDetails = plan.image !== null || plan.policy.length > 0;
   const perGuest = rate.supplementSatangPerGuestPerNight > 0;
-  // A discounted Cloudbeds rate - the Direct rate, or an automatic discount plan (no code): the base rate struck
-  // through, the discounted price (what is held and charged) below it, and ONE label: the plan's name for an
-  // automatic discount (also next to a code), "Direct rate - code X" for the Direct rate (none without the code).
+  // A discounted Cloudbeds rate - a promo code's (the Direct rate, or another code's plan), or an automatic discount
+  // plan (no code): the base rate struck through, the discounted price (what is held and charged) below it, and ONE
+  // label: the plan's name for an automatic discount (also next to a code), "Direct rate - code X" for the Direct rate,
+  // "<plan> - code X" for another code (none without the code).
   const listTotal = listTotalForAdults(rate, defaultAdults);
   const discountLabel = listTotal !== null ? rateDiscountLabel(rate.list, directCode) : null;
   const total = rateTotalForAdults(rate, defaultAdults);

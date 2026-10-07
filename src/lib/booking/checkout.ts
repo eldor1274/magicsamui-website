@@ -5,7 +5,7 @@
 // - stripe: HOLD FIRST - Cloudbeds reservation, price assertion, then a
 //   Stripe Checkout Session (stripeCheckout.ts).
 
-import { InventoryUnavailableError, buildOffers, getCartInventory } from "./availability.ts";
+import { InventoryUnavailableError, buildOffers, getCartInventory, promoAskFor } from "./availability.ts";
 import { createPaymentLink, buildPaymentLinkRequest, BeamApiError } from "./beam.ts";
 import { POLICY_VERSION, getCatalogueRoom } from "./catalogue.ts";
 import {
@@ -131,20 +131,18 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
     }
   }
 
-  // Demo / Beam: the site-side % (an unknown code is refused, as before). Stripe: the guest's code
-  // sells Cloudbeds' own Direct rate (direct-rate), re-quoted from Cloudbeds below like every price -
-  // the browser sends only the code, never a rate. Any other code (or a Stripe page that can't apply
-  // it, e.g. ?promo=DIRECT from an old ad link) is ignored, never an error.
-  let promo: PromoResult | null;
-  if (provider === "stripe") {
-    const r = config.promo.mode === "direct-rate" ? resolvePromoFor(req.promo, config.promo, "") : null;
-    promo = r?.valid ? r : null;
-  } else {
+  // Demo / Beam: the site-side % (an unknown code is refused, as before). Stripe: the guest's code sells a
+  // Cloudbeds promo-code rate (direct-rate) - the Direct rate for DIRECT, or the plan of any other code set
+  // up in Cloudbeds - re-quoted from Cloudbeds below like every price: the browser sends only the code,
+  // never a rate. A code no sellable plan carries (or a Stripe page that can't apply codes, e.g.
+  // ?promo=DIRECT from an old ad link) is ignored, never an error.
+  let promo: PromoResult | null = null;
+  if (provider !== "stripe") {
     promo = resolvePromo(req.promo, config.promoPct, config.promo.code);
     if (promo && !promo.valid) return fail(400, { error: "promo_invalid", message: promo.message });
   }
-  /** Cloudbeds is asked with its promo code (and its Direct rows are sold) only for a valid code on a direct-rate deployment. */
-  const cloudbedsPromo = provider === "stripe" && promo?.valid ? { cloudbedsCode: config.promo.cloudbedsCode } : undefined;
+  /** Stripe, direct-rate: how Cloudbeds is asked for the code (DIRECT as configured; any other code looked up in the rate-plan index). */
+  const promoAsk = provider === "stripe" ? promoAskFor(req.promo, config.promo) : null;
 
   if (!dataSourceAllowsPayment(config.paymentMode, config.dataSource)) {
     deps.log?.("checkout_refused_data_source", { mode: config.paymentMode, dataSource: config.dataSource });
@@ -159,7 +157,7 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
       allowDemoFallback: config.paymentMode === "demo" || config.paymentMode === "stripe-mock",
       onFallback: (e) => deps.log?.("cloudbeds_fallback", { error: e instanceof Error ? e.message : String(e) }),
       onOccupancyPricing: (note) => deps.log?.("cloudbeds_occupancy_rate_differs", { ...note }),
-      ...(cloudbedsPromo ? { promo: cloudbedsPromo } : {}),
+      ...(promoAsk ? { promo: promoAsk } : {}),
     });
   } catch (e) {
     if (!(e instanceof InventoryUnavailableError)) throw e;
@@ -168,6 +166,19 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
     return fail(503, { error: "payment_unavailable", message: LIVE_AVAILABILITY_UNCONFIRMED });
   }
   const { inventory, dataSource } = inventoryResult;
+  /**
+   * Stripe: the code's verdict on the re-quote's own rate-plan read, and the promo code Cloudbeds was asked with (its
+   * rows sold, and sent with the hold): CLOUDBEDS_PROMO_CODE for DIRECT, Cloudbeds' own spelling of any other code.
+   */
+  let cloudbedsPromo: { cloudbedsCode: string } | undefined;
+  if (promoAsk) {
+    const r = resolvePromoFor(req.promo, config.promo, "", inventoryResult.promoLookup ?? null);
+    const cloudbedsCode = "code" in promoAsk ? inventoryResult.promoLookup?.cloudbedsCode : promoAsk.cloudbedsCode;
+    if (r?.valid && cloudbedsCode) {
+      promo = r;
+      cloudbedsPromo = { cloudbedsCode };
+    }
+  }
   if (!dataSourceAllowsPayment(config.paymentMode, dataSource)) {
     deps.log?.("checkout_refused_data_source", { mode: config.paymentMode, dataSource });
     return fail(503, { error: "payment_unavailable", message: LIVE_AVAILABILITY_UNCONFIRMED });
@@ -269,9 +280,13 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
             return unavailableCartSlugs(req.items, buildOffers(fresh.inventory, 1, config.ratePlans));
           }
         : undefined;
-    // The Direct rate is held only where the server's own re-quote put a room on it; so is an automatic
-    // discount (the re-quote's inventory carries it, nothing the browser sent).
-    const directPromo = quote.directRate && cloudbedsPromo ? { code: quote.directRate.code, cloudbedsCode: cloudbedsPromo.cloudbedsCode } : null;
+    // A promo code's rate is held only where the server's own re-quote put a room on it; so is an automatic
+    // discount (the re-quote's inventory carries it, nothing the browser sent). A code other than DIRECT is named
+    // by its plan in the guest's messages and the owner's alerts.
+    const directPromo =
+      quote.directRate && cloudbedsPromo
+        ? { code: quote.directRate.code, cloudbedsCode: cloudbedsPromo.cloudbedsCode, ...(promoAsk && "code" in promoAsk ? { generic: true as const } : {}) }
+        : null;
     return startStripeCheckout(
       { checkIn: req.checkIn, checkOut: req.checkOut, items: req.items, guest, quote, inventory, dataSource, theme: req.theme, today, recheckAvailability, promo: directPromo },
       {

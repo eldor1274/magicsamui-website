@@ -65,9 +65,10 @@ export interface HoldInput {
   /** postReservation sourceID (config.cloudbedsSourceId); null/absent = not sent (Cloudbeds' default source). */
   sourceId?: string | null;
   /**
-   * postReservation promoCode: Cloudbeds' code of the Direct rate (config CLOUDBEDS_PROMO_CODE), sent when a
-   * room is held on a Direct roomRateID (v1.3: "Required for specials and packages that uses it. 'rateID'
-   * parameter required for using 'promoCode'"). null/absent = not sent.
+   * postReservation promoCode: the guest's code as Cloudbeds spells it (the Direct rate's CLOUDBEDS_PROMO_CODE, or
+   * another code's own spelling from getRatePlans), sent when a room is held on that code's roomRateID (v1.3:
+   * "Required for specials and packages that uses it. 'rateID' parameter required for using 'promoCode'").
+   * null/absent = not sent.
    */
   promoCode?: string | null;
   /**

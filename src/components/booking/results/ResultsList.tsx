@@ -92,7 +92,7 @@ export default function ResultsList({
           inCart={cart.some((c) => c.slug === offer.slug)}
           blockedReason={blockedReason(offer.slug)}
           onAdd={(ratePlanId, adults) => onAdd({ slug: offer.slug, ratePlanId, adults })}
-          // The demo's site-side %; Cloudbeds' Direct rate (pct 0) is already in the rates (RateOffer.list).
+          // The demo's site-side %; a Cloudbeds promo-code rate (pct 0: DIRECT or another code) is already in the rates (RateOffer.list).
           promo={availability.promo?.valid && availability.promo.pct > 0 ? { code: availability.promo.code, pct: availability.promo.pct } : null}
           directCode={availability.promo?.valid && availability.promo.pct === 0 ? availability.promo.code : null}
           feePct={feePct}

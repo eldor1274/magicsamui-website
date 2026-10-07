@@ -98,10 +98,11 @@ test("public config: the code pill and hint follow the promo mode (the hint only
 
 /* ------------------------------ code verdicts ------------------------------ */
 
-test("resolvePromoFor: direct-rate accepts the code (any case, trimmed) with no site-side %; other codes are not recognised", () => {
+test("resolvePromoFor: direct-rate accepts the code (any case, trimmed) with no site-side %; another code only as the rate-plan index finds it (promoCodes.test.ts)", () => {
   const s = getBookingConfig(STRIPE_TEST_ENV).promo;
   assert.deepEqual(resolvePromoFor(" direct ", s, "/booking"), { code: "DIRECT", valid: true, pct: 0, label: "Direct rate" });
-  assert.deepEqual(resolvePromoFor("FREE", s, "/booking"), { code: "FREE", valid: false, message: "We don't recognise the code FREE." });
+  // Without the rate-plan index's lookup, any other code fails closed.
+  assert.deepEqual(resolvePromoFor("FREE", s, "/booking"), { code: "FREE", valid: false, message: "Code FREE isn't valid for these dates." });
   assert.equal(resolvePromoFor("<b>", s, "/booking")?.valid, false);
   assert.equal(resolvePromoFor("", s, "/booking"), null);
 });
@@ -121,9 +122,11 @@ test("flag off (or no Cloudbeds rates): the code gets a clear note linking the c
     }
   }
   assert.equal(getPublicBookingConfig({ ...MOCK_ENV, BOOKING_ENGINE: "own" }).classicBookingPath, "/booking/classic");
-  // An unknown code there is just not recognised (no link).
-  const r = resolvePromoFor("FREE", getInventoryConfig({ ...STRIPE_TEST_ENV, BOOKING_DIRECT_PROMO: "off" }).promo, "/booking");
-  assert.ok(r && !r.valid && r.link === undefined);
+  // The switch turns EVERY code off (owner decision, 2026-10-07: any Cloudbeds code works on the own page while it is on):
+  // any other code gets the same classic-page note, never checked against Cloudbeds.
+  const r = resolvePromoFor("free", getInventoryConfig({ ...STRIPE_TEST_ENV, BOOKING_DIRECT_PROMO: "off" }).promo, "/booking/classic");
+  assert.ok(r && !r.valid && r.note === true);
+  if (r && !r.valid) assert.deepEqual(r.link, { href: "/booking/classic", text: "Book with code FREE on our classic booking page" });
 });
 
 test("demo mode is unchanged: the site-side DIRECT % (default 10), the same verdicts as before, no Direct rate", async () => {
@@ -689,7 +692,10 @@ test("booking page UI: Direct prices struck through with the label, the not-appl
   assert.doesNotMatch(ui("search/SearchStep.tsx"), /every room/i, "the DIRECT perk must not promise every room");
   assert.ok(ui("BookingApp.tsx").includes("promoInputOffered(config)") && ui("OwnBookingPage.tsx").includes("promoInputOffered(config)"));
   const route = readFileSync(new URL("../../app/api/booking/availability/route.ts", import.meta.url), "utf8");
-  assert.ok(route.includes("resolvePromoFor(search.promo") && route.includes("promoVerdictForInventory(") && route.includes("cloudbedsCode: promoSettings.cloudbedsCode"));
+  // The route asks Cloudbeds as promoAskFor says (DIRECT -> CLOUDBEDS_PROMO_CODE, any other code looked up first) and
+  // answers with searchPromoVerdict (resolvePromoFor with the lookup, then promoVerdictForInventory).
+  assert.ok(route.includes("promoAskFor(search.promo, promoSettings)") && route.includes("{ promo: promoAsk }"));
+  assert.ok(route.includes("searchPromoVerdict(search.promo, promoSettings, config.classicBookingPath, result)"));
 });
 
 test("results step: with no code entered, the bar above the results invites the DIRECT code (arrivals with dates skip the search step's perk)", () => {

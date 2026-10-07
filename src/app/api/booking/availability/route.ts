@@ -1,9 +1,8 @@
 import type { NextRequest } from "next/server";
-import { InventoryUnavailableError, SEARCH_CACHE_TTL_MS, alertNoBaseRateAll, buildOffers, getInventory, promoVerdictForInventory } from "@/lib/booking/availability";
+import { InventoryUnavailableError, SEARCH_CACHE_TTL_MS, alertNoBaseRateAll, buildOffers, getInventory, promoAskFor, searchPromoVerdict } from "@/lib/booking/availability";
 import { getBookingConfig, getInventoryConfig, getPublicBookingConfig } from "@/lib/booking/config";
 import { validationLimits } from "@/lib/booking/checkout";
 import { nightsBetween } from "@/lib/booking/dates";
-import { resolvePromoFor } from "@/lib/booking/quote";
 import { apiError, clientIp, createRateLimiter, json, logEvent } from "@/lib/booking/routeUtils";
 import { getStripeDeps } from "@/lib/booking/runtime";
 import type { AvailabilityResponse } from "@/lib/booking/types";
@@ -41,11 +40,13 @@ export async function GET(request: NextRequest) {
   if (config.paymentStatus === "locked" && process.env.VERCEL_ENV === "production") {
     return apiError(503, "payment_unavailable", "Online booking on this page is paused right now. Please book on our main booking page or message us on WhatsApp.");
   }
-  // Demo: the site-side % (unchanged). Stripe with live Cloudbeds rates: the guest's code sells Cloudbeds'
-  // own Direct rate (asked with its promo code). A Stripe page that can't apply it (BOOKING_DIRECT_PROMO=off,
-  // or no Cloudbeds rates) answers the code with a note linking the classic booking page.
+  // Demo: the site-side % (unchanged). Stripe with live Cloudbeds rates: DIRECT sells Cloudbeds' own Direct rate
+  // (asked with its promo code), and any other code sells the plan the owner set up for it in Cloudbeds (looked up
+  // in the rate-plan index first; an unknown code is answered "isn't valid for these dates", with no promo-code read).
+  // A Stripe page that can't apply codes (BOOKING_DIRECT_PROMO=off, or no Cloudbeds rates) answers every code with
+  // a note linking the classic booking page.
   const promoSettings = inventoryConfig.promo;
-  let promo = resolvePromoFor(search.promo, promoSettings, config.classicBookingPath);
+  const promoAsk = promoAskFor(search.promo, promoSettings);
   let result: Awaited<ReturnType<typeof getInventory>>;
   try {
     result = await getInventory(search.checkIn, search.checkOut, inventoryConfig, {
@@ -66,7 +67,7 @@ export async function GET(request: NextRequest) {
             },
           }
         : {}),
-      ...(promoSettings.mode === "direct-rate" && promo?.valid ? { promo: { cloudbedsCode: promoSettings.cloudbedsCode } } : {}),
+      ...(promoAsk ? { promo: promoAsk } : {}),
     });
   } catch (e) {
     if (!(e instanceof InventoryUnavailableError)) throw e;
@@ -74,8 +75,9 @@ export async function GET(request: NextRequest) {
     return apiError(503, "upstream_error", "We could not load live availability just now. Please try again in a moment.");
   }
   const { inventory, dataSource } = result;
-  // A valid code that no available room gets the Direct rate for becomes a note (never "applied" over standard prices).
-  promo = promoVerdictForInventory(promo, promoSettings.mode, inventory);
+  // The code's verdict (with what the rate-plan index said about a code other than DIRECT); a valid code that no
+  // available room gets its rate for becomes a note (never "applied" over standard prices).
+  const promo = searchPromoVerdict(search.promo, promoSettings, config.classicBookingPath, result);
 
   const body: AvailabilityResponse = {
     ok: true,

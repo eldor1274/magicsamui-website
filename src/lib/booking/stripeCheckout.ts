@@ -90,12 +90,14 @@ export interface StripeCheckoutInput {
    */
   recheckAvailability?: () => Promise<string[]>;
   /**
-   * The guest's code (direct-rate), when the server's re-quote put rooms on Cloudbeds' Direct rate
-   * (inventory rows carrying a "direct" `discount`): those rows' rateIds are, with the automatic discount
-   * rows the re-quote selected, the only derived rates this checkout may hold, and the hold is sent with
-   * Cloudbeds' promo code. null/absent = no Direct rate.
+   * The guest's code (direct-rate), when the server's re-quote put rooms on a Cloudbeds promo-code rate - the Direct
+   * rate for DIRECT, or the plan of another code (inventory rows carrying a "direct" `discount`): those rows' rateIds
+   * are, with the automatic discount rows the re-quote selected, the only derived rates this checkout may hold, and the
+   * hold is sent with Cloudbeds' promo code (`cloudbedsCode`, as Cloudbeds spells it). generic: a code other than the
+   * DIRECT alias - the guest's messages and the owner's alerts name its plan instead of "the Direct rate". null/absent =
+   * no promo-code rate.
    */
-  promo?: { code: string; cloudbedsCode: string } | null;
+  promo?: { code: string; cloudbedsCode: string; generic?: true } | null;
 }
 
 export interface StripeCheckoutContext {
@@ -173,13 +175,48 @@ export const RESTRICTION_MESSAGES: Record<string, (name: string, n?: number) => 
   derived_rate: (name) => `Sorry - ${name} can't be booked online for these dates right now. ${NOTHING_CHARGED} ${MESSAGE_US}`,
 };
 
-/** The guest's message when Cloudbeds priced a Direct-rate hold at the base rate (the hold was cancelled). */
-export function directAtBaseMessage(code: string): string {
-  return `We couldn't reserve your room at the Direct rate online just now. ${NOTHING_CHARGED} Book with code ${code} on our classic booking page, where it applies, or message us on WhatsApp and we'll book it for you.`;
+/**
+ * The guest's message when Cloudbeds priced a promo-code hold at the base rate (the hold was cancelled): "the Direct
+ * rate" for DIRECT, the plan's name for another code (`plans`: the code's plans in the cart).
+ */
+export function directAtBaseMessage(code: string, plans: string[] = []): string {
+  const rate = plans.length === 0 ? "the Direct rate" : plans.length === 1 ? `our "${plans[0]}" rate` : "our discounted rate";
+  return `We couldn't reserve your room at ${rate} online just now. ${NOTHING_CHARGED} Book with code ${code} on our classic booking page, where it applies, or message us on WhatsApp and we'll book it for you.`;
 }
 
 /** The owner's alert subject for it: fixed, so every such refusal raises (and repeats) one alert. */
 export const DIRECT_AT_BASE_ALERT = "DIRECT bookings blocked: Cloudbeds priced the Direct rate at the base rate - set BOOKING_DIRECT_PROMO=off and redeploy";
+
+/** "the "Long term" rate" / "the "A" and "B" rates": a promo code's plans in an alert. */
+function codePlansText(plans: string[]): string {
+  if (plans.length === 0) return "the code's rate";
+  return plans.length === 1 ? `the "${plans[0]}" rate` : `the ${plans.map((p) => `"${p}"`).join(" and ")} rates`;
+}
+
+/**
+ * The owner's alert subject when Cloudbeds priced the rate of a promo code other than DIRECT at the base rate (its key
+ * is fixed per code: one alert per code and mode). It names the code and the switch, which turns off EVERY code.
+ */
+export function codeAtBaseAlert(code: string, plans: string[]): string {
+  return `Code ${code} bookings blocked: Cloudbeds priced ${codePlansText(plans)} at the base rate - set BOOKING_DIRECT_PROMO=off and redeploy`;
+}
+
+/** The names of the promo-code rates the quote's rooms are on ("Direct rate" for DIRECT, the plans' public names for another code). */
+function codeRateNames(quote: Quote): string[] {
+  return [...new Set(quote.lines.flatMap((l) => (l.listRoomSatang !== undefined && l.discount?.kind === "direct" ? [l.discount.name] : [])))];
+}
+
+/** The fixed-key alert for a promo-code hold priced at the base rate: DIRECT's own, or one per other code (naming its plans). */
+function codeAtBaseAlertOf(input: StripeCheckoutInput, quote: Quote): { subject: string; key: string; code: string; plans: string[] } {
+  const code = quote.directRate?.code ?? input.promo?.code ?? "DIRECT";
+  if (!input.promo?.generic) return { subject: DIRECT_AT_BASE_ALERT, key: "direct-at-base", code, plans: [] };
+  const plans = codeRateNames(quote);
+  return { subject: codeAtBaseAlert(code, plans), key: `code-at-base:${code}`, code, plans };
+}
+
+/** The fix line of a non-DIRECT code's at-base alert: the switch turns off every code, and dropping the code from the plan is no fix. */
+const CODE_AT_BASE_FIX =
+  "Fix now: set BOOKING_DIRECT_PROMO=off in Vercel and redeploy. That switches off EVERY code on the own page, DIRECT included: guests who enter a code are sent to /booking/classic, and bookings without a code are not affected. Then ask Cloudbeds support how postReservation applies the plan's rate (rooms[0][roomRateID] + promoCode) before switching it back on. Removing the code from the plan in Cloudbeds is no fix: a plan without a code whose public name starts with one of BOOKING_AUTO_DISCOUNT_PLANS (e.g. \"Long term\") is then sold automatically.";
 
 /** The guest's message when Cloudbeds priced an automatic-discount hold at the base rate (the hold was cancelled). */
 export function autoAtBaseMessage(names: string[]): string {
@@ -222,8 +259,9 @@ export type HoldTotalCheck =
   /** Cloudbeds put its own taxes/fees on the hold: a source setting that hits EVERY online booking. */
   | { kind: "cloudbeds_fees"; extraSatang: number; pctOfRooms: string }
   /**
-   * The quote is on the Direct rate but Cloudbeds priced the hold at exactly the BASE rate: it ignored the
-   * Direct roomRateID / promoCode (the Reservation FAQ's unconfirmed claim). Hits EVERY Direct booking.
+   * The quote is on a promo-code rate (the Direct rate, or another code's plan) but Cloudbeds priced the hold at
+   * exactly the BASE rate: it ignored the roomRateID / promoCode (the Reservation FAQ's unconfirmed claim). Hits
+   * EVERY booking with the code.
    */
   | { kind: "promo_at_base"; totalSatang: number }
   /**
@@ -392,7 +430,8 @@ export async function noteCheckoutReadFailure(deps: Pick<StripeDeps, "kv" | "ale
 
 /**
  * The discounted rate the server's re-quote selected for a room (never anything the browser sent), as the stay-rule
- * check under the lock re-confirms it: the Direct rate (with the guest's valid code) or an automatic discount plan
+ * check under the lock re-confirms it: a promo-code rate (the Direct rate, or another code's plan, with the guest's
+ * valid code: its promo code as Cloudbeds spells it) or an automatic discount plan
  * (the configured plan prefixes). null = the base rate - or a discount the deployment can't confirm, which the
  * check then refuses as derived.
  */
@@ -448,14 +487,18 @@ async function checkBeforeHold(input: StripeCheckoutInput, deps: StripeDeps, now
           [
             promo?.kind === "auto"
               ? `Rate ${inv?.rateId ?? "(none)"} of room type ${room.cloudbedsRoomTypeId} (${room.name}) was offered as the automatic discount "${inv?.discount?.name ?? "?"}", but Cloudbeds' getRatePlans does not confirm it: it must be listed as a derived plan with no promo code, a public name starting with one of BOOKING_AUTO_DISCOUNT_PLANS (${promo.plans.join(", ")}) and not reading as non-refundable ("non-refundable", "Non-Ref", "NRF", "no refund", "prepaid", "advance purchase"...), derived from the base rate ${promo.baseRateId}. ${refused}`
-              : promo
-                ? `Rate ${inv?.rateId ?? "(none)"} of room type ${room.cloudbedsRoomTypeId} (${room.name}) was offered as the Direct rate (promo code ${promo.cloudbedsCode}), but Cloudbeds' getRatePlans does not confirm it: it must be listed with that promo code and be derived from the base rate ${promo.baseRateId}. ${refused}`
-                : `Cloudbeds' getRatePlans lists rate ${inv?.rateId ?? "(none)"} of room type ${room.cloudbedsRoomTypeId} (${room.name}) as a DERIVED plan (a package or discount), but the own booking page sells only the base (BAR) rate and the discounted rate (Direct or automatic) selected for the booking. ${refused}`,
+              : promo && input.promo?.generic
+                ? `Rate ${inv?.rateId ?? "(none)"} of room type ${room.cloudbedsRoomTypeId} (${room.name}) was offered as the "${inv?.discount?.name ?? "?"}" rate for code ${input.promo.code} (Cloudbeds promo code ${promo.cloudbedsCode}), but Cloudbeds' getRatePlans does not confirm it: it must be listed with that promo code, under a public name that doesn't read as non-refundable, and be derived from the base rate ${promo.baseRateId}. ${refused}`
+                : promo
+                  ? `Rate ${inv?.rateId ?? "(none)"} of room type ${room.cloudbedsRoomTypeId} (${room.name}) was offered as the Direct rate (promo code ${promo.cloudbedsCode}), but Cloudbeds' getRatePlans does not confirm it: it must be listed with that promo code and be derived from the base rate ${promo.baseRateId}. ${refused}`
+                  : `Cloudbeds' getRatePlans lists rate ${inv?.rateId ?? "(none)"} of room type ${room.cloudbedsRoomTypeId} (${room.name}) as a DERIVED plan (a package or discount), but the own booking page sells only the base (BAR) rate and the discounted rate (a promo code's or automatic) selected for the booking. ${refused}`,
             promo?.kind === "auto"
               ? `Check the plan in Cloudbeds (its public name, promo code and parent rate), or set BOOKING_AUTO_DISCOUNTS=off and redeploy. Guests can still book on /booking/classic.`
-              : promo
-                ? "Check the room type's \"Direct booking rate\" plan in Cloudbeds (its promo code, CLOUDBEDS_PROMO_CODE, and that it is derived from the base rate). Guests can still book with the code on /booking/classic."
-                : "Check the room type's rate plans in Cloudbeds: getAvailableRoomTypes must return the base rate as a non-derived row (named \"default\").",
+              : promo && input.promo?.generic
+                ? `Check the "${inv?.discount?.name ?? "?"}" plan in Cloudbeds (its promo code ${promo.cloudbedsCode}, its public name, and that it is derived from the base rate), or set BOOKING_DIRECT_PROMO=off and redeploy (every code off, DIRECT included). Guests can still book with the code on /booking/classic.`
+                : promo
+                  ? "Check the room type's \"Direct booking rate\" plan in Cloudbeds (its promo code, CLOUDBEDS_PROMO_CODE, and that it is derived from the base rate). Guests can still book with the code on /booking/classic."
+                  : "Check the room type's rate plans in Cloudbeds: getAvailableRoomTypes must return the base rate as a non-derived row (named \"default\").",
           ],
           { key: `derived-rate:${room.cloudbedsRoomTypeId}`, severity: "warning" },
         );
@@ -569,7 +612,7 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
     return { roomTypeId: room?.cloudbedsRoomTypeId ?? "", rateId: inv?.rateId ?? null, adults: item.adults };
   });
   if (rooms.some((r) => r.roomTypeId === "")) return fail(409, { error: "unavailable", message: "A room in your reservation can't be booked online." });
-  // Rooms the server's re-quote put on Cloudbeds' Direct rate (never anything the browser sent); an automatic
+  // Rooms the server's re-quote put on the code's Cloudbeds rate (never anything the browser sent); an automatic
   // discount is held on its roomRateID alone (no code).
   const directRooms = input.promo ? input.items.some((item) => input.inventory.find((i) => i.slug === item.slug)?.discount?.kind === "direct") : false;
 
@@ -671,7 +714,7 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
         estimatedArrivalTime: cloudbedsArrivalTime(input.guest.arrivalTime),
         paymentMethod: config.reservationPaymentMethod,
         sourceId: config.cloudbedsSourceId,
-        // A room on the Direct roomRateID: Cloudbeds' promo code goes with it (the price check below proves it was applied).
+        // A room on the code's roomRateID: Cloudbeds' promo code (its own spelling) goes with it (the price check below proves it was applied).
         promoCode: directRooms ? input.promo?.cloudbedsCode ?? null : null,
         expectedRoomsSatang: quote.roomsSubtotalSatang,
       });
@@ -798,7 +841,23 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
     return fail(503, { error: "payment_unavailable", message: `We couldn't reserve this room online just now. ${NOTHING_CHARGED} ${MESSAGE_US}` });
   }
   if (check.kind === "promo_at_base") {
-    const code = quote.directRate?.code ?? input.promo?.code ?? "DIRECT";
+    const at = codeAtBaseAlertOf(input, quote);
+    const code = at.code;
+    if (input.promo?.generic) {
+      // A code other than DIRECT: its own log line and alert (one per code), naming the code, its plans and the switch.
+      deps.log("hold_code_at_base", { ref, reservationId, quoted, cloudbeds: check.totalSatang, code, plans: at.plans });
+      await cancelHold(`Cloudbeds priced code ${code}'s rate at the base rate`);
+      await deps.alert(
+        at.subject,
+        [
+          `Booking ${ref} (${input.checkIn} to ${input.checkOut}): the page quoted THB ${satangToBahtString(quoted)} for the rooms on ${codePlansText(at.plans)} (code ${code}; Cloudbeds promo code ${input.promo.cloudbedsCode}), but Cloudbeds priced the hold at THB ${satangToBahtString(check.totalSatang)}, exactly the base rate. The hold was cancelled and nothing was charged; the guest was offered the classic booking page (where Cloudbeds applies the code) and WhatsApp. Every online booking with the code is refused this way until this is fixed.`,
+          CODE_AT_BASE_FIX,
+        ],
+        // One alert per code and mode (the alerter scopes keys by mode), not per booking: it hits every booking with the code.
+        { key: at.key, severity: "warning" },
+      );
+      return fail(503, { error: "payment_unavailable", message: directAtBaseMessage(code, at.plans) });
+    }
     deps.log("hold_direct_at_base", { ref, reservationId, quoted, cloudbeds: check.totalSatang });
     await cancelHold("Cloudbeds priced the Direct rate at the base rate");
     await deps.alert(
@@ -826,18 +885,18 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
       // One alert per mode (the alerter scopes keys by mode), not per booking or plan: it hits every booking on the plan.
       { key: "auto-discount-at-base", severity: "warning" },
     );
+    const at = codeAtBaseAlertOf(input, quote);
     if (check.alsoDirect) {
       await deps.alert(
-        DIRECT_AT_BASE_ALERT,
+        at.subject,
         [
-          `Booking ${ref} (${input.checkIn} to ${input.checkOut}): Cloudbeds priced the Direct-rate rooms of a cart that also had automatic discounts at the base rate as well (see "${AUTO_AT_BASE_ALERT_PREFIX} ..."). The hold was cancelled and nothing was charged.`,
-          "If bookings with the code alone are refused the same way, set BOOKING_DIRECT_PROMO=off in Vercel and redeploy.",
+          `Booking ${ref} (${input.checkIn} to ${input.checkOut}): Cloudbeds priced the ${input.promo?.generic ? `code ${at.code}` : "Direct-rate"} rooms of a cart that also had automatic discounts at the base rate as well (see "${AUTO_AT_BASE_ALERT_PREFIX} ..."). The hold was cancelled and nothing was charged.`,
+          `If bookings with the code alone are refused the same way, set BOOKING_DIRECT_PROMO=off in Vercel and redeploy${input.promo?.generic ? " (it switches off every code, DIRECT included)" : ""}.`,
         ],
-        { key: "direct-at-base", severity: "warning" },
+        { key: at.key, severity: "warning" },
       );
     }
-    const code = quote.directRate?.code ?? input.promo?.code ?? "DIRECT";
-    return fail(503, { error: "payment_unavailable", message: check.alsoDirect ? directAtBaseMessage(code) : autoAtBaseMessage(names) });
+    return fail(503, { error: "payment_unavailable", message: check.alsoDirect ? directAtBaseMessage(at.code, at.plans) : autoAtBaseMessage(names) });
   }
   if (check.kind === "price_changed") {
     deps.log("hold_price_mismatch", { ref, reservationId, cloudbeds: check.totalSatang, quoted, pct: check.pctOfQuote });
@@ -872,7 +931,8 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
   const noteParts = [
     `${testLabel}Online booking ${ref} via magicsamui.com (Stripe). Awaiting payment - the hold is cancelled automatically if unpaid after ${PAYMENT_LINK_TTL_MINUTES} minutes.`,
     guestFlags.arrivalLate ? "Estimated arrival: after 11 PM." : "",
-    quote.directRate ? `Direct rate (code ${quote.directRate.code}).` : "",
+    // The promo-code rate: "Direct rate (code DIRECT)." / "Long term (code LONGSTAY)."
+    quote.directRate ? `${codeRateNames(quote).join(", ") || "Direct rate"} (code ${quote.directRate.code}).` : "",
     quote.autoDiscount ? `Automatic discount: ${quote.autoDiscount.names.join(", ")}.` : "",
     guestFlags.hasRequests ? `Guest requests: ${input.guest.specialRequests.trim()}` : "",
   ].filter(Boolean);
@@ -998,11 +1058,11 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
 /**
  * The fix lines for a postReservation refusal of a derived rate the plan does not open to the reservation's source
  * ("Rate 3195765 is not available for this reservation. Verify the rate is bookable for these dates and for the
- * reservation source.", live for the Direct rate on 2026-10-07), when the cart holds a discounted rate (Direct or
+ * reservation source.", live for the Direct rate on 2026-10-07), when the cart holds a discounted rate (a promo code's or
  * automatic). The rate id the message names decides: a cart room's discounted rate -> that plan and where to tick
  * the source; a cart room's BASE rate -> that room's base rate (no discount plan blamed, no discount switch); no cart
  * room's rate (or no id) -> every discounted plan in the cart. When the hold carried the reservation-level promoCode
- * (a room on the Direct rate) and the refused rate is not the Direct rate, a line says that code may be the cause
+ * (a room on the code's rate) and the refused rate is not the code's rate, a line says that code may be the cause
  * (Stage B case 24(d)). [] otherwise.
  */
 export function rateNotForSourceFix(message: string, input: Pick<StripeCheckoutInput, "items" | "inventory" | "promo">, sourceId: string | null): string[] {
@@ -1014,7 +1074,7 @@ export function rateNotForSourceFix(message: string, input: Pick<StripeCheckoutI
   // The hold was sent with Cloudbeds' promo code for the whole reservation (as in createHold's promoCode).
   const promoSent = Boolean(input.promo) && held.some((inv) => inv.discount.kind === "direct");
   const promoLine = (lead: string, refused: string, plain: string) =>
-    `${lead}the hold also carried the reservation-level promoCode (a room on the Direct rate in the same cart), and Cloudbeds may refuse ${refused} under that code (Stage B case 24(d)). If bookings of ${plain} without the code go through, set BOOKING_DIRECT_PROMO=off in Vercel, redeploy and tell the developer.`;
+    `${lead}the hold also carried the reservation-level promoCode (a room on the ${input.promo?.generic ? `code ${input.promo.code}'s` : "Direct"} rate in the same cart), and Cloudbeds may refuse ${refused} under that code (Stage B case 24(d)). If bookings of ${plain} without the code go through, set BOOKING_DIRECT_PROMO=off in Vercel, redeploy and tell the developer.`;
   const named = held.filter((inv) => inv.rateId === namedId);
   const baseNamed = named.length > 0 ? [] : rooms.filter((inv) => namedId !== null && (inv.discount ? inv.discount.baseRateId : inv.rateId) === namedId);
   if (baseNamed.length > 0) {
@@ -1032,7 +1092,7 @@ export function rateNotForSourceFix(message: string, input: Pick<StripeCheckoutI
     `Until then every online booking on ${plans.length === 1 ? "that plan" : "those plans"} is refused (nothing is charged). To sell the base rate instead meanwhile, set ${[
       ...(kinds.has("auto") ? ["BOOKING_AUTO_DISCOUNTS=off"] : []),
       ...(kinds.has("direct") ? ["BOOKING_DIRECT_PROMO=off"] : []),
-    ].join(" and ")} in Vercel and redeploy.`,
+    ].join(" and ")} in Vercel and redeploy.${kinds.has("direct") && input.promo?.generic ? " BOOKING_DIRECT_PROMO=off switches off every code on the own page, DIRECT included." : ""}`,
     ...(promoSent && kinds.has("auto") ? [promoLine("If the automatic plan is already open to the source: ", "an automatic discount's rate", "that plan")] : []),
   ];
 }

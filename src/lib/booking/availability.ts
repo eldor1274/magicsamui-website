@@ -7,10 +7,10 @@ import { cloudbedsInventory, cloudbedsRateIndex } from "./cloudbedsProvider.ts";
 import type { PromoRateIndex, RatePlanIndex, TokenBucket } from "./cloudbedsProvider.ts";
 import { demoInventory } from "./demoProvider.ts";
 import { logEvent } from "./routeUtils.ts";
-import { buildRateOffers, occupancyExtraSatang } from "./quote.ts";
-import type { BookingConfig } from "./config.ts";
+import { buildRateOffers, occupancyExtraSatang, resolvePromoFor } from "./quote.ts";
+import type { BookingConfig, PromoSettings } from "./config.ts";
 import type { AlertFn } from "./stripeDeps.ts";
-import type { CartItemInput, DataSource, IsoDate, PromoMode, PromoResult, RateListPrice, RatePlanId, RoomInventory, RoomOffer } from "./types.ts";
+import type { CartItemInput, DataSource, IsoDate, PromoLookup, PromoMode, PromoResult, RateListPrice, RatePlanId, RoomInventory, RoomOffer } from "./types.ts";
 
 /** Search answers from Cloudbeds are reused this long (per server instance). */
 export const SEARCH_CACHE_TTL_MS = 60_000;
@@ -25,6 +25,31 @@ export interface InventoryResult {
   occupancyRefused?: string[];
   /** The rate-plan index used (Direct rate / automatic discounts with live Cloudbeds data), so a cart's gate reads can reuse it. */
   rateIndex?: RatePlanIndex;
+  /** A code other than the DIRECT alias (PromoAsk `code`): what the rate-plan index said about it (resolvePromoFor's verdict). */
+  promoLookup?: PromoLookup;
+}
+
+/**
+ * The guest's code as Cloudbeds is asked for it (direct-rate deployments, promoAskFor): the DIRECT alias as its
+ * configured Cloudbeds code (`cloudbedsCode` = CLOUDBEDS_PROMO_CODE, exactly as before; `rates` reuses an index already
+ * read for this stay), or any other code (`code`, upper case), looked up in the rate-plan index first.
+ */
+export type PromoAsk = { cloudbedsCode: string; rates?: PromoRateIndex } | { code: string };
+
+const GUEST_PROMO_CODE_RE = /^[A-Z0-9_-]{1,32}$/;
+
+/**
+ * What the search and the checkout ask Cloudbeds for the guest's code (owner decision, 2026-10-07: any promo code set up
+ * in Cloudbeds works on the own page, not only DIRECT). Only on a direct-rate deployment (Stripe with live Cloudbeds
+ * rates, BOOKING_DIRECT_PROMO on - "off" switches every code off): the DIRECT alias (BOOKING_PROMO_CODE) maps to
+ * CLOUDBEDS_PROMO_CODE as before; any other well-formed code (trimmed, upper case, 1-32 letters, digits, - or _) is
+ * looked up in the rate-plan index. null: no code, a malformed one, or a deployment that sells no Cloudbeds code.
+ */
+export function promoAskFor(code: string | null | undefined, settings: Pick<PromoSettings, "mode" | "code" | "cloudbedsCode">): PromoAsk | null {
+  if (settings.mode !== "direct-rate") return null;
+  const normalized = (code ?? "").trim().toUpperCase();
+  if (!GUEST_PROMO_CODE_RE.test(normalized)) return null;
+  return normalized === settings.code ? { cloudbedsCode: settings.cloudbedsCode } : { code: normalized };
 }
 
 export interface InventoryOptions {
@@ -52,12 +77,16 @@ export interface InventoryOptions {
    */
   onNoBaseRateAll?: (slugs: string[]) => void | Promise<void>;
   /**
-   * The guest's code is valid on a direct-rate deployment: Cloudbeds is asked with its promo code and
-   * the Direct rows are sold (cloudbedsProvider ParseOptions.promo). `rates` reuses an index already
-   * read for this stay; otherwise it comes from the rate-plan index read (a failure fails the read like
-   * any other). Live Cloudbeds data on a base-rate-only (Stripe) config only; ignored otherwise.
+   * The guest's code on a direct-rate deployment (promoAskFor). The DIRECT alias (`cloudbedsCode`): Cloudbeds is
+   * asked with its promo code and the Direct rows are sold (cloudbedsProvider ParseOptions.promo); `rates` reuses an
+   * index already read for this stay, otherwise it comes from the rate-plan index read at the same time (a failure
+   * fails the read like any other). Any other code (`code`): the rate-plan index is read FIRST (required, like any
+   * read with a code) and says whether a plan the page may sell carries it (InventoryResult.promoLookup); only then is
+   * Cloudbeds asked with its own spelling of the code, and that plan's rows are sold like the Direct rows, labelled
+   * with the plan's name. An unknown code costs no promo-code read. Live Cloudbeds data on a base-rate-only (Stripe)
+   * config only; ignored otherwise.
    */
-  promo?: { cloudbedsCode: string; rates?: PromoRateIndex };
+  promo?: PromoAsk;
   /**
    * false = no automatic discounts on this read (the availability re-check under the unit lock: availability
    * only, which a discounted row can't change - it sells only next to its base row). Default: the config's
@@ -154,11 +183,27 @@ export async function getInventory(
         ...(options.budget ? { budget: options.budget } : {}),
       };
       const baseRateOnly = config.cloudbeds.baseRateOnly === true;
-      // The Direct rate (a valid code) and the automatic discount plans: Stripe (base-rate-only) configs only.
-      const promo = baseRateOnly ? options.promo : undefined;
+      // A promo code's rate (a valid code) and the automatic discount plans: Stripe (base-rate-only) configs only.
+      const asked = baseRateOnly ? options.promo : undefined;
       const autoPlans = baseRateOnly && options.autoDiscounts !== false ? (config.cloudbeds.autoDiscountPlans ?? []) : [];
+      // A code other than the DIRECT alias: valid only when the rate-plan index lists a plan the page may sell carrying it,
+      // and Cloudbeds is then asked with ITS spelling of the code. So the index is read first (required; reused when the
+      // caller already read it for this code, e.g. a cart's gate reads): an unknown code costs no promo-code read.
+      const lookupIndex =
+        asked && "code" in asked
+          ? options.rateIndex?.lookup?.code === asked.code
+            ? options.rateIndex
+            : await cloudbedsRateIndex(checkIn, checkOut, { cloudbedsCode: asked.code, autoPlans }, read)
+          : undefined;
+      const lookup = lookupIndex?.lookup;
+      const promo: { cloudbedsCode: string; rates?: PromoRateIndex; showName?: boolean } | undefined =
+        asked && "code" in asked
+          ? lookupIndex && lookup?.cloudbedsCode
+            ? { cloudbedsCode: lookup.cloudbedsCode, rates: lookupIndex.promo, showName: true }
+            : undefined
+          : asked;
       // ONE getRatePlans read tells both apart (cloudbedsRateIndex), read while availability is read; reused when given.
-      const needsIndex = !options.rateIndex && ((promo !== undefined && !promo.rates) || autoPlans.length > 0);
+      const needsIndex = !options.rateIndex && !lookupIndex && ((promo !== undefined && !promo.rates) || autoPlans.length > 0);
       // The index serves only the automatic discounts: a failure shows the base rate instead of failing the search
       // (and is remembered for a while, so cached searches don't re-send a failing read: RATE_PLAN_FAIL_TTL_MS).
       const bestEffort = needsIndex && options.autoDiscountsBestEffort === true && promo === undefined;
@@ -172,13 +217,15 @@ export async function getInventory(
         }
         return index.loaded;
       };
-      const given = options.rateIndex ?? (promo?.rates ? { promo: promo.rates, auto: {} } : undefined);
+      const given = lookupIndex ?? options.rateIndex ?? (promo?.rates ? { promo: promo.rates, auto: {} } : undefined);
       const rateIndex = needsIndex ? loadIndex : given;
       const inventory = await cloudbedsInventory(checkIn, checkOut, {
         ...read,
         adults: options.adults,
         baseRateOnly,
-        ...(promo ? { promo: { cloudbedsCode: promo.cloudbedsCode, ...(promo.rates ? { rates: promo.rates } : {}) } } : {}),
+        ...(promo
+          ? { promo: { cloudbedsCode: promo.cloudbedsCode, ...(promo.rates ? { rates: promo.rates } : {}), ...(promo.showName ? { showName: true } : {}) } }
+          : {}),
         ...(rateIndex ? { rateIndex } : {}),
         ...(bestEffort
           ? { onRateIndexFailed: (e: unknown) => logEvent("cloudbeds_rate_index_failed", { checkIn, checkOut, error: e instanceof Error ? e.message : String(e) }) }
@@ -195,7 +242,7 @@ export async function getInventory(
       }
       // The index this answer used, for a cart's gate reads (none when the best-effort read failed).
       const used = index.loaded ? await index.loaded.catch(() => undefined) : given;
-      return { inventory, dataSource: "cloudbeds", ...(used ? { rateIndex: used } : {}) };
+      return { inventory, dataSource: "cloudbeds", ...(used ? { rateIndex: used } : {}), ...(lookup ? { promoLookup: lookup } : {}) };
     } catch (error) {
       if (options.allowDemoFallback === false) throw new InventoryUnavailableError(error);
       options.onFallback?.(error);
@@ -283,12 +330,18 @@ export async function getCartInventory(
     return inv;
   });
   const dataSource: DataSource = [priced, ...gates].some((r) => r.dataSource === "demo-fallback") ? "demo-fallback" : priced.dataSource;
-  return { inventory, dataSource, occupancyRefused, ...(priced.rateIndex ? { rateIndex: priced.rateIndex } : {}) };
+  return {
+    inventory,
+    dataSource,
+    occupancyRefused,
+    ...(priced.rateIndex ? { rateIndex: priced.rateIndex } : {}),
+    ...(priced.promoLookup ? { promoLookup: priced.promoLookup } : {}),
+  };
 }
 
 /**
  * The search's promo verdict once the inventory is known (direct-rate only): a valid code that no
- * available room gets the Direct rate for on these dates becomes a calm note, so the page never says
+ * available room gets the code's rate for on these dates becomes a calm note, so the page never says
  * "applied" over standard prices. When some rooms have it, the others say so on their own card
  * (RoomOffer.promoNotApplied). Rooms on an automatic discount are not "standard rates": the note says so.
  */
@@ -298,6 +351,20 @@ export function promoVerdictForInventory(promo: PromoResult | null, mode: PromoM
   if (available.length === 0 || available.some((i) => i.discount?.kind === "direct")) return promo;
   const shown = available.some((i) => i.discount?.kind === "auto") ? "the prices shown are our best rates for them" : "the prices shown are our standard rates";
   return { code: promo.code, valid: false, note: true, message: `Code ${promo.code} doesn't apply to these dates - ${shown}.` };
+}
+
+/**
+ * The availability route's verdict on the guest's code: resolvePromoFor with what the rate-plan index said about a
+ * code other than DIRECT (result.promoLookup: valid with its plan's name, a note for a non-refundable plan, else "isn't
+ * valid for these dates"), then promoVerdictForInventory. Never an error: the search shows the rates without the code.
+ */
+export function searchPromoVerdict(
+  code: string | null | undefined,
+  settings: Pick<PromoSettings, "mode" | "code" | "pct">,
+  classicPath: string,
+  result: Pick<InventoryResult, "inventory" | "promoLookup">,
+): PromoResult | null {
+  return promoVerdictForInventory(resolvePromoFor(code, settings, classicPath, result.promoLookup ?? null), settings.mode, result.inventory);
 }
 
 /**
@@ -318,11 +385,11 @@ export function buildOffers(inventory: RoomInventory[], adults: number, ratePlan
       return { slug: room.slug, available: false, unavailableReason: "sold-out", remaining: 0, fitsParty, maxAdults, rates: [] };
     }
     const pricedFor = Math.min(Math.max(1, adults), maxAdults);
-    // A discounted Cloudbeds rate (Direct or automatic): priced at its own rows, with the base row it is derived
-    // from as the list price; an automatic discount also carries its plan's name (the rate's label).
+    // A discounted Cloudbeds rate (a promo code's or automatic): priced at its own rows, with the base row it is derived
+    // from as the list price; an automatic discount, and a code other than DIRECT, also carry the plan's name (the label).
     const d = inv.discount;
     const list: RateListPrice | undefined = d
-      ? { baseNightly: d.baseNightly, adultsExtraSatang: d.baseAdultsExtraSatang, kind: d.kind, ...(d.kind === "auto" ? { name: d.name } : {}) }
+      ? { baseNightly: d.baseNightly, adultsExtraSatang: d.baseAdultsExtraSatang, kind: d.kind, ...(d.kind === "auto" || d.showName ? { name: d.name } : {}) }
       : undefined;
     return {
       slug: room.slug,

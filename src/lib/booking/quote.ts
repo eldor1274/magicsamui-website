@@ -13,6 +13,7 @@ import type {
   IsoDate,
   NightRate,
   PricingConfig,
+  PromoLookup,
   PromoResult,
   PublicBookingConfig,
   Quote,
@@ -110,14 +111,30 @@ export function buildRateOffers(
   });
 }
 
+/** The label of a discounted rate whose plan has no public name. */
+const SPECIAL_RATE_LABEL = "Special rate";
+
+/** The booking token's limit on a discounted rate's label (token.ts DISCOUNT_LABEL_RE). */
+const MAX_DISCOUNT_LABEL_LENGTH = 80;
+
 /**
- * The label of a discounted rate (RateOffer.list): an automatic discount's plan name, or for the Direct rate
- * "Direct rate - code X" (null without the guest's code). null when the rate has no list price.
+ * A promo-code rate's label: "<name> - code <CODE>" ("Direct rate - code DIRECT", "Long term - code LONGSTAY"), at most
+ * 80 characters (the booking token's limit for the return page): a long plan name is cut, never the code.
+ */
+export function codeRateLabel(name: string, code: string): string {
+  const suffix = ` - code ${code}`;
+  return `${name.slice(0, Math.max(1, MAX_DISCOUNT_LABEL_LENGTH - suffix.length)).trim()}${suffix}`;
+}
+
+/**
+ * The label of a discounted rate (RateOffer.list): an automatic discount's plan name, or for a promo-code rate
+ * "Direct rate - code X" (DIRECT) or "<plan name> - code X" (any other code: list.name) - null without the guest's
+ * code. null when the rate has no list price.
  */
 export function rateDiscountLabel(list: RateOffer["list"], directCode: string | null): string | null {
   if (!list) return null;
-  if (list.kind === "auto") return list.name ?? "Special rate";
-  return directCode ? `${DIRECT_RATE_LABEL} - code ${directCode}` : null;
+  if (list.kind === "auto") return list.name ?? SPECIAL_RATE_LABEL;
+  return directCode ? codeRateLabel(list.name ?? DIRECT_RATE_LABEL, directCode) : null;
 }
 
 /**
@@ -131,11 +148,16 @@ export function promoNotAppliedNote(code: string, firstRateList: RateOffer["list
     : `Code ${code} doesn't apply to this room for these dates - our standard rate is shown.`;
 }
 
-/** The label of a quote line on a discounted rate (summary and payment step); null for a line at the base rate. */
+/**
+ * The label of a quote line on a discounted rate (summary and payment step); null for a line at the base rate. A
+ * promo-code rate: "<the line's rate name> - code X" ("Direct rate - code DIRECT"; a quote from before automatic
+ * discounts, whose lines carry no rate name: quote.directRate.label).
+ */
 export function lineDiscountLabel(line: Pick<QuoteLine, "listRoomSatang" | "discount">, quote: Pick<Quote, "directRate">): string | null {
   if (line.listRoomSatang === undefined) return null;
   if (line.discount?.kind === "auto") return line.discount.name;
-  return quote.directRate?.label ?? null;
+  if (!quote.directRate) return null;
+  return line.discount ? codeRateLabel(line.discount.name, quote.directRate.code) : quote.directRate.label;
 }
 
 /** A booked line's discounted rate for the booking token (the return page): its label and the room at the base rate. */
@@ -223,14 +245,15 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
       };
     });
     const addonsSatang = addons.reduce((sum, a) => sum + a.amountSatang, 0);
-    // A discounted Cloudbeds rate (Direct or automatic): the room is already priced at it; the base rate is only shown (struck through).
+    // A discounted Cloudbeds rate (a promo code's or automatic): the room is already priced at it; the base rate is only
+    // shown (struck through). A code other than DIRECT names the room's own plan (rate.list.name).
     const listRoomSatang = listTotalForAdults(rate, item.adults);
     const discount: QuoteLine["discount"] | null =
       listRoomSatang === null || !rate.list
         ? null
         : rate.list.kind === "auto"
-          ? { kind: "auto", name: rate.list.name ?? "Special rate" }
-          : { kind: "direct", name: input.promo?.label ?? DIRECT_RATE_LABEL };
+          ? { kind: "auto", name: rate.list.name ?? SPECIAL_RATE_LABEL }
+          : { kind: "direct", name: rate.list.name ?? input.promo?.label ?? DIRECT_RATE_LABEL };
 
     return {
       slug: item.slug,
@@ -254,13 +277,13 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
   /** The rooms with the lines on `kind` at their base price, the others as quoted. */
   const roomsWithBaseFor = (kind: "direct" | "auto") =>
     lines.reduce((sum, l) => sum + (l.listRoomSatang !== undefined && l.discount?.kind === kind ? l.listRoomSatang : l.roomSatang), 0);
-  // Labelled with the guest's code (the offers carry Direct list prices only when the server applied it).
+  // Labelled with the guest's code (the offers carry a promo code's list prices only when the server applied it).
   let directRate: QuoteDirectRate | null = null;
   if (input.promo && lines.some((l) => l.discount?.kind === "direct")) {
     const baseRoomsSatang = roomsWithBaseFor("direct");
     directRate = {
       code: input.promo.code,
-      label: `${input.promo.label} - code ${input.promo.code}`,
+      label: codeRateLabel(input.promo.label, input.promo.code),
       baseRoomsSatang,
       savingSatang: baseRoomsSatang - roomsSubtotalSatang,
     };
@@ -342,8 +365,9 @@ export const DIRECT_RATE_LABEL = "Direct rate";
 
 /**
  * Whether the booking page offers the code input and sends a typed (or ?promo=) code with its searches:
- * wherever a code can lower the price, and on a Stripe page that can't apply the Direct code (it answers
- * the code with a note linking the classic booking page instead of ignoring it). Not in Beam modes.
+ * wherever a code can lower the price (DIRECT, or any promo code set up in Cloudbeds), and on a Stripe page
+ * that can't apply codes (it answers a code with a note linking the classic booking page instead of
+ * ignoring it). Not in Beam modes.
  */
 export function promoInputOffered(config: Pick<PublicBookingConfig, "promoEnabled" | "promoMode">): boolean {
   return config.promoEnabled || config.promoMode === "classic-only";
@@ -356,15 +380,21 @@ export function promoCodeHint(config: Pick<PublicBookingConfig, "promoEnabled" |
 
 /**
  * Validates a promo code for this deployment's PromoSettings. demo (discount) and Beam (off):
- * exactly resolvePromo. direct-rate: the guest's code (trimmed, any case) is valid with pct 0 - the
- * price comes from Cloudbeds' Direct rate rows, never from a site-side %. classic-only: the code is
- * real but this page can't apply it, so the guest gets a calm note linking the classic booking page
- * (`classicPath`, where Cloudbeds applies it) instead of the code being silently ignored.
+ * exactly resolvePromo. direct-rate: the price comes from Cloudbeds' own rows, never from a site-side %
+ * (pct 0) - the DIRECT alias (BOOKING_PROMO_CODE, trimmed, any case) is valid as "Direct rate"; any other
+ * code is valid only as `lookup` (the rate-plan index read for the stay) found it: a plan the page may sell
+ * carries it -> valid, labelled with that plan's public name; only plans whose names read as non-refundable
+ * carry it -> a calm note pointing to the classic booking page or WhatsApp (no refund terms on this page);
+ * otherwise (or without a lookup) "isn't valid for these dates". classic-only (BOOKING_DIRECT_PROMO=off, or no
+ * live Cloudbeds rates): EVERY code is real as far as this page can tell, but it can't apply any, so the guest
+ * gets a calm note linking the classic booking page (`classicPath`, where Cloudbeds applies it) instead of the
+ * code being silently ignored.
  */
 export function resolvePromoFor(
   code: string | null | undefined,
   settings: Pick<PromoSettings, "mode" | "code" | "pct">,
   classicPath: string,
+  lookup: PromoLookup | null = null,
 ): PromoResult | null {
   if (settings.mode === "discount" || settings.mode === "off") return resolvePromo(code, settings.pct, settings.code);
   const normalized = (code ?? "").trim().toUpperCase();
@@ -372,13 +402,27 @@ export function resolvePromoFor(
   if (normalized.length > 32 || !/^[A-Z0-9_-]+$/.test(normalized)) {
     return { code: normalized.slice(0, 32), valid: false, message: "That code doesn't look right - please check it and try again." };
   }
-  if (normalized !== settings.code) return { code: normalized, valid: false, message: `We don't recognise the code ${normalized}.` };
-  if (settings.mode === "direct-rate") return { code: normalized, valid: true, pct: 0, label: DIRECT_RATE_LABEL };
-  return {
-    code: normalized,
-    valid: false,
-    note: true,
-    message: `Code ${normalized} can't be applied on this page right now - prices here are our standard rates. Our classic booking page applies it.`,
-    link: { href: classicPath, text: `Book with code ${normalized} on our classic booking page` },
-  };
+  const classicLink = { href: classicPath, text: `Book with code ${normalized} on our classic booking page` };
+  if (settings.mode !== "direct-rate") {
+    return {
+      code: normalized,
+      valid: false,
+      note: true,
+      message: `Code ${normalized} can't be applied on this page right now - prices here are our standard rates. Our classic booking page applies it.`,
+      link: classicLink,
+    };
+  }
+  if (normalized === settings.code) return { code: normalized, valid: true, pct: 0, label: DIRECT_RATE_LABEL };
+  const found = lookup !== null && lookup.code.toUpperCase() === normalized ? lookup : null;
+  if (found?.cloudbedsCode) return { code: normalized, valid: true, pct: 0, label: found.planName ?? SPECIAL_RATE_LABEL };
+  if (found && found.refusedPlans.length > 0) {
+    return {
+      code: normalized,
+      valid: false,
+      note: true,
+      message: `Code ${normalized} is for a non-refundable rate, which can't be booked on this page - our classic booking page applies it, or message us on WhatsApp and we'll book it for you.`,
+      link: classicLink,
+    };
+  }
+  return { code: normalized, valid: false, message: `Code ${normalized} isn't valid for these dates.` };
 }

@@ -406,11 +406,14 @@ function promoPctFor(env: Env, paymentMode: PaymentMode | null): number {
 
 export interface PromoSettings {
   mode: PromoMode;
-  /** The code guests type (BOOKING_PROMO_CODE, default DIRECT), upper case; compared trimmed and case-insensitively. */
+  /**
+   * The DIRECT alias guests type (BOOKING_PROMO_CODE, default DIRECT), upper case; compared trimmed and
+   * case-insensitively. Any other code is looked up in Cloudbeds' rate plans (direct-rate: availability.ts promoAskFor).
+   */
   code: string;
   /** discount: the demo's percentage; 0 otherwise. */
   pct: number;
-  /** direct-rate: Cloudbeds' promo code (CLOUDBEDS_PROMO_CODE, default "Direct"), sent as is and matched case-insensitively. */
+  /** direct-rate: the DIRECT alias' Cloudbeds promo code (CLOUDBEDS_PROMO_CODE, default "Direct"), sent as is and matched case-insensitively. */
   cloudbedsCode: string;
 }
 
@@ -418,9 +421,11 @@ const GUEST_PROMO_CODE_RE = /^[A-Z0-9_-]{1,32}$/;
 const CLOUDBEDS_PROMO_CODE_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
 /**
- * BOOKING_DIRECT_PROMO = on | off (default on): whether the own engine sells Cloudbeds' Direct
- * rate for the guest's code. "off" (or false/0/no) is the emergency switch when Cloudbeds does not
- * price holds at the Direct rate; guests with the code are then pointed to the classic booking page.
+ * BOOKING_DIRECT_PROMO = on | off (default on): whether the own engine sells Cloudbeds promo-code
+ * rates for the guest's code - the Direct rate for DIRECT, and the plan of any other code the owner
+ * set up in Cloudbeds (owner decision, 2026-10-07). "off" (or false/0/no) is the emergency switch for
+ * ALL codes when Cloudbeds does not price such holds at the code's rate; guests with any code are then
+ * pointed to the classic booking page.
  */
 export function directPromoOn(env: Env = process.env): boolean {
   const raw = trimmed(env.BOOKING_DIRECT_PROMO).toLowerCase();
@@ -479,10 +484,10 @@ function autoDiscountPlansFor(env: Env, provider: PaymentProvider): string[] {
 }
 
 /**
- * How the guest's promo code works (see PromoMode). Stripe sells Cloudbeds' own Direct rate plan
- * (direct-rate) only with live Cloudbeds rates and BOOKING_DIRECT_PROMO on; otherwise a Stripe page
- * points the code to the classic booking page (classic-only). The demo keeps its site-side % discount;
- * Beam modes take no code (off). Never throws.
+ * How the guest's promo code works (see PromoMode). Stripe sells Cloudbeds' own promo-code plans
+ * (direct-rate: the Direct rate for DIRECT, any other code's plan) only with live Cloudbeds rates and
+ * BOOKING_DIRECT_PROMO on; otherwise a Stripe page points every code to the classic booking page
+ * (classic-only). The demo keeps its site-side % discount; Beam modes take no code (off). Never throws.
  */
 export function resolvePromoSettings(env: Env, provider: PaymentProvider, paymentMode: PaymentMode | null, dataSource: "demo" | "cloudbeds"): PromoSettings {
   const rawCode = trimmed(env.BOOKING_PROMO_CODE).toUpperCase();

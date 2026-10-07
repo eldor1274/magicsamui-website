@@ -139,7 +139,11 @@ export interface RateListPrice {
   adultsExtraSatang: Record<string, number>;
   /** Absent in answers from before automatic discounts: the Direct rate. */
   kind?: DiscountKind;
-  /** auto: the plan's public name in Cloudbeds (e.g. "Long term booking"), shown as the rate's label. */
+  /**
+   * auto: the plan's public name in Cloudbeds (e.g. "Last minute 10% off"), shown as the rate's label. direct: set only
+   * for a promo code other than the DIRECT alias (e.g. LONGSTAY), whose plan's public name labels the rate
+   * ("Long term - code LONGSTAY"); absent for DIRECT ("Direct rate - code DIRECT").
+   */
   name?: string;
 }
 
@@ -174,9 +178,11 @@ export interface StaySearch {
 }
 
 /**
- * pct is the demo's site-side discount; 0 for the Cloudbeds Direct rate (the
- * rates themselves are lower). An invalid result with `note` is not an error:
- * the code is real but can't be used here (shown calmly, with `link` when set).
+ * pct is the demo's site-side discount; 0 for a Cloudbeds promo-code rate (the
+ * rates themselves are lower). label: "Direct rate" for the DIRECT code, the
+ * plan's public name for any other Cloudbeds promo code. An invalid result with
+ * `note` is not an error: the code is real but can't be used here (shown calmly,
+ * with `link` when set).
  */
 export type PromoResult =
   | { code: string; valid: true; pct: number; label: string }
@@ -185,11 +191,28 @@ export type PromoResult =
 /**
  * How a promo code works on this deployment (config.ts resolvePromoSettings):
  * - discount: demo only, a site-side % (BOOKING_DEMO_PROMO_PCT);
- * - direct-rate: Stripe with live Cloudbeds rates and BOOKING_DIRECT_PROMO on: Cloudbeds' own Direct rate plan is sold;
- * - classic-only: Stripe without it (flag off, or no Cloudbeds rates): the code is pointed to the classic booking page;
+ * - direct-rate: Stripe with live Cloudbeds rates and BOOKING_DIRECT_PROMO on: Cloudbeds' own Direct rate plan is sold
+ *   for DIRECT, and the plan of any other promo code the owner set up in Cloudbeds for that code (PromoLookup);
+ * - classic-only: Stripe without it (flag off, or no Cloudbeds rates): every code is pointed to the classic booking page;
  * - off: Beam modes (no code applies).
  */
 export type PromoMode = "discount" | "direct-rate" | "classic-only" | "off";
+
+/**
+ * What the rate-plan index (one getRatePlans read for the stay) says about a promo code other than the DIRECT alias
+ * (cloudbedsProvider.ts promoIndexOf): whether a plan the own page may sell carries it (compared trimmed and
+ * case-insensitively), and Cloudbeds' own spelling of it, which is what getAvailableRoomTypes and postReservation get.
+ */
+export interface PromoLookup {
+  /** The code looked up, as the guest typed it (upper case). */
+  code: string;
+  /** Cloudbeds' own spelling of the code on the first sellable plan carrying it; null = no sellable plan carries it for these dates. */
+  cloudbedsCode: string | null;
+  /** That plan's public name (as the page shows it), the code's label; null when it has none. */
+  planName: string | null;
+  /** Public names of the plans carrying the code that the own page never sells (their names read as non-refundable). */
+  refusedPlans: string[];
+}
 
 /** Pricing knobs the client needs to mirror the server quote. */
 export interface PricingConfig {
@@ -304,8 +327,8 @@ export interface QuoteLine {
   listRoomSatang?: number;
   /**
    * With listRoomSatang: which discounted rate the line is on. name: the automatic discount plan's public name
-   * (its label); "Direct rate" for the Direct rate, whose label is quote.directRate.label. Absent in quotes from
-   * before automatic discounts (the Direct rate).
+   * (its label); for a promo-code rate "Direct rate" (DIRECT) or the plan's public name (any other code), labelled
+   * "<name> - code <CODE>" (lineDiscountLabel). Absent in quotes from before automatic discounts (the Direct rate).
    */
   discount?: { kind: DiscountKind; name: string };
   addons: QuoteAddonLine[];
@@ -319,11 +342,14 @@ export interface QuotePromo {
   discountSatang: number;
 }
 
-/** The Cloudbeds Direct rate on a quote (its rooms are already priced at it: nothing is deducted again). */
+/**
+ * The guest's Cloudbeds promo-code rate on a quote - the Direct rate for DIRECT, or the plan of any other code (e.g.
+ * LONGSTAY) - (its rooms are already priced at it: nothing is deducted again).
+ */
 export interface QuoteDirectRate {
-  /** The code the guest entered (e.g. DIRECT). */
+  /** The code the guest entered (e.g. DIRECT, LONGSTAY). */
   code: string;
-  /** "Direct rate - code DIRECT". */
+  /** "Direct rate - code DIRECT", or "<plan public name> - code <CODE>" for another code. */
   label: string;
   /** The rooms at the base rate (lines on the Direct rate at their list price, the others as quoted). */
   baseRoomsSatang: number;
@@ -635,6 +661,11 @@ export interface InventoryDiscount {
   kind: DiscountKind;
   /** The plan's public name in Cloudbeds (getRatePlans), e.g. "Long term booking" or "Direct booking rate". */
   name: string;
+  /**
+   * kind direct, for a promo code other than the DIRECT alias (e.g. LONGSTAY): the rate is labelled with the plan's
+   * public name (`name`) instead of "Direct rate".
+   */
+  showName?: true;
   baseRateId: string;
   baseNightly: NightRate[];
   baseAdultsExtraSatang: Record<string, number>;
