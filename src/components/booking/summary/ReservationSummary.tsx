@@ -17,6 +17,7 @@ import { FREE_PICKUP_MIN_NIGHTS, HOUSE_POLICIES, getCatalogueRoom } from "@/lib/
 import { formatDisplayDate, formatNights, nightsBetween } from "@/lib/booking/dates";
 import { formatThb, formatThbWithCode } from "@/lib/booking/format";
 import { DEMO_COPY_CONFIG, providerCopy } from "@/lib/booking/paymentCopy";
+import { lineDiscountLabel } from "@/lib/booking/quote";
 import type { CartItem, IsoDate, Quote } from "@/lib/booking/types";
 import { CHIP, TOUCH_TARGET } from "../ui/styles";
 import { BookingContext } from "../state";
@@ -157,13 +158,13 @@ export default function ReservationSummary({
                     <div className="min-w-0">
                       <p className="text-sm font-medium leading-snug">{name}</p>
                       <p className="mt-0.5 text-xs text-(--bk-text-muted)">{planName}</p>
-                      {line?.listRoomSatang !== undefined && quote?.directRate && (
-                        <p className="mt-0.5 text-xs font-medium text-(--bk-success)">{quote.directRate.label}</p>
+                      {line && quote && lineDiscountLabel(line, quote) && (
+                        <p className="mt-0.5 text-xs font-medium text-(--bk-success)">{lineDiscountLabel(line, quote)}</p>
                       )}
                     </div>
                     {line ? (
                       line.listRoomSatang !== undefined ? (
-                        // Cloudbeds' Direct rate: the base price struck through above the price held and charged.
+                        // A discounted Cloudbeds rate (Direct or automatic): the base price struck through above the price held and charged.
                         <span className="shrink-0 text-right text-sm">
                           <span className="bk-price block text-xs text-(--bk-text-subtle) line-through">
                             <span className="bk-sr-only">Was </span>

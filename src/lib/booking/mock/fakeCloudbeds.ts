@@ -8,7 +8,7 @@
 // requests, and can be told to fail, rate-limit or time out the next call.
 
 import { randomInt } from "node:crypto";
-import { addDays, eachNight } from "../dates.ts";
+import { addDays, eachNight, nightsBetween, todayInBangkok } from "../dates.ts";
 
 /** A sellable room type in the fake property (read side). */
 export interface FakeRoomType {
@@ -18,6 +18,8 @@ export interface FakeRoomType {
   /** Units of this type (before holds). */
   units: number;
   minLos?: number;
+  /** The base plan's maxLos (getRatePlans; default 0 = no limit). */
+  maxLos?: number;
   closedToArrival?: boolean;
   maxGuests?: number;
   /** roomRateID of the derived "Breakfast" row (default `${rateId}-breakfast`). */
@@ -30,6 +32,62 @@ export interface FakeRoomType {
   /** The Direct plan's own minLos / closed to arrival (getRatePlans); default 0 / false. */
   directMinLos?: number;
   directClosedToArrival?: boolean;
+  /**
+   * Further derived plans of this room type (public discount plans like "Last minute 10% off" and "Long term
+   * booking", "Non-refundable 10% discount", promo-code plans...): listed by getRatePlans, offered by
+   * getAvailableRoomTypes when their own rule says so, and priced by their roomRateID at postReservation.
+   * See fakeLastMinutePlan / fakeLongTermPlan / fakeNonRefundablePlan.
+   */
+  plans?: FakePlan[];
+}
+
+/** A derived plan of a fake room type: a percentage of its base rate. */
+export interface FakePlan {
+  rateId: string;
+  /** ratePlanNamePublic, e.g. "Long term booking". */
+  name: string;
+  /** Price per night as a % of the base rate (94 = 6% off). */
+  pctOfBase: number;
+  /** getRatePlans promoCode (default none). A plan with a code is offered only when asked with it, unless inPlainAnswer. */
+  promoCode?: string | null;
+  /** getRatePlans day rows (default 0 = no limit). */
+  minLos?: number;
+  maxLos?: number;
+  /** getAvailableRoomTypes offers the plan only for stays of at least this many nights (Long term). */
+  offeredFromNights?: number;
+  /** getAvailableRoomTypes offers the plan only when the arrival is at most this many days after the fake's today (Last minute). */
+  offeredWithinDays?: number;
+  /** Listed in the answer asked WITHOUT a promo code although it carries one (a misbehaving answer; default: only plans without a code). */
+  inPlainAnswer?: boolean;
+  /** getRatePlans parentRateID (default the room type's base rate). */
+  parentRateId?: string | null;
+  /** getRatePlans isDerived (default true). */
+  isDerived?: boolean;
+}
+
+/** The live "Last minute 10% off" plan: derived, 10% off, offered by Cloudbeds only within its last-minute window before arrival. */
+export function fakeLastMinutePlan(rateId: string, withinDays = 7): FakePlan {
+  return { rateId, name: "Last minute 10% off", pctOfBase: 90, offeredWithinDays: withinDays };
+}
+
+/** The live "Long term booking" plan: derived, 6% off, minLos 7 / maxLos 60, offered for stays of 7+ nights. */
+export function fakeLongTermPlan(rateId: string): FakePlan {
+  return { rateId, name: "Long term booking", pctOfBase: 94, minLos: 7, maxLos: 60, offeredFromNights: 7 };
+}
+
+/** The live "Non-refundable 10% discount" plan: derived, 10% off, always offered (never sold automatically: other refund terms). */
+export function fakeNonRefundablePlan(rateId: string): FakePlan {
+  return { rateId, name: "Non-refundable 10% discount", pctOfBase: 90 };
+}
+
+/** A plan's rate per night in baht (to the satang). */
+export function fakePlanRate(rt: FakeRoomType, plan: FakePlan): number {
+  return Math.round(rt.rate * plan.pctOfBase) / 100;
+}
+
+/** The live answer when a derived rate is not enabled for the reservation's source (2026-10-07, the Direct rate). */
+export function rateNotForSourceMessage(rateId: string): string {
+  return `Rate ${rateId} is not available for this reservation. Verify the rate is bookable for these dates and for the reservation source.`;
 }
 
 /** The live Breakfast plan: derived, fixed +2,000 THB per night on the base rate (2026-10-06). */
@@ -114,6 +172,13 @@ export interface FakeCloudbedsOptions {
    * must ask once without the code for the base rows (cloudbedsInventory).
    */
   promoAnswerKeepsBase?: boolean;
+  /** postReservation prices the room types' further plans (FakeRoomType.plans) at the BASE rate: Cloudbeds ignoring their roomRateID. */
+  plansPricedAtBase?: boolean;
+  /**
+   * roomRateIDs whose plan is not enabled for the reservation's source: postReservation refuses a room on one with
+   * success:false and the live message (rateNotForSourceMessage), as for the Direct rate on 2026-10-07.
+   */
+  ratesNotForSource?: string[];
   now?: () => number;
 }
 
@@ -309,6 +374,9 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         }));
         const start = params.get("startDate")!;
         const end = params.get("endDate")!;
+        // A derived rate whose plan is not enabled for the reservation's source (live: checked before availability is told).
+        const notForSource = resRooms.find((r) => r.roomRateID !== null && options.ratesNotForSource?.includes(r.roomRateID));
+        if (notForSource?.roomRateID) return reply({ success: false, message: rateNotForSourceMessage(notForSource.roomRateID) });
         if (options.roomTypes && !options.overbook && resRooms.some((r) => freeUnits(r.roomTypeID, start, end) < 1)) {
           return reply({ success: false, message: "Room type is not available for the selected dates" });
         }
@@ -317,11 +385,13 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         const nights = eachNight(start, end);
         const ratesKnown = !options.pricer && options.roomTypes !== undefined;
         // Priced by roomRateID, like a Cloudbeds that honours the rate sent: the Direct rate (unless
-        // directPricedAtBase), the Breakfast package, else the base rate.
+        // directPricedAtBase), a further plan (unless plansPricedAtBase), the Breakfast package, else the base rate.
         const rateFor = (r: FakeReservation["rooms"][number]): number => {
           const rt = options.roomTypes?.[r.roomTypeID];
           if (!rt) return 0;
           if (rt.directRateId && r.roomRateID === rt.directRateId) return options.directPricedAtBase ? rt.rate : fakeDirectRate(rt);
+          const plan = rt.plans?.find((p) => p.rateId === r.roomRateID);
+          if (plan) return options.plansPricedAtBase ? rt.rate : fakePlanRate(rt, plan);
           if (r.roomRateID === breakfastRateId(rt) && r.roomRateID !== rt.rateId) return rt.rate + BREAKFAST_FIXED_BAHT;
           return rt.rate;
         };
@@ -454,7 +524,18 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         // "Breakfast" row (+2,000 THB per night, its own roomRateID); propertyCurrency is a single object.
         // Asked with the promo code, a room type with a Direct plan also gets its derived Direct row (no promo
         // code or plan id on the row, as live: only its roomRateID tells it apart).
-        const promoAsked = (params.get("promoCode") ?? "").trim().toLowerCase() === FAKE_DIRECT_PROMO_CODE.toLowerCase();
+        const askedCode = (params.get("promoCode") ?? "").trim().toLowerCase();
+        const promoAsked = askedCode === FAKE_DIRECT_PROMO_CODE.toLowerCase();
+        // Further plans, like live: a public plan when its own rule offers it for this stay (Long term: 7+ nights;
+        // Last minute: an arrival inside its window before the fake's today), a promo-code plan only with its code.
+        const today = todayInBangkok(new Date(now()));
+        const planOffered = (plan: FakePlan, withCode: boolean): boolean => {
+          const code = (plan.promoCode ?? "").trim().toLowerCase();
+          if (withCode ? code !== askedCode : code !== "" && plan.inPlainAnswer !== true) return false;
+          if (plan.offeredFromNights !== undefined && nights.length < plan.offeredFromNights) return false;
+          if (plan.offeredWithinDays !== undefined && nightsBetween(today, start) > plan.offeredWithinDays) return false;
+          return true;
+        };
         const rooms = Object.entries(options.roomTypes ?? {})
           .filter(([id]) => freeUnits(id, start, end) > 0)
           .flatMap(([id, rt]) => {
@@ -471,8 +552,9 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
               ratePlanNamePublic,
             });
             const direct = promoAsked && rt.directRateId ? [row(rt.directRateId, fakeDirectRate(rt), "Direct booking rate", "percentage")] : [];
-            if (promoAsked && options.promoAnswerKeepsBase !== true) return direct;
-            return [row(rt.rateId, rt.rate, "default", null), row(breakfastRateId(rt), rt.rate + BREAKFAST_FIXED_BAHT, "Breakfast", "fixed"), ...direct];
+            const plans = (rt.plans ?? []).filter((p) => planOffered(p, askedCode !== "")).map((p) => row(p.rateId, fakePlanRate(rt, p), p.name, "percentage"));
+            if (promoAsked && options.promoAnswerKeepsBase !== true) return [...direct, ...plans];
+            return [row(rt.rateId, rt.rate, "default", null), row(breakfastRateId(rt), rt.rate + BREAKFAST_FIXED_BAHT, "Breakfast", "fixed"), ...direct, ...plans];
           });
         return reply({
           success: true,
@@ -483,11 +565,11 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
         const start = params.get("startDate") ?? "";
         const end = params.get("endDate") ?? "";
         const filter = params.get("roomTypeID");
-        // Filtered by one room type (the restriction check), or every room type (the promo-rate lookup).
+        // Filtered by one room type (the restriction check), or every room type (the rate-plan index: Direct and automatic discounts).
         const ids = filter === null ? Object.keys(options.roomTypes ?? {}) : options.roomTypes?.[filter] ? [filter] : [];
         const rowsFor = (id: string, rt: FakeRoomType) => {
           // Like the real API as we read it: one row per date in [startDate, endDate) - the caller asks one day past check-out.
-          const days = (rate: number, minLos: number, closedToArrival: boolean) =>
+          const days = (rate: number, minLos: number, closedToArrival: boolean, maxLos = 0, extra: Record<string, unknown> = {}) =>
             eachNight(start, end).map((date, i) => ({
               date,
               rateBase: rate,
@@ -497,13 +579,30 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
               closedToDeparture: false,
               blocked: false,
               minLos,
-              maxLos: 0,
+              maxLos,
+              ...extra,
             }));
           // The spec sends roomTypeID only "if not specified in request".
           const typeOf = options.ratePlansWithoutRoomTypeId && filter !== null ? {} : { roomTypeID: id };
-          const baseDays = days(rt.rate, rt.minLos ?? 0, rt.closedToArrival === true);
+          const baseDays = days(rt.rate, rt.minLos ?? 0, rt.closedToArrival === true, rt.maxLos ?? 0);
+          // Further plans: listed whatever their window or minimum stay (live: Long term minLos 7 came back for 3 nights).
+          const planRows = (rt.plans ?? []).map((p, i) => ({
+            rateID: p.rateId,
+            ...typeOf,
+            isDerived: p.isDerived ?? true,
+            ratePlanID: `fake-plan-${i}`,
+            ratePlanNamePublic: p.name,
+            promoCode: p.promoCode ?? null,
+            derivedType: "percentage",
+            derivedValue: p.pctOfBase - 100,
+            parentRateID: p.parentRateId === undefined ? rt.rateId : p.parentRateId,
+            roomRateDetailed: days(fakePlanRate(rt, p), p.minLos ?? 0, false, p.maxLos ?? 0, {
+              cutOff: 0,
+              lastMinuteBooking: p.offeredWithinDays ?? 0,
+            }),
+          }));
           // The derived rows first, so the restriction check must pick its row by rateID, not by order. The base row has
-          // no plan name here (live: null), unlike in getAvailableRoomTypes. Only the Direct row carries a promo code.
+          // no plan name here (live: null), unlike in getAvailableRoomTypes. Only the Direct row (and a promo-code plan) carries a promo code.
           return [
             { rateID: breakfastRateId(rt), ...typeOf, isDerived: true, ratePlanID: "fake-plan-breakfast", ratePlanNamePublic: "Breakfast", promoCode: null, parentRateID: rt.rateId, roomRateDetailed: days(rt.rate + BREAKFAST_FIXED_BAHT, rt.minLos ?? 0, rt.closedToArrival === true) },
             ...(rt.directRateId
@@ -522,6 +621,7 @@ export function createFakeCloudbeds(options: FakeCloudbedsOptions = {}) {
                   },
                 ]
               : []),
+            ...planRows,
             { rateID: rt.rateId, ...typeOf, isDerived: false, ratePlanID: null, ratePlanNamePublic: null, promoCode: null, parentRateID: null, roomRateDetailed: baseDays },
           ];
         };

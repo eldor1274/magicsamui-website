@@ -124,10 +124,23 @@ export interface RateOffer {
   totalSatang: number;
   pricedForAdults: number;
   /**
-   * Set when this is the Cloudbeds Direct (promo code) rate: the base (BAR)
-   * rate it is derived from, shown struck through next to the Direct price.
+   * Set when this is a discounted Cloudbeds rate - the Direct (promo code) rate or an automatic discount
+   * plan: the base (BAR) rate it is derived from, shown struck through next to the discounted price.
    */
-  list?: { baseNightly: NightRate[]; adultsExtraSatang: Record<string, number> };
+  list?: RateListPrice;
+}
+
+/** Which discounted Cloudbeds rate a room is sold on: the Direct rate for the guest's code, or an automatic discount plan. */
+export type DiscountKind = "direct" | "auto";
+
+/** RateOffer.list: the base rate a discounted rate is derived from. */
+export interface RateListPrice {
+  baseNightly: NightRate[];
+  adultsExtraSatang: Record<string, number>;
+  /** Absent in answers from before automatic discounts: the Direct rate. */
+  kind?: DiscountKind;
+  /** auto: the plan's public name in Cloudbeds (e.g. "Long term booking"), shown as the rate's label. */
+  name?: string;
 }
 
 export type UnavailableReason = "sold-out" | "not-bookable";
@@ -146,7 +159,10 @@ export interface RoomOffer {
    */
   maxAdults?: number;
   rates: RateOffer[];
-  /** The guest's Direct code was checked but Cloudbeds has no Direct rate for this room and these dates: the standard rate is shown. */
+  /**
+   * The guest's Direct code was checked but Cloudbeds has no Direct rate for this room and these dates (or an
+   * automatic discount is cheaper): the standard rate, or that discount, is shown.
+   */
   promoNotApplied?: boolean;
 }
 
@@ -284,8 +300,14 @@ export interface QuoteLine {
   /** Extra-adult (occupancy) charge for the stay, included in roomSatang. */
   occupancyExtraSatang: number;
   roomSatang: number;
-  /** On the Cloudbeds Direct rate: the same room at the base rate (shown struck through). Absent otherwise. */
+  /** On a discounted Cloudbeds rate (Direct or automatic): the same room at the base rate (shown struck through). Absent otherwise. */
   listRoomSatang?: number;
+  /**
+   * With listRoomSatang: which discounted rate the line is on. name: the automatic discount plan's public name
+   * (its label); "Direct rate" for the Direct rate, whose label is quote.directRate.label. Absent in quotes from
+   * before automatic discounts (the Direct rate).
+   */
+  discount?: { kind: DiscountKind; name: string };
   addons: QuoteAddonLine[];
   addonsSatang: number;
 }
@@ -309,19 +331,31 @@ export interface QuoteDirectRate {
   savingSatang: number;
 }
 
+/** Cloudbeds' automatic discount plans on a quote (already in the room prices: nothing is deducted again). */
+export interface QuoteAutoDiscount {
+  /** The plans' public names, e.g. ["Long term booking"]. */
+  names: string[];
+  /** The rooms with the lines on an automatic discount at their base price, the others as quoted. */
+  baseRoomsSatang: number;
+  /** baseRoomsSatang - roomsSubtotalSatang. */
+  savingSatang: number;
+}
+
 export interface Quote {
   currency: "THB";
   checkIn: IsoDate;
   checkOut: IsoDate;
   nights: number;
   lines: QuoteLine[];
-  /** What Cloudbeds holds for the rooms (on the Direct rate where it applies). */
+  /** What Cloudbeds holds for the rooms (on the Direct rate or an automatic discount where it applies). */
   roomsSubtotalSatang: number;
   addonsSubtotalSatang: number;
   /** The demo's site-side discount (deducted below the rooms). */
   promo: QuotePromo | null;
   /** The Cloudbeds Direct rate (already in the room prices); absent or null when no line is on it. */
   directRate?: QuoteDirectRate | null;
+  /** Cloudbeds' automatic discount plans (already in the room prices); absent or null when no line is on one. */
+  autoDiscount?: QuoteAutoDiscount | null;
   /** rooms + addons - promo; the base the card fee is charged on. */
   feeBaseSatang: number;
   cardFeePct: number;
@@ -460,6 +494,11 @@ export interface BookingSummary {
   items: CartItemInput[];
   /** Room total (incl. plan supplement, excl. add-ons) per item, parallel to items. */
   itemRoomSatang: number[];
+  /**
+   * Stripe: per item (parallel to items), the discounted Cloudbeds rate it was booked on - its label and the room
+   * at the base rate (struck through on the return page) - or null. Absent in tokens from before it existed.
+   */
+  itemDiscounts?: (BookingItemDiscount | null)[];
   promoCode: string | null;
   totalSatang: number;
   cardFeeSatang: number;
@@ -468,6 +507,14 @@ export interface BookingSummary {
   linkExpiresAt: string;
   /** Preview theme, so the return/cancel pages keep the look the guest chose. */
   theme?: ThemeName;
+}
+
+export interface BookingItemDiscount {
+  kind: DiscountKind;
+  /** "Direct rate - code DIRECT", or the automatic discount plan's public name. */
+  label: string;
+  /** The room at the base rate (>= the item's itemRoomSatang). */
+  listSatang: number;
 }
 
 /**
@@ -571,11 +618,24 @@ export interface RoomInventory {
   /** Cloudbeds roomRateID of the row that was priced (sent with the hold so Cloudbeds prices the same rate). */
   rateId?: string;
   /**
-   * Set when the row priced is the Cloudbeds Direct (promo code) rate: rateId is
-   * its roomRateID, and this is the base (BAR) row it is derived from (struck
-   * through on the page, and checked with it for stay rules at checkout).
+   * Set when the row priced is a discounted Cloudbeds rate - the Direct (promo code) rate or an automatic
+   * discount plan: rateId is its roomRateID, and this is the base (BAR) row it is derived from (struck through
+   * on the page, and checked with it for stay rules at checkout).
    */
-  promo?: { baseRateId: string; baseNightly: NightRate[]; baseAdultsExtraSatang: Record<string, number> };
-  /** A promo code was asked for, but no sellable Direct row came back for this room: the base row is priced. */
+  discount?: InventoryDiscount;
+  /**
+   * A promo code was asked for, but no sellable Direct row came back for this room (or an automatic discount
+   * is cheaper): the base row, or that discount, is priced.
+   */
   promoNotApplied?: boolean;
+}
+
+/** RoomInventory.discount. */
+export interface InventoryDiscount {
+  kind: DiscountKind;
+  /** The plan's public name in Cloudbeds (getRatePlans), e.g. "Long term booking" or "Direct booking rate". */
+  name: string;
+  baseRateId: string;
+  baseNightly: NightRate[];
+  baseAdultsExtraSatang: Record<string, number>;
 }

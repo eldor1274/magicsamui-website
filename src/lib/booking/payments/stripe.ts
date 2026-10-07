@@ -167,8 +167,8 @@ export function buildCheckoutSessionParams(input: SessionInput): Stripe.Checkout
       currency: "thb",
       unit_amount: l.roomSatang,
       product_data: {
-        // A room on Cloudbeds' Direct rate says so, as on the booking page.
-        name: `${l.roomName} - ${l.ratePlanName}${l.listRoomSatang !== undefined ? " (Direct rate)" : ""}`.slice(0, 250),
+        // A room on Cloudbeds' Direct rate or an automatic discount plan says so, as on the booking page.
+        name: `${l.roomName} - ${l.ratePlanName}${l.listRoomSatang === undefined ? "" : l.discount?.kind === "auto" ? ` (${l.discount.name})` : " (Direct rate)"}`.slice(0, 250),
         description: `${dates} (${nights}, ${l.adults} guest${l.adults === 1 ? "" : "s"})`.slice(0, 500),
       },
     },

@@ -3,14 +3,14 @@
 // inventory into priced offers.
 
 import { CATALOGUE } from "./catalogue.ts";
-import { cloudbedsInventory, cloudbedsPromoRates } from "./cloudbedsProvider.ts";
-import type { PromoRateIndex } from "./cloudbedsProvider.ts";
+import { cloudbedsInventory, cloudbedsRateIndex } from "./cloudbedsProvider.ts";
+import type { PromoRateIndex, RatePlanIndex, TokenBucket } from "./cloudbedsProvider.ts";
 import { demoInventory } from "./demoProvider.ts";
 import { logEvent } from "./routeUtils.ts";
 import { buildRateOffers, occupancyExtraSatang } from "./quote.ts";
 import type { BookingConfig } from "./config.ts";
 import type { AlertFn } from "./stripeDeps.ts";
-import type { CartItemInput, DataSource, IsoDate, PromoMode, PromoResult, RatePlanId, RoomInventory, RoomOffer } from "./types.ts";
+import type { CartItemInput, DataSource, IsoDate, PromoMode, PromoResult, RateListPrice, RatePlanId, RoomInventory, RoomOffer } from "./types.ts";
 
 /** Search answers from Cloudbeds are reused this long (per server instance). */
 export const SEARCH_CACHE_TTL_MS = 60_000;
@@ -23,8 +23,8 @@ export interface InventoryResult {
    * not offer at the cart's party size - an occupancy limit, not a sale.
    */
   occupancyRefused?: string[];
-  /** The promo rate index used (direct-rate with live Cloudbeds data), so a cart's gate reads can reuse it. */
-  promoRates?: PromoRateIndex;
+  /** The rate-plan index used (Direct rate / automatic discounts with live Cloudbeds data), so a cart's gate reads can reuse it. */
+  rateIndex?: RatePlanIndex;
 }
 
 export interface InventoryOptions {
@@ -54,10 +54,33 @@ export interface InventoryOptions {
   /**
    * The guest's code is valid on a direct-rate deployment: Cloudbeds is asked with its promo code and
    * the Direct rows are sold (cloudbedsProvider ParseOptions.promo). `rates` reuses an index already
-   * read for this stay; otherwise getRatePlans is read first (a failure fails the read like any other).
-   * Live Cloudbeds data on a base-rate-only (Stripe) config only; ignored otherwise.
+   * read for this stay; otherwise it comes from the rate-plan index read (a failure fails the read like
+   * any other). Live Cloudbeds data on a base-rate-only (Stripe) config only; ignored otherwise.
    */
   promo?: { cloudbedsCode: string; rates?: PromoRateIndex };
+  /**
+   * false = no automatic discounts on this read (the availability re-check under the unit lock: availability
+   * only, which a discounted row can't change - it sells only next to its base row). Default: the config's
+   * cloudbeds.autoDiscountPlans (Stripe with live Cloudbeds data, BOOKING_AUTO_DISCOUNTS on).
+   */
+  autoDiscounts?: boolean;
+  /**
+   * The rate-plan index already read for this stay (a cart's gate reads reuse the priced read's). Otherwise one
+   * getRatePlans read (cloudbedsRateIndex) serves the Direct rate AND the automatic discounts, read at the same
+   * time as availability, only when either is in play.
+   */
+  rateIndex?: RatePlanIndex;
+  /**
+   * Search only (the availability route): when the rate-plan index is read for the automatic discounts alone (no
+   * valid code), it is best effort - a failed read, or no call budget left for it, logs cloudbeds_rate_index_failed
+   * and the base rate is shown, as with automatic discounts off (checkout re-quotes anyway), and a cached answer is
+   * served as it is. A read that was sent and failed is not sent again for that stay for RATE_PLAN_FAIL_TTL_MS (20 s):
+   * searches in that time show the base rates at once, with no call and no budget token. Never for checkout (its re-quote fails closed like any other read; the stay-rule read under the
+   * lock needs getRatePlans anyway) nor with a valid code (the Direct rate needs the index).
+   */
+  autoDiscountsBestEffort?: boolean;
+  /** Call budget (default the preview budget; an injected fetch is unmetered unless one is passed too). */
+  budget?: TokenBucket;
 }
 
 /** Checkout waits this long, at most, for the Cloudbeds call budget before refusing. */
@@ -128,16 +151,38 @@ export async function getInventory(
         fetchImpl: options.fetchImpl,
         cacheTtlMs: options.cacheTtlMs,
         budgetWaitMs: options.budgetWaitMs,
+        ...(options.budget ? { budget: options.budget } : {}),
       };
-      const promoRates =
-        options.promo && config.cloudbeds.baseRateOnly === true
-          ? (options.promo.rates ?? (await cloudbedsPromoRates(checkIn, checkOut, options.promo.cloudbedsCode, read)))
-          : undefined;
+      const baseRateOnly = config.cloudbeds.baseRateOnly === true;
+      // The Direct rate (a valid code) and the automatic discount plans: Stripe (base-rate-only) configs only.
+      const promo = baseRateOnly ? options.promo : undefined;
+      const autoPlans = baseRateOnly && options.autoDiscounts !== false ? (config.cloudbeds.autoDiscountPlans ?? []) : [];
+      // ONE getRatePlans read tells both apart (cloudbedsRateIndex), read while availability is read; reused when given.
+      const needsIndex = !options.rateIndex && ((promo !== undefined && !promo.rates) || autoPlans.length > 0);
+      // The index serves only the automatic discounts: a failure shows the base rate instead of failing the search
+      // (and is remembered for a while, so cached searches don't re-send a failing read: RATE_PLAN_FAIL_TTL_MS).
+      const bestEffort = needsIndex && options.autoDiscountsBestEffort === true && promo === undefined;
+      // Started by cloudbedsInventory once availability's reads have their budget tokens; read at most once.
+      const index: { loaded: Promise<RatePlanIndex> | null } = { loaded: null };
+      const loadIndex = () => {
+        if (!index.loaded) {
+          index.loaded = cloudbedsRateIndex(checkIn, checkOut, { cloudbedsCode: promo?.cloudbedsCode ?? null, autoPlans }, { ...read, rememberFailure: bestEffort });
+          // Settled by cloudbedsInventory (which awaits it); this only keeps an early failure there from leaving it unhandled.
+          index.loaded.catch(() => undefined);
+        }
+        return index.loaded;
+      };
+      const given = options.rateIndex ?? (promo?.rates ? { promo: promo.rates, auto: {} } : undefined);
+      const rateIndex = needsIndex ? loadIndex : given;
       const inventory = await cloudbedsInventory(checkIn, checkOut, {
         ...read,
         adults: options.adults,
-        baseRateOnly: config.cloudbeds.baseRateOnly === true,
-        ...(options.promo && promoRates ? { promo: { cloudbedsCode: options.promo.cloudbedsCode, rates: promoRates } } : {}),
+        baseRateOnly,
+        ...(promo ? { promo: { cloudbedsCode: promo.cloudbedsCode, ...(promo.rates ? { rates: promo.rates } : {}) } } : {}),
+        ...(rateIndex ? { rateIndex } : {}),
+        ...(bestEffort
+          ? { onRateIndexFailed: (e: unknown) => logEvent("cloudbeds_rate_index_failed", { checkIn, checkOut, error: e instanceof Error ? e.message : String(e) }) }
+          : {}),
         // Stripe sells the base (BAR) row only: a room type offered only on another plan is shown as unavailable.
         onNoBaseRate: (slug) => {
           noBaseRate.push(slug);
@@ -148,7 +193,9 @@ export async function getInventory(
       if (options.onNoBaseRateAll && noBaseRate.length > 0 && !inventory.some((i) => i.available)) {
         await noteNoBaseRateAll(noBaseRate, checkIn, checkOut, options.nowMs ?? Date.now(), options.onNoBaseRateAll);
       }
-      return { inventory, dataSource: "cloudbeds", ...(promoRates ? { promoRates } : {}) };
+      // The index this answer used, for a cart's gate reads (none when the best-effort read failed).
+      const used = index.loaded ? await index.loaded.catch(() => undefined) : given;
+      return { inventory, dataSource: "cloudbeds", ...(used ? { rateIndex: used } : {}) };
     } catch (error) {
       if (options.allowDemoFallback === false) throw new InventoryUnavailableError(error);
       options.onFallback?.(error);
@@ -196,7 +243,7 @@ export async function getCartInventory(
   checkOut: IsoDate,
   items: CartItemInput[],
   config: Pick<BookingConfig, "dataSource" | "cloudbeds">,
-  options: Omit<InventoryOptions, "adults" | "cacheTtlMs" | "onNoBaseRateAll"> & { onOccupancyPricing?: (note: OccupancyPricingNote) => void } = {},
+  options: Omit<InventoryOptions, "adults" | "cacheTtlMs" | "onNoBaseRateAll" | "autoDiscountsBestEffort"> & { onOccupancyPricing?: (note: OccupancyPricingNote) => void } = {},
 ): Promise<InventoryResult> {
   const { onOccupancyPricing, ...inventoryOptions } = options;
   const gateSizes = config.dataSource === "cloudbeds" ? [...new Set(items.map((i) => i.adults))].filter((a) => a !== 1).sort((a, b) => a - b) : [];
@@ -204,8 +251,8 @@ export async function getCartInventory(
     getInventory(checkIn, checkOut, config, { budgetWaitMs: CHECKOUT_BUDGET_WAIT_MS, ...inventoryOptions, adults });
   const priced = await ask(1);
   const gates: InventoryResult[] = [];
-  // The gates read the same Direct rows (one promo-rate read per checkout, not one per party size).
-  const gateOptions = inventoryOptions.promo && priced.promoRates ? { promo: { ...inventoryOptions.promo, rates: priced.promoRates } } : {};
+  // The gates read the same Direct and automatic-discount rows (one rate-plan read per checkout, not one per party size).
+  const gateOptions = priced.rateIndex ? { rateIndex: priced.rateIndex } : {};
   for (const adults of gateSizes) {
     gates.push(await getInventory(checkIn, checkOut, config, { budgetWaitMs: CHECKOUT_BUDGET_WAIT_MS, ...inventoryOptions, ...gateOptions, adults }));
   }
@@ -236,20 +283,21 @@ export async function getCartInventory(
     return inv;
   });
   const dataSource: DataSource = [priced, ...gates].some((r) => r.dataSource === "demo-fallback") ? "demo-fallback" : priced.dataSource;
-  return { inventory, dataSource, occupancyRefused, ...(priced.promoRates ? { promoRates: priced.promoRates } : {}) };
+  return { inventory, dataSource, occupancyRefused, ...(priced.rateIndex ? { rateIndex: priced.rateIndex } : {}) };
 }
 
 /**
  * The search's promo verdict once the inventory is known (direct-rate only): a valid code that no
  * available room gets the Direct rate for on these dates becomes a calm note, so the page never says
  * "applied" over standard prices. When some rooms have it, the others say so on their own card
- * (RoomOffer.promoNotApplied).
+ * (RoomOffer.promoNotApplied). Rooms on an automatic discount are not "standard rates": the note says so.
  */
 export function promoVerdictForInventory(promo: PromoResult | null, mode: PromoMode, inventory: RoomInventory[]): PromoResult | null {
   if (!promo?.valid || mode !== "direct-rate") return promo;
   const available = inventory.filter((i) => i.available);
-  if (available.length === 0 || available.some((i) => i.promo)) return promo;
-  return { code: promo.code, valid: false, note: true, message: `Code ${promo.code} doesn't apply to these dates - the prices shown are our standard rates.` };
+  if (available.length === 0 || available.some((i) => i.discount?.kind === "direct")) return promo;
+  const shown = available.some((i) => i.discount?.kind === "auto") ? "the prices shown are our best rates for them" : "the prices shown are our standard rates";
+  return { code: promo.code, valid: false, note: true, message: `Code ${promo.code} doesn't apply to these dates - ${shown}.` };
 }
 
 /**
@@ -270,8 +318,12 @@ export function buildOffers(inventory: RoomInventory[], adults: number, ratePlan
       return { slug: room.slug, available: false, unavailableReason: "sold-out", remaining: 0, fitsParty, maxAdults, rates: [] };
     }
     const pricedFor = Math.min(Math.max(1, adults), maxAdults);
-    // The Cloudbeds Direct rate: priced at its own rows, with the base row it is derived from as the list price.
-    const list = inv.promo ? { baseNightly: inv.promo.baseNightly, adultsExtraSatang: inv.promo.baseAdultsExtraSatang } : undefined;
+    // A discounted Cloudbeds rate (Direct or automatic): priced at its own rows, with the base row it is derived
+    // from as the list price; an automatic discount also carries its plan's name (the rate's label).
+    const d = inv.discount;
+    const list: RateListPrice | undefined = d
+      ? { baseNightly: d.baseNightly, adultsExtraSatang: d.baseAdultsExtraSatang, kind: d.kind, ...(d.kind === "auto" ? { name: d.name } : {}) }
+      : undefined;
     return {
       slug: room.slug,
       available: true,

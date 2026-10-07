@@ -33,6 +33,7 @@ import { formatThb, formatThbWithCode } from "@/lib/booking/format";
 import { normalizePostcode } from "@/lib/booking/guest";
 import type { GuestDetails } from "@/lib/booking/guest";
 import { DEMO_COPY_CONFIG, paymentMethodLabels, providerCopy } from "@/lib/booking/paymentCopy";
+import { lineDiscountLabel } from "@/lib/booking/quote";
 import type { CartItem, IsoDate, PaymentMode, PublicBookingConfig, Quote } from "@/lib/booking/types";
 import type { CheckoutErrorView } from "../state";
 import { TOUCH_TARGET } from "../ui/styles";
@@ -523,12 +524,10 @@ export default function PaymentStep({
                     <p className="text-(--bk-text-muted)">
                       {line.ratePlanName} · {line.adults} {line.adults === 1 ? "guest" : "guests"} · {formatNights(line.nights)}
                     </p>
-                    {line.listRoomSatang !== undefined && quote.directRate && (
-                      <p className="font-medium text-(--bk-success)">{quote.directRate.label}</p>
-                    )}
+                    {lineDiscountLabel(line, quote) && <p className="font-medium text-(--bk-success)">{lineDiscountLabel(line, quote)}</p>}
                   </div>
                   <div className="shrink-0 text-right">
-                    {/* Cloudbeds' Direct rate: the base price struck through above the price held and charged. */}
+                    {/* A discounted Cloudbeds rate (Direct or automatic): the base price struck through above the price held and charged. */}
                     {line.listRoomSatang !== undefined && (
                       <p className="bk-price text-xs text-(--bk-text-subtle) line-through">
                         <span className="bk-sr-only">Was </span>

@@ -148,7 +148,8 @@ test("checkout with real Cloudbeds writes refuses EARLY on a payment method prob
     }
     assert.equal(kit.fakeCb.count("postReservation"), 0, "no hold");
     assert.deepEqual(kit.fakeCb.calls.filter((c) => c.verb !== "GET"), [], "no Cloudbeds write at all");
-    assert.equal(kit.fakeCb.count("getRatePlans"), 0, "refused before the locked re-checks");
+    // (The re-quote's one unfiltered rate-plan index read - the automatic discounts' - comes before it.)
+    assert.equal(kit.fakeCb.calls.filter((c) => c.method === "getRatePlans" && c.params.roomTypeID !== undefined).length, 0, "refused before the locked re-checks");
     assert.equal(stripePosts(kit), 0, "no Stripe session");
     assert.deepEqual(await kit.deps.kv.zrangeByScore(keys.intentIndex(), 0, Number.MAX_SAFE_INTEGER, 10), [], "no intent");
     const alerts = kit.alerts.filter((a) => a.subject === "Online bookings stopped: the Cloudbeds payment method is not set up");

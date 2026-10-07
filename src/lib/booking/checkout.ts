@@ -251,10 +251,11 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
       });
     }
     // Re-read under the unit lock just before the hold: another checkout may have taken the unit since.
-    // It reads WITHOUT the code even for a Direct cart: it only tests availability, which the Direct rows
-    // can't change (a Direct row sells only next to its base row), and every extra Cloudbeds read here is
-    // one more way to refuse a checkout right before the hold. The stay-rule read under the same lock
-    // (restrictions with the promo) re-confirms the Direct row - its promo code and its base row - on
+    // It reads WITHOUT the code and without the automatic discounts even for a discounted cart: it only
+    // tests availability, which the discounted rows can't change (a Direct or automatic row sells only next
+    // to its base row), and every extra Cloudbeds read here (the rate-plan index) is one more way to refuse
+    // a checkout right before the hold. The stay-rule read under the same lock (restrictions with the
+    // selected discount) re-confirms the discounted row - its promo code or plan, and its base row - on
     // fresh data, and the folio read-back checks the price.
     const recheckAvailability =
       dataSource === "cloudbeds"
@@ -262,12 +263,14 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
             const fresh = await getCartInventory(req.checkIn, req.checkOut, req.items, config, {
               fetchImpl: deps.fetchImpl,
               allowDemoFallback: false,
+              autoDiscounts: false,
             });
             if (fresh.dataSource !== "cloudbeds") throw new Error("live availability unavailable");
             return unavailableCartSlugs(req.items, buildOffers(fresh.inventory, 1, config.ratePlans));
           }
         : undefined;
-    // The Direct rate is held only where the server's own re-quote put a room on it.
+    // The Direct rate is held only where the server's own re-quote put a room on it; so is an automatic
+    // discount (the re-quote's inventory carries it, nothing the browser sent).
     const directPromo = quote.directRate && cloudbedsPromo ? { code: quote.directRate.code, cloudbedsCode: cloudbedsPromo.cloudbedsCode } : null;
     return startStripeCheckout(
       { checkIn: req.checkIn, checkOut: req.checkOut, items: req.items, guest, quote, inventory, dataSource, theme: req.theme, today, recheckAvailability, promo: directPromo },

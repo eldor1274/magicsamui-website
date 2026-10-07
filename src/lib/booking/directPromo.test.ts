@@ -155,27 +155,29 @@ test("availability with the code: Cloudbeds is asked with its promo code and the
   const without = await getInventory(FAR_CHECKIN, FAR_CHECKOUT, kit.config, { fetchImpl: kit.fakeCb.fetch, allowDemoFallback: false });
   const hm0 = without.inventory.find((i) => i.slug === "honeymoon-suite")!;
   assert.equal(hm0.rateId, "rate-hm");
-  assert.equal(hm0.promo, undefined);
+  assert.equal(hm0.discount, undefined);
   assert.equal(hm0.promoNotApplied, undefined, "without a code nothing changes");
   assert.equal(kit.fakeCb.calls.find((c) => c.method === "getAvailableRoomTypes")?.params.promoCode, undefined);
-  assert.equal(kit.fakeCb.count("getRatePlans"), 0);
+  // The one rate-plan index read is the automatic discounts' (on by default); it finds none on these room types.
+  assert.equal(unfilteredRatePlanReads(kit), 1);
 
   const withCode = await getInventory(FAR_CHECKIN, FAR_CHECKOUT, kit.config, { fetchImpl: kit.fakeCb.fetch, allowDemoFallback: false, promo: { cloudbedsCode: "Direct" } });
   // Live, Cloudbeds' answer WITH the code has no base rows (Stage B 2026-10-07), so the search asks twice: plain and with the code.
   const withCodeReads = kit.fakeCb.calls.filter((c) => c.method === "getAvailableRoomTypes").slice(1);
   assert.deepEqual(withCodeReads.map((c) => c.params.promoCode ?? null).sort(), ["Direct", null]);
-  assert.equal(unfilteredRatePlanReads(kit), 1, "one getRatePlans read for every room type");
+  assert.equal(unfilteredRatePlanReads(kit) - 1, 1, "one getRatePlans read for every room type (the Direct rows and the automatic discounts alike)");
   const hm = withCode.inventory.find((i) => i.slug === "honeymoon-suite")!;
   assert.equal(hm.rateId, "rate-hm-direct");
   assert.deepEqual(hm.baseNightly.map((n) => n.amountSatang), [720_000, 720_000, 720_000]);
-  assert.equal(hm.promo?.baseRateId, "rate-hm");
-  assert.deepEqual(hm.promo?.baseNightly.map((n) => n.amountSatang), [900_000, 900_000, 900_000]);
+  assert.equal(hm.discount?.kind, "direct");
+  assert.equal(hm.discount?.baseRateId, "rate-hm");
+  assert.deepEqual(hm.discount?.baseNightly.map((n) => n.amountSatang), [900_000, 900_000, 900_000]);
   // Each room type has its own Direct rateID.
   assert.equal(withCode.inventory.find((i) => i.slug === "garden-suite")?.rateId, "rate-gs-direct");
   // No Direct plan on the Sunrise Suite: its base row, marked so the page says the code doesn't apply.
   const sr = withCode.inventory.find((i) => i.slug === "sunrise-suite")!;
   assert.equal(sr.rateId, "rate-sr");
-  assert.equal(sr.promo, undefined);
+  assert.equal(sr.discount, undefined);
   assert.equal(sr.promoNotApplied, true);
 
   // Offers: the Direct price, with the base price as the struck-through list price; the quote holds the Direct total.
@@ -300,7 +302,7 @@ test("a Direct row sold next to its base row: the lower occupancy limit of the t
 test("the search verdict: a valid code that no available room gets the Direct rate for becomes a note, never 'applied' over standard prices", () => {
   const valid = { code: "DIRECT", valid: true as const, pct: 0, label: "Direct rate" };
   const base: RoomInventory = { slug: "sunrise-suite", available: true, remaining: 1, baseNightly: [], promoNotApplied: true };
-  const direct: RoomInventory = { ...base, slug: "honeymoon-suite", promoNotApplied: undefined, promo: { baseRateId: "b", baseNightly: [], baseAdultsExtraSatang: {} } };
+  const direct: RoomInventory = { ...base, slug: "honeymoon-suite", promoNotApplied: undefined, discount: { kind: "direct", name: "Direct booking rate", baseRateId: "b", baseNightly: [], baseAdultsExtraSatang: {} } };
   const none = promoVerdictForInventory(valid, "direct-rate", [base]);
   assert.ok(none && !none.valid && none.note === true);
   assert.match(none && !none.valid ? none.message : "", /^Code DIRECT doesn't apply to these dates/);
@@ -316,7 +318,7 @@ test("computeQuote: a Direct rate whose struck-through base price (or own price)
     available: true,
     remaining: 1,
     baseNightly: nightly(directNights, 720_000),
-    promo: { baseRateId: "hm-base", baseNightly: nightly(baseNights, 900_000), baseAdultsExtraSatang: {} },
+    discount: { kind: "direct", name: "Direct booking rate", baseRateId: "hm-base", baseNightly: nightly(baseNights, 900_000), baseAdultsExtraSatang: {} },
   });
   const quote = (inv: RoomInventory) =>
     computeQuote(
@@ -376,6 +378,9 @@ test("stay rules: any derived rate other than the Direct rate selected for this 
   assert.deepEqual(check(ok, "2027-11-13", "hm-direct", { ...PROMO, cloudbedsCode: "Other" }), { ok: true, checked: false, derived: true });
   assert.deepEqual(check(ratePlansAnswer([], [], { parentRateID: "hm-breakfast" })), { ok: true, checked: false, derived: true });
   assert.deepEqual(check(ok, "2027-11-13", "hm-direct", { ...PROMO, baseRateId: "hm-other" }), { ok: true, checked: false, derived: true });
+  // getRatePlans sends no parentRateID: allowed next to the base row it was priced with, refused next to another.
+  assert.deepEqual(check(ratePlansAnswer([], [], { parentRateID: null })), { ok: true, checked: true, promo: true });
+  assert.deepEqual(check(ratePlansAnswer([], [], { parentRateID: null }), "2027-11-13", "hm-direct", { ...PROMO, baseRateId: "hm-other" }), { ok: true, checked: false, derived: true });
   // Without a selected Direct rate a derived row stays refused, as before.
   assert.equal(check(ok, "2027-11-13", "hm-direct", null).derived, true);
 });
@@ -439,7 +444,7 @@ test("happy path: DIRECT books the Direct rate - hold on its roomRateID with the
   assert.equal(kit.fakeCb.balance(body.holdReservationId!), 0);
 });
 
-test("without the code nothing changes: base roomRateID, no promo code sent, no getRatePlans lookup", async () => {
+test("without the code nothing changes: base roomRateID, no promo code sent, no Direct lookup (the one index read per re-quote is the automatic discounts')", async () => {
   const kit = directKit();
   const res = await checkout(kit, HONEYMOON);
   assert.equal(res.status, 200, JSON.stringify(res.body));
@@ -448,7 +453,35 @@ test("without the code nothing changes: base roomRateID, no promo code sent, no 
   assert.equal(body.quote.directRate ?? null, null);
   assert.equal(postOf(kit)?.params["rooms[0][roomRateID]"], "rate-hm");
   assert.equal(postOf(kit)?.params.promoCode, undefined);
-  assert.equal(unfilteredRatePlanReads(kit), 0);
+  assert.equal(unfilteredRatePlanReads(kit), 2, "quote and re-quote: the automatic discounts' rate-plan index, none for the code");
+  assert.equal(kit.fakeCb.calls.some((c) => c.method === "getAvailableRoomTypes" && c.params.promoCode !== undefined), false);
+  // With the automatic discounts off too, no getRatePlans index read at all (as before them).
+  const off = directKit({ env: { ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNTS: "off" } });
+  assert.equal((await checkout(off, HONEYMOON)).status, 200);
+  assert.equal(unfilteredRatePlanReads(off), 0);
+});
+
+test("automatic discounts off (the emergency switch): DIRECT still sells the Direct rate, with its own single rate-plan read", async () => {
+  const env = { ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNTS: "off" };
+  const kit = directKit({ env });
+  const search = (promo?: { cloudbedsCode: string }) =>
+    getInventory(FAR_CHECKIN, FAR_CHECKOUT, kit.config, { fetchImpl: kit.fakeCb.fetch, allowDemoFallback: false, ...(promo ? { promo } : {}) });
+  const hm = (await search({ cloudbedsCode: FAKE_DIRECT_PROMO_CODE })).inventory.find((i) => i.slug === "honeymoon-suite");
+  assert.equal(hm?.rateId, "rate-hm-direct");
+  assert.equal(hm?.discount?.kind, "direct");
+  assert.equal(unfilteredRatePlanReads(kit), 1, "the code's own index read");
+  await search();
+  assert.equal(unfilteredRatePlanReads(kit), 1, "a plain search reads none");
+
+  const kit2 = directKit({ env });
+  const res = await checkout(kit2, HONEYMOON, { promo: "DIRECT" });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  const body = res.body as CheckoutSuccess;
+  assert.equal(body.quote.roomsSubtotalSatang, HM_DIRECT);
+  assert.equal(body.quote.directRate?.baseRoomsSatang, HM_BASE);
+  assert.equal(postOf(kit2)?.params["rooms[0][roomRateID]"], "rate-hm-direct");
+  assert.equal(postOf(kit2)?.params.promoCode, FAKE_DIRECT_PROMO_CODE);
+  assert.equal(unfilteredRatePlanReads(kit2), 2, "quote and re-quote; none in the re-check under the lock");
 });
 
 test("code not applicable to the room: the base rate is booked as without it, and no promo code goes with the hold", async () => {
@@ -590,8 +623,11 @@ test("flag off: the code is not applied (base rate, no promo code, no lookup) - 
   assert.equal((res.body as CheckoutSuccess).quote.directRate ?? null, null);
   assert.equal(postOf(kit)?.params["rooms[0][roomRateID]"], "rate-hm");
   assert.equal(postOf(kit)?.params.promoCode, undefined);
-  assert.equal(unfilteredRatePlanReads(kit), 0);
+  assert.equal(unfilteredRatePlanReads(kit), 2, "only the automatic discounts' index (quote and re-quote)");
   assert.equal(kit.fakeCb.calls.some((c) => c.method === "getAvailableRoomTypes" && c.params.promoCode !== undefined), false);
+  const bothOff = directKit({ env: { ...STRIPE_TEST_ENV, BOOKING_DIRECT_PROMO: "off", BOOKING_AUTO_DISCOUNTS: "off" } });
+  assert.equal((await checkout(bothOff, HONEYMOON, { promo: "DIRECT" })).status, 200);
+  assert.equal(unfilteredRatePlanReads(bothOff), 0);
 });
 
 /* --------------------------------- analytics ------------------------------- */
@@ -638,8 +674,9 @@ test("every page that swaps the DIRECT copy asks directCopySwapped() (not just '
 test("booking page UI: Direct prices struck through with the label, the not-applicable note, the classic-page link, and the code sent where offered", () => {
   const ui = (path: string) => readFileSync(new URL(`../../components/booking/${path}`, import.meta.url), "utf8");
   const card = ui("results/RoomOfferCard.tsx");
-  assert.ok(card.includes("listTotalForAdults(rate, defaultAdults)") && card.includes("Direct rate - code {direct.code}"));
-  assert.ok(card.includes("offer.promoNotApplied") && card.includes("doesn&apos;t apply to this room"));
+  // The label ("Direct rate - code X") and the note come from quote.ts helpers (tested in autoDiscounts.test.ts).
+  assert.ok(card.includes("listTotalForAdults(rate, defaultAdults)") && card.includes("rateDiscountLabel(rate.list, directCode)"));
+  assert.ok(card.includes("offer.promoNotApplied") && card.includes("promoNotAppliedNote(directCode"));
   // The demo's % row is only for a real percentage: a Direct rate (pct 0) must never show "-0%".
   assert.ok(ui("results/ResultsList.tsx").includes("availability.promo.pct > 0"));
   assert.ok(ui("summary/ReservationSummary.tsx").includes("line.listRoomSatang") && ui("checkout/PaymentStep.tsx").includes("line.listRoomSatang"));

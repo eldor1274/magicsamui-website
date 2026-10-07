@@ -347,18 +347,36 @@ function StaySummary({ booking }: { booking: BookingSummary }) {
       <p className="mt-2 text-sm text-(--bk-text-muted)">{formatNights(booking.nights)}</p>
 
       <ul className="mt-4 space-y-3 border-t border-(--bk-border) pt-4">
-        {booking.items.map((item, i) => (
-          <li key={`${item.slug}-${i}`} className="flex items-start gap-3 text-sm">
-            <BedDouble size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
-            <div className="min-w-0">
-              <p className="font-medium text-(--bk-text)">{getCatalogueRoom(item.slug)?.name ?? item.slug}</p>
-              <p className="text-(--bk-text-muted)">
-                {RATE_PLANS[item.ratePlanId]?.name ?? item.ratePlanId} · {item.adults} {item.adults === 1 ? "guest" : "guests"}
-                {item.addonIds.length > 0 && ` · ${item.addonIds.map((a) => ADDONS[a]?.name ?? a).join(", ")}`}
-              </p>
-            </div>
-          </li>
-        ))}
+        {booking.items.map((item, i) => {
+          // A discounted Cloudbeds rate (Direct or automatic): its label, the base price struck through and the price paid.
+          const discount = booking.itemDiscounts?.[i] ?? null;
+          return (
+            <li key={`${item.slug}-${i}`} className="flex items-start gap-3 text-sm">
+              <BedDouble size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
+              <div className="min-w-0">
+                <p className="font-medium text-(--bk-text)">{getCatalogueRoom(item.slug)?.name ?? item.slug}</p>
+                <p className="text-(--bk-text-muted)">
+                  {RATE_PLANS[item.ratePlanId]?.name ?? item.ratePlanId} · {item.adults} {item.adults === 1 ? "guest" : "guests"}
+                  {item.addonIds.length > 0 && ` · ${item.addonIds.map((a) => ADDONS[a]?.name ?? a).join(", ")}`}
+                </p>
+                {discount && booking.itemRoomSatang[i] !== undefined && (
+                  <p className="text-xs">
+                    <span className="font-medium text-(--bk-success)">{discount.label}</span>
+                    {" · "}
+                    <span className="bk-price text-(--bk-text-subtle) line-through">
+                      <span className="bk-sr-only">Was </span>
+                      {formatThbWithCode(discount.listSatang)}
+                    </span>{" "}
+                    <span className="bk-price text-(--bk-text)">
+                      <span className="bk-sr-only">Now </span>
+                      {formatThbWithCode(booking.itemRoomSatang[i])}
+                    </span>
+                  </p>
+                )}
+              </div>
+            </li>
+          );
+        })}
       </ul>
 
       <dl className="mt-4 space-y-1.5 border-t border-(--bk-border) pt-4 text-sm">

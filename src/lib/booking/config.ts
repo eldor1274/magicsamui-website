@@ -45,6 +45,12 @@ export const PROMO_CODE = "DIRECT";
  * Honeymoon Suite, 20% off the base rate, not synced to the OTAs). Default of CLOUDBEDS_PROMO_CODE.
  */
 export const DEFAULT_CLOUDBEDS_PROMO_CODE = "Direct";
+/**
+ * Default of BOOKING_AUTO_DISCOUNT_PLANS (owner decision, 2026-10-07): Cloudbeds' public discount plans the
+ * own page sells without a code, matched as case-insensitive PREFIXES of getRatePlans' ratePlanNamePublic
+ * ("Last minute 10% off", "Long term booking", and any "Early bird..." plan the owner creates).
+ */
+export const DEFAULT_AUTO_DISCOUNT_PLANS = ["Last minute", "Long term", "Early bird"];
 export const MAX_NIGHTS = 30;
 export const BOOKING_WINDOW_MONTHS = 18;
 export const MAX_SEARCH_ADULTS = 18;
@@ -124,6 +130,18 @@ export interface RedisSettings {
   token: string;
 }
 
+export interface CloudbedsReadSettings {
+  apiKey: string;
+  propertyId: string | null;
+  baseRateOnly: boolean;
+  /**
+   * Automatic discounts (resolveAutoDiscountPlans): name prefixes of the Cloudbeds discount plans sold
+   * without a code next to the base rate. Empty or absent = none (the flag is off, not a Stripe mode, or no
+   * usable name in BOOKING_AUTO_DISCOUNT_PLANS).
+   */
+  autoDiscountPlans?: string[];
+}
+
 export interface BookingConfig {
   provider: PaymentProvider;
   paymentMode: PaymentMode;
@@ -135,9 +153,12 @@ export interface BookingConfig {
   beamWebhookHmacKey: string | null;
   /**
    * Read-side Cloudbeds access (availability). baseRateOnly (Stripe): only the
-   * base (BAR) row is sold, never another rate plan under the Standard label.
+   * base (BAR) row is sold, never another rate plan under the Standard label -
+   * except the Direct rate for the code and the automatic discount plans
+   * (autoDiscountPlans: BOOKING_AUTO_DISCOUNT_PLANS while BOOKING_AUTO_DISCOUNTS
+   * is on, Stripe only; empty or absent = none).
    */
-  cloudbeds: { apiKey: string; propertyId: string | null; baseRateOnly: boolean } | null;
+  cloudbeds: CloudbedsReadSettings | null;
   /** Stripe modes only. */
   stripe: StripeSettings | null;
   /** Stripe modes only: where reservations are written. */
@@ -409,6 +430,55 @@ export function directPromoOn(env: Env = process.env): boolean {
 }
 
 /**
+ * BOOKING_AUTO_DISCOUNTS = on | off (default on; empty = on): whether the own engine sells Cloudbeds' public
+ * discount plans (BOOKING_AUTO_DISCOUNT_PLANS) automatically, with no code. "off" (or false/0/no) is the
+ * emergency switch when Cloudbeds prices those holds at the base rate (alert "Automatic discounts blocked").
+ */
+export function autoDiscountsOn(env: Env = process.env): boolean {
+  const raw = trimmed(env.BOOKING_AUTO_DISCOUNTS).toLowerCase();
+  if (["off", "false", "0", "no"].includes(raw)) return false;
+  if (!["", "on", "true", "1", "yes"].includes(raw)) configWarning("BOOKING_AUTO_DISCOUNTS", "not on/off: treated as on");
+  return true;
+}
+
+/** One plan-name prefix: letters, digits, spaces and a little punctuation, 2-40 characters. */
+const AUTO_DISCOUNT_PLAN_RE = /^[\p{L}\p{N}][\p{L}\p{N} %&'.+-]{1,39}$/u;
+
+/** A value in one pair of matching quotes ("x", 'x' or `x`) without them; anything else as it is. */
+function unquoted(s: string): string {
+  return s.length >= 2 && `"'\``.includes(s[0]) && s.at(-1) === s[0] ? s.slice(1, -1).trim() : s;
+}
+
+/**
+ * BOOKING_AUTO_DISCOUNT_PLANS: comma-separated, case-insensitive PREFIXES of the Cloudbeds plans' public names
+ * (getRatePlans ratePlanNamePublic) to sell automatically; default DEFAULT_AUTO_DISCOUNT_PLANS. Unset or empty =
+ * the default. The owner narrows it by hand in Vercel, so quotes around the value or an entry are ignored and `;`
+ * separates like `,`. An entry that is still not a plain name is dropped with one config_warning; when none is left
+ * NO plan is sold automatically (fail closed: a mistyped list must never bring back a plan the owner dropped).
+ * The name never decides alone: cloudbedsProvider.ts also requires a derived plan, no promo code, a name that
+ * doesn't read as non-refundable (NON_REFUNDABLE_RE) and a price below the base rate (isAutoDiscountRow).
+ */
+export function resolveAutoDiscountPlans(env: Env = process.env): string[] {
+  const raw = trimmed(env.BOOKING_AUTO_DISCOUNT_PLANS);
+  if (raw === "") return [...DEFAULT_AUTO_DISCOUNT_PLANS];
+  // The whole list in quotes ("Last minute,Long term") when that quote is not also inside it; then each entry.
+  const list = raw.length >= 2 && raw.at(-1) === raw[0] && !raw.slice(1, -1).includes(raw[0]) ? unquoted(raw) : raw;
+  const entries = list.split(/[,;]/).map((s) => unquoted(s.trim()).replace(/\s+/g, " ")).filter((s) => s !== "");
+  const valid = [...new Set(entries.filter((s) => AUTO_DISCOUNT_PLAN_RE.test(s)))];
+  if (valid.length === 0) {
+    configWarning("BOOKING_AUTO_DISCOUNT_PLANS", "no entry is a plan name (2-40 letters, digits, spaces): automatic discounts are off");
+  } else if (valid.length < entries.length) {
+    configWarning("BOOKING_AUTO_DISCOUNT_PLANS", "an entry is not a plan name (2-40 letters, digits, spaces): dropped");
+  }
+  return valid;
+}
+
+/** The automatic discount plans this deployment sells: Stripe only (demo and Beam are unchanged), while the flag is on. */
+function autoDiscountPlansFor(env: Env, provider: PaymentProvider): string[] {
+  return provider === "stripe" && autoDiscountsOn(env) ? resolveAutoDiscountPlans(env) : [];
+}
+
+/**
  * How the guest's promo code works (see PromoMode). Stripe sells Cloudbeds' own Direct rate plan
  * (direct-rate) only with live Cloudbeds rates and BOOKING_DIRECT_PROMO on; otherwise a Stripe page
  * points the code to the classic booking page (classic-only). The demo keeps its site-side % discount;
@@ -649,7 +719,10 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
     tokenSecretIsDemo,
     beam,
     beamWebhookHmacKey: hmac === "" ? null : hmac,
-    cloudbeds: dataSource === "cloudbeds" ? { apiKey: readKey, propertyId: propertyId || null, baseRateOnly: provider === "stripe" } : null,
+    cloudbeds:
+      dataSource === "cloudbeds"
+        ? { apiKey: readKey, propertyId: propertyId || null, baseRateOnly: provider === "stripe", autoDiscountPlans: autoDiscountPlansFor(env, provider) }
+        : null,
     stripe,
     cloudbedsWrite,
     redis: resolveRedis(env),
@@ -824,7 +897,12 @@ export function getInventoryConfig(
     provider,
     cloudbeds:
       dataSource === "cloudbeds"
-        ? { apiKey: cloudbedsReadKey(env), propertyId: trimmed(env.CLOUDBEDS_PROPERTY_ID) || null, baseRateOnly: provider === "stripe" }
+        ? {
+            apiKey: cloudbedsReadKey(env),
+            propertyId: trimmed(env.CLOUDBEDS_PROPERTY_ID) || null,
+            baseRateOnly: provider === "stripe",
+            autoDiscountPlans: autoDiscountPlansFor(env, provider),
+          }
         : null,
     promoPct: promo.pct,
     promo,

@@ -8,6 +8,7 @@ import { eachNight, isHighSeason, isWeekendNight, nightsBetween, weekday } from 
 import type { PromoSettings } from "./config.ts";
 import type {
   AddonInfo,
+  BookingItemDiscount,
   CartItemInput,
   IsoDate,
   NightRate,
@@ -16,6 +17,7 @@ import type {
   PublicBookingConfig,
   Quote,
   QuoteAddonLine,
+  QuoteAutoDiscount,
   QuoteDirectRate,
   QuoteLine,
   QuotePromo,
@@ -84,7 +86,7 @@ export function occupancyExtraSatang(adultsExtraSatang: Record<string, number> |
 
 /**
  * Builds the sellable rate plans for a room from its base nightly rates.
- * `list` (the Cloudbeds Direct rate only): the base rate it is derived from, shown struck through.
+ * `list` (a discounted Cloudbeds rate only - Direct or automatic): the base rate it is derived from, shown struck through.
  */
 export function buildRateOffers(
   baseNightly: NightRate[],
@@ -108,7 +110,41 @@ export function buildRateOffers(
   });
 }
 
-/** The struck-through base-rate total of a Direct rate at a given number of adults; null when the rate has no list price. */
+/**
+ * The label of a discounted rate (RateOffer.list): an automatic discount's plan name, or for the Direct rate
+ * "Direct rate - code X" (null without the guest's code). null when the rate has no list price.
+ */
+export function rateDiscountLabel(list: RateOffer["list"], directCode: string | null): string | null {
+  if (!list) return null;
+  if (list.kind === "auto") return list.name ?? "Special rate";
+  return directCode ? `${DIRECT_RATE_LABEL} - code ${directCode}` : null;
+}
+
+/**
+ * The room card's note when the guest's code is not the rate shown (RoomOffer.promoNotApplied): the room is on an
+ * automatic discount (its first rate's list carries the plan's name) or on the standard rate.
+ */
+export function promoNotAppliedNote(code: string, firstRateList: RateOffer["list"]): string {
+  const plan = firstRateList?.kind === "auto" ? rateDiscountLabel(firstRateList, null) : null;
+  return plan
+    ? `Code ${code} doesn't lower this room's price for these dates - our "${plan}" rate is shown.`
+    : `Code ${code} doesn't apply to this room for these dates - our standard rate is shown.`;
+}
+
+/** The label of a quote line on a discounted rate (summary and payment step); null for a line at the base rate. */
+export function lineDiscountLabel(line: Pick<QuoteLine, "listRoomSatang" | "discount">, quote: Pick<Quote, "directRate">): string | null {
+  if (line.listRoomSatang === undefined) return null;
+  if (line.discount?.kind === "auto") return line.discount.name;
+  return quote.directRate?.label ?? null;
+}
+
+/** A booked line's discounted rate for the booking token (the return page): its label and the room at the base rate. */
+export function bookingItemDiscount(line: QuoteLine, quote: Pick<Quote, "directRate">): BookingItemDiscount | null {
+  const label = lineDiscountLabel(line, quote);
+  return label === null || line.listRoomSatang === undefined ? null : { kind: line.discount?.kind ?? "direct", label, listSatang: line.listRoomSatang };
+}
+
+/** The struck-through base-rate total of a discounted rate at a given number of adults; null when the rate has no list price. */
 export function listTotalForAdults(rate: Pick<RateOffer, "list" | "supplementSatangPerGuestPerNight">, adults: number): number | null {
   if (!rate.list) return null;
   const base = rate.list.baseNightly.reduce((sum, n) => sum + n.amountSatang, 0);
@@ -187,8 +223,14 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
       };
     });
     const addonsSatang = addons.reduce((sum, a) => sum + a.amountSatang, 0);
-    // The Cloudbeds Direct rate: the room is already priced at it; the base rate is only shown (struck through).
+    // A discounted Cloudbeds rate (Direct or automatic): the room is already priced at it; the base rate is only shown (struck through).
     const listRoomSatang = listTotalForAdults(rate, item.adults);
+    const discount: QuoteLine["discount"] | null =
+      listRoomSatang === null || !rate.list
+        ? null
+        : rate.list.kind === "auto"
+          ? { kind: "auto", name: rate.list.name ?? "Special rate" }
+          : { kind: "direct", name: input.promo?.label ?? DIRECT_RATE_LABEL };
 
     return {
       slug: item.slug,
@@ -201,6 +243,7 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
       occupancyExtraSatang: occupancySatang,
       roomSatang,
       ...(listRoomSatang !== null ? { listRoomSatang } : {}),
+      ...(discount ? { discount } : {}),
       addons,
       addonsSatang,
     };
@@ -208,13 +251,26 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
 
   const roomsSubtotalSatang = lines.reduce((sum, l) => sum + l.roomSatang, 0);
   const addonsSubtotalSatang = lines.reduce((sum, l) => sum + l.addonsSatang, 0);
-  // Labelled with the guest's code (the offers carry list prices only when the server applied it).
+  /** The rooms with the lines on `kind` at their base price, the others as quoted. */
+  const roomsWithBaseFor = (kind: "direct" | "auto") =>
+    lines.reduce((sum, l) => sum + (l.listRoomSatang !== undefined && l.discount?.kind === kind ? l.listRoomSatang : l.roomSatang), 0);
+  // Labelled with the guest's code (the offers carry Direct list prices only when the server applied it).
   let directRate: QuoteDirectRate | null = null;
-  if (input.promo && lines.some((l) => l.listRoomSatang !== undefined)) {
-    const baseRoomsSatang = lines.reduce((sum, l) => sum + (l.listRoomSatang ?? l.roomSatang), 0);
+  if (input.promo && lines.some((l) => l.discount?.kind === "direct")) {
+    const baseRoomsSatang = roomsWithBaseFor("direct");
     directRate = {
       code: input.promo.code,
       label: `${input.promo.label} - code ${input.promo.code}`,
+      baseRoomsSatang,
+      savingSatang: baseRoomsSatang - roomsSubtotalSatang,
+    };
+  }
+  // Cloudbeds' automatic discount plans (no code): named by their plans.
+  let autoDiscount: QuoteAutoDiscount | null = null;
+  if (lines.some((l) => l.discount?.kind === "auto")) {
+    const baseRoomsSatang = roomsWithBaseFor("auto");
+    autoDiscount = {
+      names: [...new Set(lines.flatMap((l) => (l.discount?.kind === "auto" ? [l.discount.name] : [])))],
       baseRoomsSatang,
       savingSatang: baseRoomsSatang - roomsSubtotalSatang,
     };
@@ -247,6 +303,7 @@ export function computeQuote(input: QuoteInput, offers: RoomOffer[]): Quote {
     addonsSubtotalSatang,
     promo,
     directRate,
+    autoDiscount,
     feeBaseSatang,
     cardFeePct: input.pricing.cardFeePct,
     cardFeeSatang,

@@ -15,7 +15,7 @@ import { BedDouble, Check, ChevronDown, ChevronRight, Info, MessageCircle, Ruler
 import { RATE_PLANS } from "@/lib/booking/catalogue";
 import { formatNights } from "@/lib/booking/dates";
 import { formatThb } from "@/lib/booking/format";
-import { listTotalForAdults, percentOf, rateTotalForAdults } from "@/lib/booking/quote";
+import { listTotalForAdults, percentOf, promoNotAppliedNote, rateDiscountLabel, rateTotalForAdults } from "@/lib/booking/quote";
 import type { CatalogueRoom, RateOffer, RatePlanId, RatePlanInfo, RoomOffer } from "@/lib/booking/types";
 import { BTN_LINK, BTN_OUTLINE, BTN_PRIMARY, CHIP } from "../ui/styles";
 import OccupancyPopover from "./OccupancyPopover";
@@ -157,7 +157,8 @@ export default function RoomOfferCard({
           {directCode && offer.promoNotApplied && (
             <p className="flex items-start gap-2 px-4 pb-3 text-sm text-(--bk-text-muted)">
               <Info size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-              Code {directCode} doesn&apos;t apply to this room for these dates - our standard rate is shown.
+              {/* On an automatic discount (its first rate) the note names the plan, else the standard rate. */}
+              {promoNotAppliedNote(directCode, offer.rates[0]?.list)}
             </p>
           )}
           {(addDisabledReason || !offer.fitsParty || maxAdults < room.maxGuests) && (
@@ -258,13 +259,15 @@ function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason,
   const plan = RATE_PLANS[rate.ratePlanId];
   const hasDetails = plan.image !== null || plan.policy.length > 0;
   const perGuest = rate.supplementSatangPerGuestPerNight > 0;
-  // Cloudbeds' Direct rate: the base rate struck through, the Direct price (what is held and charged) below it.
+  // A discounted Cloudbeds rate - the Direct rate, or an automatic discount plan (no code): the base rate struck
+  // through, the discounted price (what is held and charged) below it, and ONE label: the plan's name for an
+  // automatic discount (also next to a code), "Direct rate - code X" for the Direct rate (none without the code).
   const listTotal = listTotalForAdults(rate, defaultAdults);
-  const direct = listTotal !== null && directCode ? { code: directCode, listTotal } : null;
+  const discountLabel = listTotal !== null ? rateDiscountLabel(rate.list, directCode) : null;
   const total = rateTotalForAdults(rate, defaultAdults);
   // Same satang rounding as the quote's promo line (quote.ts), so card, summary and server agree.
   const discounted = promo ? total - percentOf(total, promo.pct) : total;
-  const wasTotal = direct ? direct.listTotal : promo ? total : null;
+  const wasTotal = discountLabel !== null ? listTotal : promo ? total : null;
 
   return (
     <li className="border-b border-(--bk-border) last:border-b-0">
@@ -313,7 +316,7 @@ function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason,
               {formatNights(nights)}
               {perGuest && ` · ${defaultAdults} ${defaultAdults === 1 ? "guest" : "guests"}`}
             </p>
-            {direct && <p className="text-xs font-medium text-(--bk-success)">Direct rate - code {direct.code}</p>}
+            {discountLabel && <p className="text-xs font-medium text-(--bk-success)">{discountLabel}</p>}
             {promo && (
               <p className="text-xs font-medium text-(--bk-success)">
                 incl. {promo.code} −{promo.pct}%

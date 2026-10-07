@@ -21,7 +21,7 @@ import { getBookableRooms } from "./catalogue.ts";
 import { addDays, eachNight } from "./dates.ts";
 import { thbToSatang } from "./quote.ts";
 import { logEvent } from "./routeUtils.ts";
-import type { IsoDate, NightRate, RoomInventory } from "./types.ts";
+import type { DiscountKind, IsoDate, NightRate, RoomInventory } from "./types.ts";
 
 // v1.3: same read endpoints as v1.2 (which /api/rates still uses); v1.3 is
 // where the write side (postPayment without transactionID) lives after
@@ -107,10 +107,26 @@ export interface CloudbedsDeps {
   baseRateOnly?: boolean;
   /**
    * The guest's code is Cloudbeds' promo `cloudbedsCode` (direct-rate): getAvailableRoomTypes is asked
-   * with promoCode, and the rows whose roomRateID is one of `rates` (cloudbedsPromoRates) are sold as
-   * the Direct rate next to their base row (see ParseOptions.promo).
+   * with promoCode too, and the rows whose roomRateID is one of the room type's promo rates (`rates`, else
+   * the rate-plan index's) are sold as the Direct rate next to their base row (see ParseOptions.promo).
    */
-  promo?: { cloudbedsCode: string; rates: PromoRateIndex };
+  promo?: { cloudbedsCode: string; rates?: PromoRateIndex };
+  /**
+   * The rate-plan index (one getRatePlans read, cloudbedsRateIndex): which rows are the Direct rate (with
+   * `promo`) and which are automatic discount plans (ParseOptions.auto). A promise is awaited while
+   * getAvailableRoomTypes is read, so the two reads overlap instead of adding up; a function is called only
+   * once the availability reads have taken their budget tokens, so the index never takes availability's last one.
+   */
+  rateIndex?: RatePlanIndex | Promise<RatePlanIndex> | (() => Promise<RatePlanIndex>);
+  /**
+   * Search only, when the index serves only the automatic discounts (no code): it is optional. A failed index read
+   * (an error, or no budget token left for it) is passed here and the answer is parsed without it - the base rate,
+   * as with automatic discounts off - and a cached answer is served as it is (also when the index changed since it
+   * was cached and availability can't be read again: log cloudbeds_search_revalidate_failed). Without it a failed
+   * index read fails the read. The caller's optional index read remembers a failure (cloudbedsRateIndex
+   * rememberFailure), so a cached answer doesn't re-send a failing read for RATE_PLAN_FAIL_TTL_MS.
+   */
+  onRateIndexFailed?: (error: unknown) => void;
   /** A room type had sellable rows but no base row (baseRateOnly): logged by the caller. */
   onNoBaseRate?: (slug: string) => void;
   /** Log lines for odd but harmless answers (default logEvent). */
@@ -248,6 +264,18 @@ function stayTotal(nightly: NightRate[]): number {
   return nightly.reduce((s, x) => s + x.amountSatang, 0);
 }
 
+/** A discounted row (Direct or automatic) of getAvailableRoomTypes, before it is matched to its base row. */
+interface DiscountCandidate {
+  kind: DiscountKind;
+  rateId: string;
+  parentRateId: string | null;
+  name: string;
+  nightly: NightRate[];
+  remaining: number;
+  adultsExtra: Record<string, number>;
+  maxGuests: number | null;
+}
+
 export interface ParseOptions {
   /**
    * Sell ONLY the base (BAR) row (tier 2: not derived, plan name absent, ""
@@ -264,18 +292,36 @@ export interface ParseOptions {
   log?: (message: string, data?: Record<string, unknown>) => void;
   /**
    * The Direct rate (the answer was asked with the guest's promo code). A row whose roomRateID is one
-   * of the room type's promo rates (cloudbedsPromoRates: by rateID, never by name - each room type
-   * has its own Direct rateID, and getAvailableRoomTypes rows carry no promo code) is sold INSTEAD of
-   * that room type's base row when it is sellable (a unit left, a rate on every night), cheaper than the
-   * base row, and derived from it (getRatePlans parentRateID, when sent, is the base row's rateID). The
-   * inventory then carries the promo rateId and the base row as `promo`. Otherwise the base row is
-   * sold as without a code, marked promoNotApplied. A promo row with no base row sells nothing.
+   * of the room type's promo rates (the rate-plan index: by rateID, never by name - each room type
+   * has its own Direct rateID, and getAvailableRoomTypes rows carry no promo code) is a candidate to be
+   * sold INSTEAD of that room type's base row (see `auto` for how the row sold is chosen). When the
+   * Direct row is not the one sold, the room is marked promoNotApplied.
    */
   promo?: { rates: PromoRateIndex };
+  /**
+   * Automatic discount plans (Stripe, BOOKING_AUTO_DISCOUNTS): a row whose roomRateID is one of the room
+   * type's automatic discount rates (the rate-plan index: derived, no promo code, a public name starting
+   * with a configured prefix, never "non-refundable") is a candidate too, with no code. Per room type the
+   * CHEAPEST of the base row and its usable candidates (Direct and automatic) is sold - between candidates
+   * of the same price the Direct rate, else the first in the answer. A candidate is usable when it is sellable (a unit left, a rate on every
+   * night), cheaper than the base row on the stay, and derived from it (getRatePlans parentRateID, when
+   * sent, is the base row's rateID). The inventory then carries the candidate's rateId and the base row
+   * as `discount` (kind, plan name). A discounted row with no base row sells nothing.
+   */
+  auto?: { rates: AutoDiscountIndex };
 }
 
-/** Cloudbeds promo rate plans per room type: roomTypeID -> its rows (rateID, parentRateID) whose promoCode is ours. */
-export type PromoRateIndex = Record<string, { rateId: string; parentRateId: string | null }[]>;
+/** Cloudbeds promo rate plans per room type: roomTypeID -> its rows (rateID, parentRateID, public name) whose promoCode is ours. */
+export type PromoRateIndex = Record<string, { rateId: string; parentRateId: string | null; name?: string }[]>;
+
+/** Automatic discount plans per room type: roomTypeID -> its eligible rows (isAutoDiscountRow). */
+export type AutoDiscountIndex = Record<string, { rateId: string; parentRateId: string | null; name: string }[]>;
+
+/** What one getRatePlans read (every room type) tells the search: the Direct rows and the automatic discount rows. */
+export interface RatePlanIndex {
+  promo: PromoRateIndex;
+  auto: AutoDiscountIndex;
+}
 
 const RATE_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
 
@@ -284,9 +330,111 @@ function idOf(v: unknown): string | null {
   return RATE_ID_RE.test(s) ? s : null;
 }
 
+/** Cloudbeds promo code `cloudbedsCode` (trimmed, any case). */
+function isPromoCode(v: unknown, cloudbedsCode: string): boolean {
+  return typeof v === "string" && v.trim().toLowerCase() === cloudbedsCode.trim().toLowerCase();
+}
+
 /** A getRatePlans row carrying Cloudbeds promo code `cloudbedsCode` (trimmed, any case). */
 function isPromoRow(r: Record<string, unknown>, cloudbedsCode: string): boolean {
-  return typeof r.promoCode === "string" && r.promoCode.trim().toLowerCase() === cloudbedsCode.trim().toLowerCase();
+  return isPromoCode(r.promoCode, cloudbedsCode);
+}
+
+/** Any promo code at all (a plan that needs a code is never sold without it). */
+function hasPromoCode(v: unknown): boolean {
+  return typeof v === "string" ? v.trim() !== "" : v !== null && v !== undefined && v !== false;
+}
+
+/** A plan's whole public name: control and invisible format characters replaced by spaces, whitespace collapsed. null when there is none. */
+function planNameFull(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const s = v.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/\s+/g, " ").trim();
+  return s === "" ? null : s;
+}
+
+/**
+ * A plan's public name as the page shows it: the whole name (planNameFull) cut to at most 60 characters. null
+ * when there is none.
+ */
+export function planDisplayName(v: unknown): string | null {
+  return planNameFull(v)?.slice(0, 60).trim() || null;
+}
+
+/**
+ * A name that reads as other refund terms than the page's policy: "non-refundable" with any separator (space,
+ * underscore, dot, an ASCII or Unicode hyphen or dash, none) and its short forms ("Non-Ref", "NonRef", "NRF"),
+ * "no refund(s)", "not / un-refundable", and "prepaid" / "advance purchase" (in hotel naming usually a
+ * non-refundable rate). A false match only sells the base rate instead.
+ */
+const NON_REFUNDABLE_RE =
+  /non[\s\p{Pd}−._]*ref|\bnrf\b|\bno[\s\p{Pd}−]*refunds?\b|\b(?:not|un)[\s\p{Pd}−]*refundable|\bpre[\s\p{Pd}−]*paid\b|\badvance[\s\p{Pd}−]*purchase/iu;
+
+/**
+ * A plan name the own page may sell automatically: it starts with one of `plans` (BOOKING_AUTO_DISCOUNT_PLANS,
+ * case-insensitive) and never reads as non-refundable (NON_REFUNDABLE_RE: other refund terms than the page's
+ * policy) - anywhere in the WHOLE name, not only in the 60 characters the page shows.
+ */
+export function isAutoDiscountName(name: unknown, plans: readonly string[]): boolean {
+  const n = planNameFull(name);
+  if (n === null || NON_REFUNDABLE_RE.test(n)) return false;
+  const lower = n.toLowerCase();
+  return plans.some((p) => {
+    const prefix = p.trim().replace(/\s+/g, " ").toLowerCase();
+    return prefix !== "" && lower.startsWith(prefix);
+  });
+}
+
+/**
+ * A getRatePlans row of an automatic discount plan: DERIVED (isDerived), NO promo code (promo-code plans need
+ * the code; the Direct rate has its own path) and an eligible public name (isAutoDiscountName). Whether it is
+ * cheaper than its base row is checked against getAvailableRoomTypes' prices (parseAvailableRoomTypes).
+ */
+export function isAutoDiscountRow(r: Record<string, unknown>, plans: readonly string[]): boolean {
+  return truthy(r.isDerived) && !hasPromoCode(r.promoCode) && isAutoDiscountName(r.ratePlanNamePublic, plans);
+}
+
+/** One getRatePlans row as the index keeps it (a request NOT filtered by room type: every row carries its roomTypeID). */
+interface RatePlanIndexRow {
+  roomTypeId: string;
+  rateId: string;
+  parentRateId: string | null;
+  raw: { isDerived: unknown; promoCode: unknown; ratePlanNamePublic: unknown };
+}
+
+function ratePlanIndexRows(json: unknown): RatePlanIndexRow[] {
+  const root = asRecord(json);
+  if (!root || root.success !== true) throw new CloudbedsError(`getRatePlans failed: ${String(root?.message ?? "no success flag")}`);
+  const out: RatePlanIndexRow[] = [];
+  for (const raw of Array.isArray(root.data) ? root.data : []) {
+    const r = asRecord(raw);
+    const roomTypeId = r ? idOf(r.roomTypeID) : null;
+    const rateId = r ? idOf(r.rateID) : null;
+    if (!r || !roomTypeId || !rateId) continue;
+    out.push({ roomTypeId, rateId, parentRateId: idOf(r.parentRateID), raw: { isDerived: r.isDerived, promoCode: r.promoCode, ratePlanNamePublic: r.ratePlanNamePublic } });
+  }
+  return out;
+}
+
+function promoIndexOf(rows: RatePlanIndexRow[], cloudbedsCode: string): PromoRateIndex {
+  const out: PromoRateIndex = {};
+  for (const r of rows) {
+    if (!isPromoCode(r.raw.promoCode, cloudbedsCode)) continue;
+    const list = (out[r.roomTypeId] ??= []);
+    const name = planDisplayName(r.raw.ratePlanNamePublic);
+    if (!list.some((x) => x.rateId === r.rateId)) list.push({ rateId: r.rateId, parentRateId: r.parentRateId, ...(name !== null ? { name } : {}) });
+  }
+  return out;
+}
+
+function autoIndexOf(rows: RatePlanIndexRow[], plans: readonly string[]): AutoDiscountIndex {
+  const out: AutoDiscountIndex = {};
+  if (plans.length === 0) return out;
+  for (const r of rows) {
+    if (!isAutoDiscountRow(r.raw, plans)) continue;
+    const list = (out[r.roomTypeId] ??= []);
+    if (!list.some((x) => x.rateId === r.rateId)) list.push({ rateId: r.rateId, parentRateId: r.parentRateId, name: planDisplayName(r.raw.ratePlanNamePublic) as string });
+  }
+  return out;
 }
 
 /**
@@ -294,19 +442,16 @@ function isPromoRow(r: Record<string, unknown>, cloudbedsCode: string): boolean 
  * roomTypeID filter (so every row carries its roomTypeID; rows without one are skipped).
  */
 export function parsePromoRatePlans(json: unknown, cloudbedsCode: string): PromoRateIndex {
-  const root = asRecord(json);
-  if (!root || root.success !== true) throw new CloudbedsError(`getRatePlans failed: ${String(root?.message ?? "no success flag")}`);
-  const out: PromoRateIndex = {};
-  for (const raw of Array.isArray(root.data) ? root.data : []) {
-    const r = asRecord(raw);
-    if (!r || !isPromoRow(r, cloudbedsCode)) continue;
-    const roomTypeId = idOf(r.roomTypeID);
-    const rateId = idOf(r.rateID);
-    if (!roomTypeId || !rateId) continue;
-    const list = (out[roomTypeId] ??= []);
-    if (!list.some((x) => x.rateId === rateId)) list.push({ rateId, parentRateId: idOf(r.parentRateID) });
-  }
-  return out;
+  return promoIndexOf(ratePlanIndexRows(json), cloudbedsCode);
+}
+
+/**
+ * Pure parser (exported for tests): both indexes of one getRatePlans answer asked without a roomTypeID filter -
+ * the Direct rows (promo code `cloudbedsCode`; none when null) and the automatic discount rows (`autoPlans`).
+ */
+export function parseRatePlanIndex(json: unknown, options: { cloudbedsCode: string | null; autoPlans: readonly string[] }): RatePlanIndex {
+  const rows = ratePlanIndexRows(json);
+  return { promo: options.cloudbedsCode === null ? {} : promoIndexOf(rows, options.cloudbedsCode), auto: autoIndexOf(rows, options.autoPlans) };
 }
 
 /** propertyCurrency's code: an array per the spec, a single object live (2026-10-06). */
@@ -325,8 +470,8 @@ export function parseAvailableRoomTypes(json: unknown, checkIn: IsoDate, checkOu
 
   const found = new Map<string, { inventory: RoomInventory; tier: number }>();
   const nonBaseOnly = new Set<string>();
-  /** Promo (Direct) rows per slug, cheapest first; matched to their base row after the loop. */
-  const promoFound = new Map<string, { rateId: string; parentRateId: string | null; nightly: NightRate[]; remaining: number; adultsExtra: Record<string, number>; maxGuests: number | null }>();
+  /** Discounted rows (Direct and automatic) per slug, in answer order; matched to their base row after the loop. */
+  const discounted = new Map<string, DiscountCandidate[]>();
   for (const p of properties) {
     const prop = asRecord(p);
     if (!prop) continue;
@@ -344,21 +489,25 @@ export function parseAvailableRoomTypes(json: unknown, checkIn: IsoDate, checkOu
       // Cloudbeds' own occupancy limit for the room type (may be lower than the site's rooms.ts figure).
       const maxGuests = Number(row.maxGuests);
       const rateId = typeof row.roomRateID === "string" || typeof row.roomRateID === "number" ? String(row.roomRateID) : "";
-      const promoRate = options.promo?.rates[String(row.roomTypeID ?? "")]?.find((x) => x.rateId === rateId);
-      if (promoRate) {
-        // A Direct row: only ever sold next to its base row (after the loop).
+      const typeId = String(row.roomTypeID ?? "");
+      const promoRate = options.promo?.rates[typeId]?.find((x) => x.rateId === rateId);
+      const autoRate = promoRate ? undefined : options.auto?.rates[typeId]?.find((x) => x.rateId === rateId);
+      if (promoRate || autoRate) {
+        // A discounted row (Direct or automatic): only ever sold next to its base row (after the loop).
         if (options.baseRateOnly) nonBaseOnly.add(slug);
-        const prevPromo = promoFound.get(slug);
-        if (!prevPromo || stayTotal(nightly) < stayTotal(prevPromo.nightly)) {
-          promoFound.set(slug, {
-            rateId,
-            parentRateId: promoRate.parentRateId,
-            nightly,
-            remaining,
-            adultsExtra: parseAdultsExtraCharge(row.adultsExtraCharge, row.adultsIncluded),
-            maxGuests: Number.isInteger(maxGuests) && maxGuests >= 1 && maxGuests <= 50 ? maxGuests : null,
-          });
-        }
+        const rowName = isBasePlanName(row.ratePlanNamePublic) ? null : planDisplayName(row.ratePlanNamePublic);
+        const list = discounted.get(slug) ?? [];
+        list.push({
+          kind: autoRate ? "auto" : "direct",
+          rateId,
+          parentRateId: (autoRate ?? promoRate)?.parentRateId ?? null,
+          name: autoRate ? autoRate.name : (promoRate?.name ?? rowName ?? "Direct booking rate"),
+          nightly,
+          remaining,
+          adultsExtra: parseAdultsExtraCharge(row.adultsExtraCharge, row.adultsIncluded),
+          maxGuests: Number.isInteger(maxGuests) && maxGuests >= 1 && maxGuests <= 50 ? maxGuests : null,
+        });
+        discounted.set(slug, list);
         continue;
       }
       const tier = rowTier(row);
@@ -384,36 +533,56 @@ export function parseAvailableRoomTypes(json: unknown, checkIn: IsoDate, checkOu
     }
   }
 
-  if (options.promo) {
+  if (options.promo || options.auto) {
+    /** A Direct row not sold keeps its own log line (Stage B case 24 looks for it); an automatic one has its own. */
+    const unused = (slug: string, c: DiscountCandidate, reason: string) =>
+      options.log?.(c.kind === "direct" ? "cloudbeds_promo_row_unused" : "cloudbeds_auto_discount_row_unused", { slug, rateId: c.rateId, plan: c.name, reason });
     for (const [slug, entry] of found) {
       const base = entry.inventory;
-      const p = promoFound.get(slug);
-      const why = !p
-        ? null
-        : entry.tier !== 2 || !base.rateId
-          ? "no base row"
-          : p.parentRateId !== null && p.parentRateId !== base.rateId
-            ? "derived from another rate"
-            : stayTotal(p.nightly) >= stayTotal(base.baseNightly)
-              ? "not cheaper than the base rate"
-              : null;
-      if (!p || why) {
-        if (p) options.log?.("cloudbeds_promo_row_unused", { slug, rateId: p.rateId, reason: why });
-        found.set(slug, { ...entry, inventory: { ...base, promoNotApplied: true } });
+      const baseTotal = stayTotal(base.baseNightly);
+      const usable = (discounted.get(slug) ?? []).filter((c) => {
+        const why =
+          entry.tier !== 2 || !base.rateId
+            ? "no base row"
+            : c.parentRateId !== null && c.parentRateId !== base.rateId
+              ? "derived from another rate"
+              : stayTotal(c.nightly) >= baseTotal
+                ? "not cheaper than the base rate"
+                : null;
+        if (why) unused(slug, c, why);
+        return why === null;
+      });
+      // The cheapest wins; on a tie the Direct rate (the guest asked for it), then the first row in the answer.
+      let best: DiscountCandidate | null = null;
+      for (const c of usable) {
+        const diff = best === null ? -1 : stayTotal(c.nightly) - stayTotal(best.nightly);
+        if (diff < 0 || (diff === 0 && c.kind === "direct" && best?.kind !== "direct")) best = c;
+      }
+      for (const c of usable) if (best && c !== best) unused(slug, c, `a cheaper rate was sold (${best.name})`);
+      if (!best) {
+        found.set(slug, { ...entry, inventory: { ...base, ...(options.promo ? { promoNotApplied: true } : {}) } });
         continue;
       }
-      const maxGuests = Math.min(base.maxGuests ?? 50, p.maxGuests ?? 50);
+      const maxGuests = Math.min(base.maxGuests ?? 50, best.maxGuests ?? 50);
       found.set(slug, {
         ...entry,
         inventory: {
           slug,
           available: true,
-          remaining: Math.min(base.remaining, 1, p.remaining),
-          baseNightly: p.nightly,
-          adultsExtraSatang: p.adultsExtra,
-          ...(base.maxGuests !== undefined || p.maxGuests !== null ? { maxGuests } : {}),
-          rateId: p.rateId,
-          promo: { baseRateId: base.rateId as string, baseNightly: base.baseNightly, baseAdultsExtraSatang: base.adultsExtraSatang ?? {} },
+          remaining: Math.min(base.remaining, 1, best.remaining),
+          baseNightly: best.nightly,
+          adultsExtraSatang: best.adultsExtra,
+          ...(base.maxGuests !== undefined || best.maxGuests !== null ? { maxGuests } : {}),
+          rateId: best.rateId,
+          discount: {
+            kind: best.kind,
+            name: best.name,
+            baseRateId: base.rateId as string,
+            baseNightly: base.baseNightly,
+            baseAdultsExtraSatang: base.adultsExtraSatang ?? {},
+          },
+          // The guest's code was checked, but this room is sold on an automatic discount (cheaper, or no Direct row).
+          ...(options.promo && best.kind !== "direct" ? { promoNotApplied: true } : {}),
         },
       });
     }
@@ -464,7 +633,8 @@ export function mergePromoAnswer(plain: unknown, withCode: unknown, log?: (messa
   return { ...base, data: baseProps };
 }
 
-const searchCache = new Map<string, { expiresAt: number; inventory: RoomInventory[] }>();
+/** A cached search answer, with the rate-plan index it was parsed with (indexKey). */
+const searchCache = new Map<string, { expiresAt: number; inventory: RoomInventory[]; indexKey: string }>();
 
 export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, deps: CloudbedsDeps): Promise<RoomInventory[]> {
   const adults = Math.max(1, Math.floor(deps.adults ?? 1));
@@ -486,11 +656,40 @@ export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, de
 
   const nowMs = deps.nowMs ?? Date.now();
   const ttl = deps.cacheTtlMs ?? 0;
-  const promoKey = deps.promo ? JSON.stringify(deps.promo.rates) : "-";
-  const cacheKey = `${deps.apiKey.slice(-6)}|${deps.baseRateOnly ? "base" : "any"}|${promoKey}|${promoUrl ?? url}`;
+  const cacheKey = `${deps.apiKey.slice(-6)}|${deps.baseRateOnly ? "base" : "any"}|${promoUrl ?? url}`;
+  // The rows a parse treats as Direct / automatic discount: the cache key of the index part that matters.
+  const discountsOf = (index: RatePlanIndex | undefined) => {
+    const promoRates = deps.promo ? (deps.promo.rates ?? index?.promo ?? {}) : null;
+    const autoRates = index && Object.keys(index.auto).length > 0 ? index.auto : null;
+    return { promoRates, autoRates, key: JSON.stringify([promoRates, autoRates]) };
+  };
+  // The rate-plan index, loaded once; null = the optional index (onRateIndexFailed) could not be read.
+  let indexLoad: Promise<RatePlanIndex | undefined | null> | null = null;
+  const loadIndex = () =>
+    (indexLoad ??= (async () => {
+      try {
+        return typeof deps.rateIndex === "function" ? await deps.rateIndex() : await deps.rateIndex;
+      } catch (e) {
+        if (!deps.onRateIndexFailed) throw e;
+        deps.onRateIndexFailed(e);
+        return null;
+      }
+    })());
+  // A cached answer whose index changed, kept in case availability can't be read again (optional index only).
+  let stale: RoomInventory[] | null = null;
   if (ttl > 0) {
     const hit = searchCache.get(cacheKey);
-    if (hit && hit.expiresAt > nowMs) return hit.inventory;
+    if (hit && hit.expiresAt > nowMs) {
+      // A hit counts only when it was parsed with the same index (the index is cached for the same time, so this is
+      // cheap); when the optional index can't be read, the cached answer stands (a failed optional read is remembered
+      // for RATE_PLAN_FAIL_TTL_MS, so hits don't re-send it while it fails - cloudbedsRateIndex rememberFailure).
+      const index = await loadIndex();
+      if (index === null || hit.indexKey === discountsOf(index).key) return hit.inventory;
+      // The index changed (e.g. the answer was cached while the index read had no budget token): availability is read
+      // again. When the index is optional and that read fails (the index read may have taken the last token), the
+      // cached answer still stands - checkout re-quotes.
+      if (deps.onRateIndexFailed) stale = hit.inventory;
+    }
   }
 
   const budget = deps.budget ?? (deps.fetchImpl ? null : CLOUDBEDS_PREVIEW_BUDGET);
@@ -500,14 +699,26 @@ export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, de
     if (!res.ok) throw new CloudbedsError(`getAvailableRoomTypes HTTP ${res.status}`);
     return res.json();
   };
-  const [plain, withCode] = await Promise.all([read(url), promoUrl ? read(promoUrl) : Promise.resolve(null)]);
-  const answer = withCode === null ? plain : mergePromoAnswer(plain, withCode, deps.log ?? logEvent);
-  const inventory = parseAvailableRoomTypes(answer, checkIn, checkOut, {
-    baseRateOnly: deps.baseRateOnly,
-    onNoBaseRate: deps.onNoBaseRate,
-    log: deps.log ?? logEvent,
-    ...(deps.promo ? { promo: { rates: deps.promo.rates } } : {}),
-  });
+  // The rate-plan index (getRatePlans) is read at the same time as availability, started after availability's reads
+  // (in this order), so they take their budget tokens first.
+  let discounts: ReturnType<typeof discountsOf>;
+  let inventory: RoomInventory[];
+  try {
+    const [plain, withCode, index] = await Promise.all([read(url), promoUrl ? read(promoUrl) : Promise.resolve(null), loadIndex()]);
+    const answer = withCode === null ? plain : mergePromoAnswer(plain, withCode, deps.log ?? logEvent);
+    discounts = discountsOf(index ?? undefined);
+    inventory = parseAvailableRoomTypes(answer, checkIn, checkOut, {
+      baseRateOnly: deps.baseRateOnly,
+      onNoBaseRate: deps.onNoBaseRate,
+      log: deps.log ?? logEvent,
+      ...(discounts.promoRates ? { promo: { rates: discounts.promoRates } } : {}),
+      ...(discounts.autoRates ? { auto: { rates: discounts.autoRates } } : {}),
+    });
+  } catch (e) {
+    if (stale === null) throw e;
+    (deps.log ?? logEvent)("cloudbeds_search_revalidate_failed", { checkIn, checkOut, error: e instanceof Error ? e.message : String(e) });
+    return stale;
+  }
 
   if (ttl > 0) {
     if (searchCache.size >= CACHE_MAX_ENTRIES) {
@@ -519,45 +730,75 @@ export async function cloudbedsInventory(checkIn: IsoDate, checkOut: IsoDate, de
         searchCache.delete(oldest);
       }
     }
-    searchCache.set(cacheKey, { expiresAt: nowMs + ttl, inventory });
+    searchCache.set(cacheKey, { expiresAt: nowMs + ttl, inventory, indexKey: discounts.key });
   }
   return inventory;
 }
 
-const promoRatesCache = new Map<string, { expiresAt: number; rates: PromoRateIndex }>();
+/** The rows of a getRatePlans answer, per stay: one read serves the Direct and the automatic-discount index alike. */
+const ratePlanRowsCache = new Map<string, { expiresAt: number; rows: RatePlanIndexRow[] }>();
+
+/** How long a failed OPTIONAL rate-plan read (rememberFailure) is not sent again for the same stay. */
+export const RATE_PLAN_FAIL_TTL_MS = 20_000;
+/** Failed optional rate-plan reads, per stay (same key as ratePlanRowsCache): the error message, until expiresAt. */
+const ratePlanFailCache = new Map<string, { expiresAt: number; message: string }>();
 
 /**
- * Which rateIDs are Cloudbeds' promo `cloudbedsCode` rows, per room type: one getRatePlans call for
- * the stay, NOT filtered by room type (every row then carries its roomTypeID). Search reuses an
- * answer for cacheTtlMs like cloudbedsInventory; checkout asks fresh. Throws CloudbedsError /
- * CloudbedsBudgetError (the caller treats it like a failed availability read).
+ * The rate-plan index for a stay: which rateIDs are Cloudbeds' promo `cloudbedsCode` rows (the Direct rate;
+ * none when null) and which are automatic discount plans (`autoPlans`), per room type. ONE getRatePlans call,
+ * NOT filtered by room type (every row then carries its roomTypeID). Search reuses its rows for cacheTtlMs like
+ * cloudbedsInventory (a search with the code and one without share them); checkout asks fresh. Throws
+ * CloudbedsError / CloudbedsBudgetError (the caller treats it like a failed availability read).
+ * `rememberFailure` (search with cacheTtlMs, only when the index is optional - the automatic discounts alone): a
+ * read that was sent and failed (HTTP error, 429 after its retry, success:false, network error or timeout) is
+ * remembered for RATE_PLAN_FAIL_TTL_MS, and the next optional reads of that stay fail at once - no call, no budget
+ * token, no wait - so cached searches don't re-send a read that is failing. A budget refusal before sending is not
+ * remembered (it cost nothing); a required read (with the code, checkout) always asks, and its success clears it.
  */
-export async function cloudbedsPromoRates(
+export async function cloudbedsRateIndex(
   checkIn: IsoDate,
   checkOut: IsoDate,
-  cloudbedsCode: string,
-  deps: Omit<CloudbedsDeps, "adults" | "promo" | "baseRateOnly" | "onNoBaseRate">,
-): Promise<PromoRateIndex> {
+  options: { cloudbedsCode: string | null; autoPlans: readonly string[] },
+  deps: Omit<CloudbedsDeps, "adults" | "promo" | "rateIndex" | "baseRateOnly" | "onNoBaseRate"> & { rememberFailure?: boolean },
+): Promise<RatePlanIndex> {
   const params = new URLSearchParams({ startDate: checkIn, endDate: checkOut });
   if (deps.propertyId) params.set("propertyIDs", deps.propertyId);
   const url = `${CLOUDBEDS_API_BASE}/getRatePlans?${params.toString()}`;
   const nowMs = deps.nowMs ?? Date.now();
   const ttl = deps.cacheTtlMs ?? 0;
-  const cacheKey = `${deps.apiKey.slice(-6)}|${cloudbedsCode.toLowerCase()}|${url}`;
+  const cacheKey = `${deps.apiKey.slice(-6)}|${url}`;
+  const indexOf = (rows: RatePlanIndexRow[]): RatePlanIndex => ({
+    promo: options.cloudbedsCode === null ? {} : promoIndexOf(rows, options.cloudbedsCode),
+    auto: autoIndexOf(rows, options.autoPlans),
+  });
   if (ttl > 0) {
-    const hit = promoRatesCache.get(cacheKey);
-    if (hit && hit.expiresAt > nowMs) return hit.rates;
+    const hit = ratePlanRowsCache.get(cacheKey);
+    if (hit && hit.expiresAt > nowMs) return indexOf(hit.rows);
   }
+  const remember = ttl > 0 && deps.rememberFailure === true;
+  const failed = remember ? ratePlanFailCache.get(cacheKey) : undefined;
+  if (failed && failed.expiresAt > nowMs) throw new CloudbedsError(`${failed.message} (remembered: not re-sent for ${RATE_PLAN_FAIL_TTL_MS / 1000} s)`);
   const budget = deps.budget ?? (deps.fetchImpl ? null : CLOUDBEDS_PREVIEW_BUDGET);
   if (budget && !(await acquire(budget, deps.budgetWaitMs ?? 0))) throw new CloudbedsBudgetError();
-  const res = await readCall(url, { headers: cloudbedsReadHeaders(deps.apiKey, deps.propertyId), cache: "no-store" }, deps, budget ?? null);
-  if (!res.ok) throw new CloudbedsError(`getRatePlans HTTP ${res.status}`);
-  const rates = parsePromoRatePlans(await res.json(), cloudbedsCode);
-  if (ttl > 0) {
-    if (promoRatesCache.size >= CACHE_MAX_ENTRIES) promoRatesCache.clear();
-    promoRatesCache.set(cacheKey, { expiresAt: nowMs + ttl, rates });
+  let rows: RatePlanIndexRow[];
+  try {
+    const res = await readCall(url, { headers: cloudbedsReadHeaders(deps.apiKey, deps.propertyId), cache: "no-store" }, deps, budget ?? null);
+    if (!res.ok) throw new CloudbedsError(`getRatePlans HTTP ${res.status}`);
+    rows = ratePlanIndexRows(await res.json());
+  } catch (e) {
+    // Sent and failed: an optional read is not sent again for this stay for a while.
+    if (remember) {
+      if (ratePlanFailCache.size >= CACHE_MAX_ENTRIES) ratePlanFailCache.clear();
+      ratePlanFailCache.set(cacheKey, { expiresAt: nowMs + RATE_PLAN_FAIL_TTL_MS, message: e instanceof Error ? e.message : String(e) });
+    }
+    throw e;
   }
-  return rates;
+  ratePlanFailCache.delete(cacheKey);
+  if (ttl > 0) {
+    if (ratePlanRowsCache.size >= CACHE_MAX_ENTRIES) ratePlanRowsCache.clear();
+    ratePlanRowsCache.set(cacheKey, { expiresAt: nowMs + ttl, rows });
+  }
+  return indexOf(rows);
 }
 
 /* --------------------------- restrictions ---------------------------- */
@@ -565,19 +806,23 @@ export async function cloudbedsPromoRates(
 /**
  * `derived`: the row checked (the sold rateId's) is a DERIVED plan in getRatePlans. The Stripe
  * checkout refuses it whatever the rules say: Stripe modes sell the base (BAR) row only - except
- * the Direct rate selected for this booking, which comes back as `promo` (never `derived`) once
- * getRatePlans confirms it (see evaluateRestrictions' `promo`).
+ * the discounted rate selected for this booking, which comes back as `promo` (the Direct rate) or
+ * `auto` (an automatic discount), never `derived`, once getRatePlans confirms it (see
+ * evaluateRestrictions' `promo`).
  */
 export type RestrictionResult = (
   | { ok: true; checked: boolean }
   | { ok: false; reason: "closed_to_arrival" | "closed_to_departure" | "min_stay" | "max_stay" | "blocked" | "sold_out"; minNights?: number; maxNights?: number }
-) & { derived?: true; promo?: true };
+) & { derived?: true; promo?: true; auto?: true };
 
-/** The Direct rate a checkout selected for a room: Cloudbeds' promo code and the base row it was priced next to. */
-export interface PromoRestrictionInput {
-  cloudbedsCode: string;
-  baseRateId: string;
-}
+/**
+ * The discounted rate a checkout selected for a room, and the base row it was priced next to: the Direct rate
+ * (Cloudbeds' promo code; `kind` absent or "direct") or an automatic discount plan (`kind` "auto", the
+ * configured plan-name prefixes, BOOKING_AUTO_DISCOUNT_PLANS).
+ */
+export type PromoRestrictionInput =
+  | { kind?: "direct"; cloudbedsCode: string; baseRateId: string }
+  | { kind: "auto"; plans: readonly string[]; baseRateId: string };
 
 interface CbRateDay {
   date?: unknown;
@@ -619,14 +864,16 @@ function isBaseRatePlanRow(r: Record<string, unknown>): boolean {
  * (availability itself already came from getAvailableRoomTypes). A derived
  * row is checked like any other and marked `derived`.
  *
- * `promo` (the Direct rate this checkout selected for the room): the row with
- * `rateId` must carry Cloudbeds' promo code, the room type's base row must be
- * the one it was priced next to (promo.baseRateId), and its parentRateID (when
- * sent) must be that base row. Then the stay is checked against BOTH rows -
- * the highest positive minLos and the lowest positive maxLos of either, closed
- * to arrival / departure, blocked or no room left on either - and the result
- * is marked `promo`. Anything else is marked `derived` (refused): a derived
- * row is only ever sold as the Direct rate selected for this booking.
+ * `promo` (the discounted rate this checkout selected for the room): the row
+ * with `rateId` must carry Cloudbeds' promo code (the Direct rate) or be an
+ * automatic discount plan (kind "auto": derived, no promo code, an eligible
+ * name - isAutoDiscountRow), the room type's base row must be the one it was
+ * priced next to (promo.baseRateId), and its parentRateID (when sent) must be
+ * that base row. Then the stay is checked against BOTH rows - the highest
+ * positive minLos and the lowest positive maxLos of either, closed to arrival /
+ * departure, blocked or no room left on either - and the result is marked
+ * `promo` (Direct) or `auto`. Anything else is marked `derived` (refused): a
+ * derived row is only ever sold as the discounted rate selected for this booking.
  */
 export function evaluateRestrictions(
   json: unknown,
@@ -643,25 +890,31 @@ export function evaluateRestrictions(
   // a row without it is the requested type's.
   const forType = rows.filter((r) => r.roomTypeID === undefined || r.roomTypeID === null || r.roomTypeID === "" || String(r.roomTypeID) === roomTypeId);
   if (options.promo) {
+    const selected = options.promo;
+    const auto = selected.kind === "auto";
     const promoRow = rateId ? forType.find((r) => String(r.rateID ?? "") === rateId) : undefined;
     const base = forType.find(isBaseRatePlanRow);
     const parent = promoRow ? idOf(promoRow.parentRateID) : null;
+    const isSelectedPlan = (r: Record<string, unknown>) => (selected.kind === "auto" ? isAutoDiscountRow(r, selected.plans) : isPromoRow(r, selected.cloudbedsCode));
     const why = !promoRow
       ? "the rate is not listed"
-      : !isPromoRow(promoRow, options.promo.cloudbedsCode)
-        ? "the rate does not carry the promo code"
+      : !isSelectedPlan(promoRow)
+        ? auto
+          ? "the rate is not an automatic discount plan"
+          : "the rate does not carry the promo code"
         : !base
           ? "no base row"
-          : String(base.rateID ?? "") !== options.promo.baseRateId
+          : String(base.rateID ?? "") !== selected.baseRateId
             ? "the base row differs from the one priced"
-            : parent !== null && parent !== options.promo.baseRateId
+            : parent !== null && parent !== selected.baseRateId
               ? "the rate is derived from another rate"
               : null;
     if (why || !promoRow || !base) {
-      options.log?.("restrictions_promo_rate_refused", { roomTypeId, rateId, reason: why });
+      options.log?.(auto ? "restrictions_auto_rate_refused" : "restrictions_promo_rate_refused", { roomTypeId, rateId, reason: why });
       return { ok: true, checked: false, derived: true };
     }
-    return { ...checkStay([promoRow, base], roomTypeId, checkIn, checkOut, options.log), promo: true };
+    const result = checkStay([promoRow, base], roomTypeId, checkIn, checkOut, options.log);
+    return auto ? { ...result, auto: true } : { ...result, promo: true };
   }
   const row = (rateId ? forType.find((r) => String(r.rateID ?? "") === rateId) : undefined) ?? forType.find(isBaseRatePlanRow);
   if (!row) return { ok: true, checked: false };
@@ -717,8 +970,8 @@ function checkStay(
 }
 
 /**
- * Live restriction check for one room type (no cache). `promo`: the Direct rate selected for this
- * booking (see evaluateRestrictions). Throws CloudbedsError / CloudbedsBudgetError.
+ * Live restriction check for one room type (no cache). `promo`: the discounted rate (Direct or automatic)
+ * selected for this booking (see evaluateRestrictions). Throws CloudbedsError / CloudbedsBudgetError.
  */
 export async function cloudbedsRestrictions(
   roomTypeId: string,

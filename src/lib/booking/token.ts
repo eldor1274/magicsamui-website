@@ -115,6 +115,26 @@ function isTimestamp(v: unknown): v is string {
   return typeof v === "string" && ISO_TIMESTAMP_RE.test(v) && Number.isFinite(Date.parse(v));
 }
 
+/** A discounted rate's label as the return page shows it: 1-80 characters, no control or invisible format characters. */
+const DISCOUNT_LABEL_RE = /^[^\p{Cc}\p{Cf}]{1,80}$/u;
+
+/** BookingSummary.itemDiscounts: one entry per item, null or a known kind, a plain label and a base price at or above the room's price. */
+function isItemDiscounts(v: unknown, itemRoomSatang: number[]): boolean {
+  if (!Array.isArray(v) || v.length !== itemRoomSatang.length) return false;
+  return v.every((raw, i) => {
+    if (raw === null) return true;
+    if (typeof raw !== "object" || Array.isArray(raw)) return false;
+    const d = raw as Record<string, unknown>;
+    return (
+      (d.kind === "direct" || d.kind === "auto") &&
+      typeof d.label === "string" &&
+      DISCOUNT_LABEL_RE.test(d.label) &&
+      isSatang(d.listSatang) &&
+      d.listSatang >= itemRoomSatang[i]
+    );
+  });
+}
+
 /**
  * Strict shape check of a token's booking facts: known refs, dates, rooms,
  * plans, add-ons and sane integer amounts only. Anything else (a forged or
@@ -145,6 +165,7 @@ export function isBookingSummary(v: unknown): v is BookingSummary {
   if (!Array.isArray(b.itemRoomSatang) || b.itemRoomSatang.length !== b.items.length || !b.itemRoomSatang.every(isSatang)) {
     return false;
   }
+  if (b.itemDiscounts !== undefined && !isItemDiscounts(b.itemDiscounts, b.itemRoomSatang as number[])) return false;
   if (!isSatang(b.totalSatang) || !isSatang(b.cardFeeSatang) || !isSatang(b.dueNowSatang)) return false;
   if (b.dueNowSatang > b.totalSatang || b.cardFeeSatang > b.totalSatang) return false;
   if (!(b.promoCode === null || (typeof b.promoCode === "string" && PROMO_CODE_RE.test(b.promoCode)))) return false;

@@ -44,6 +44,8 @@ export interface AnalyticsItem {
   kids: 0;
   total_guests: number;
   affiliation: string;
+  /** A room on one of Cloudbeds' automatic discount plans: the plan's public name (absent otherwise). */
+  item_variant?: string;
 }
 
 export interface RecordedBookingEvent {
@@ -103,7 +105,7 @@ export function itemFromQuoteLine(line: QuoteLine, quote: Pick<Quote, "checkIn" 
     checkIn: quote.checkIn,
     checkOut: quote.checkOut,
   });
-  return { ...item, price: satangToBaht(averageNightlySatang(line)) };
+  return { ...item, price: satangToBaht(averageNightlySatang(line)), ...(line.discount?.kind === "auto" ? { item_variant: line.discount.name } : {}) };
 }
 
 export interface BookingAnalytics {
@@ -187,8 +189,8 @@ export function purchaseParams(booking: BookingSummary, confirmed: PurchaseView 
     start_date: booking.checkIn,
     end_date: booking.checkOut,
     nights: booking.nights,
-    items: booking.items.map((it, i) =>
-      buildAnalyticsItem({
+    items: booking.items.map((it, i) => {
+      const item = buildAnalyticsItem({
         slug: it.slug,
         ratePlanId: it.ratePlanId,
         adults: it.adults,
@@ -196,8 +198,10 @@ export function purchaseParams(booking: BookingSummary, confirmed: PurchaseView 
         roomSatang: booking.itemRoomSatang[i] ?? 0,
         checkIn: booking.checkIn,
         checkOut: booking.checkOut,
-      }),
-    ),
+      });
+      const discount = booking.itemDiscounts?.[i];
+      return discount?.kind === "auto" ? { ...item, item_variant: discount.label } : item;
+    }),
   };
 }
 

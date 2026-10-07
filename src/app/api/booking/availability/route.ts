@@ -54,6 +54,8 @@ export async function GET(request: NextRequest) {
       // never see - and then pay - made-up prices.
       allowDemoFallback: config.paymentMode === "demo" || config.paymentMode === "stripe-mock",
       cacheTtlMs: sp.get("fresh") === "1" && !isFreshLimited(ip) ? 0 : SEARCH_CACHE_TTL_MS,
+      // The automatic discounts' rate-plan read never takes a plain search down: base rates instead (checkout re-quotes).
+      autoDiscountsBestEffort: true,
       onFallback: (e) => logEvent("cloudbeds_fallback", { error: e instanceof Error ? e.message : String(e) }),
       // Stripe sells the base rate only: when that leaves no room at all, the owner is told (the alerter is built only then).
       ...(inventoryConfig.provider === "stripe"
