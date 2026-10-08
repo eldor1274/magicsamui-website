@@ -64,6 +64,9 @@ function clampDate(date: IsoDate, min: IsoDate, max: IsoDate): IsoDate {
   return date < min ? min : date > max ? max : date;
 }
 
+/** The most week rows any month needs (31 days starting on a Friday or Saturday, or 30 starting on a Saturday). */
+const WEEK_ROWS = 6;
+
 const LONG_MONTHS = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
@@ -145,6 +148,7 @@ export default function RangeCalendar({
     onActiveDateChange(clampDate(next, minDate, maxDate));
   };
 
+  const cellHeight = density === "compact" ? "h-12" : "h-11";
   const cellSize = density === "compact" ? "h-12 w-full" : "h-11 w-11";
 
   return (
@@ -152,8 +156,14 @@ export default function RangeCalendar({
       {Array.from({ length: months }, (_, i) => {
         const m = monthAt(view, i);
         const labelId = `${baseId}-m${i}`;
+        const weeks = monthGrid(m.year, m.monthIndex);
+        // Always six week rows: paging between 5- and 6-week months must not change the
+        // calendar's height, or its popover flips above the search bar under the guest's pointer.
+        const padRows = WEEK_ROWS - weeks.length;
         return (
-          <div key={`${m.year}-${m.monthIndex}`} className={density === "compact" ? "w-full" : ""}>
+          // Desktop: a fixed month width (7 x 44px days). A w-full table inside the w-max popover
+          // would otherwise stretch the calendar across the whole screen.
+          <div key={`${m.year}-${m.monthIndex}`} className={density === "compact" ? "w-full" : "w-77"}>
             <p id={labelId} className="mb-3 text-center text-base font-medium" aria-live={i === 0 ? "polite" : undefined}>
               {formatMonthLabel(m.year, m.monthIndex)}
             </p>
@@ -169,7 +179,7 @@ export default function RangeCalendar({
                 </tr>
               </thead>
               <tbody>
-                {monthGrid(m.year, m.monthIndex).map((week, wi) => (
+                {weeks.map((week, wi) => (
                   <tr key={wi}>
                     {week.map((date, di) => {
                       if (!date) return <td key={di} className="p-0" />;
@@ -216,6 +226,13 @@ export default function RangeCalendar({
                         </td>
                       );
                     })}
+                  </tr>
+                ))}
+                {Array.from({ length: padRows }, (_, pi) => (
+                  <tr key={`pad-${pi}`} aria-hidden="true">
+                    <td colSpan={7} className="p-0 py-0.5">
+                      <span className={`block ${cellHeight}`} />
+                    </td>
                   </tr>
                 ))}
               </tbody>

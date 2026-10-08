@@ -82,6 +82,28 @@ function resolveReturnFocus(target: HTMLElement | null, previouslyFocused: HTMLE
   return focusableWithin(target)[0] ?? previouslyFocused;
 }
 
+/**
+ * A press outside a popover only closes it. When it lands on a link (the
+ * homepage hero photo is one big link to /rooms), the click that follows must
+ * not open that page as well. Capture phase on document: it runs before the
+ * browser follows the link and before React (next/link) sees the click.
+ */
+function swallowNextClickOn(link: Element): void {
+  const done = () => {
+    document.removeEventListener("click", onClick, true);
+    window.clearTimeout(timer);
+  };
+  const onClick = (e: MouseEvent) => {
+    if (e.target instanceof Node && link.contains(e.target)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    done();
+  };
+  const timer = window.setTimeout(done, 3000);
+  document.addEventListener("click", onClick, true);
+}
+
 /* --------------------------------- the hook -------------------------------- */
 
 export interface OverlayOptions {
@@ -95,7 +117,7 @@ export interface OverlayOptions {
   returnFocusRef?: RefObject<HTMLElement | null>;
   /** Lock page scrolling while open (modals and sheets). */
   lockScroll?: boolean;
-  /** Close on a pointer press outside the container (popovers). */
+  /** Close on a pointer press outside the container (popovers); a press on a link then doesn't follow it. */
   closeOnOutsidePointer?: boolean;
   /** Presses inside these elements never count as "outside" (e.g. the anchor that toggles a popover). */
   ignoreRefs?: RefObject<HTMLElement | null>[];
@@ -175,6 +197,8 @@ export function useOverlay(options: OverlayOptions): void {
       if (!target || !root || root.contains(target)) return;
       if (cur.ignoreRefs?.some((r) => r.current?.contains(target))) return;
       cur.onClose();
+      const link = (target instanceof Element ? target : target.parentElement)?.closest("a[href]");
+      if (link) swallowNextClickOn(link);
     };
 
     document.addEventListener("keydown", onKeyDown, true);

@@ -353,3 +353,25 @@ test("confirmation-email copy follows CLOUDBEDS_SEND_STATUS_EMAIL (Stripe only)"
   assert.equal(getPublicBookingConfig({ ...STRIPE_TEST_ENV, CLOUDBEDS_SEND_STATUS_EMAIL: "true" }).sendsBookingConfirmationEmail, true);
   assert.equal(getPublicBookingConfig({ CLOUDBEDS_SEND_STATUS_EMAIL: "true" }).sendsBookingConfirmationEmail, false, "demo/beam: not a Stripe booking");
 });
+
+test("date picker: paging months never moves the calendar, and a click that only closes it never follows a link (owner, 8 Oct)", () => {
+  // Always six week rows, so a 6-week month (January 2027) is as tall as a 5-week one and nothing flips.
+  const calendar = repoSrc("components/booking/search/RangeCalendar.tsx");
+  assert.ok(calendar.includes("const WEEK_ROWS = 6;"));
+  assert.ok(calendar.includes("const padRows = WEEK_ROWS - weeks.length;"));
+  assert.ok(calendar.includes('<tr key={`pad-${pi}`} aria-hidden="true">'), "padding rows are hidden from screen readers");
+  // Desktop months have a fixed width; a w-full table in the w-max popover stretched it across the screen.
+  assert.ok(calendar.includes('density === "compact" ? "w-full" : "w-77"'));
+
+  // The popover chooses its side on open, scroll and resize only; a content resize keeps it.
+  const popover = repoSrc("components/booking/ui/Popover.tsx");
+  assert.ok(popover.includes("const observer = new ResizeObserver(schedule);"));
+  assert.ok(popover.includes('window.addEventListener("scroll", scheduleAndReconsider, true);'));
+  assert.ok(popover.includes('window.addEventListener("resize", scheduleAndReconsider);'));
+  assert.match(popover, /side !== null && !reconsiderSide \? side === "bottom"/);
+
+  // The homepage hero photo is one big link to /rooms: closing the calendar by clicking it must not open /rooms.
+  const overlay = repoSrc("components/booking/ui/overlay.ts");
+  assert.match(overlay, /cur\.onClose\(\);\s*const link = [^\n]*closest\("a\[href\]"\);\s*if \(link\) swallowNextClickOn\(link\);/);
+  assert.ok(overlay.includes('document.addEventListener("click", onClick, true);'));
+});

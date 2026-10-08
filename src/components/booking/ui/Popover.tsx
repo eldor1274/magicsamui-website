@@ -4,8 +4,10 @@
 // Anchored, non-modal dialog (desktop calendar, guests, promo, occupancy).
 // Portals to <body> with position: fixed, placed under its anchor (flips
 // above when there is no room below, clamped to the viewport, follows scroll
-// and resize). Focus moves in on open, Tab stays inside, Escape or a click
-// outside closes it and focus returns to the anchor. On phones the callers
+// and resize; a change of its own content never flips it). Focus moves in on
+// open, Tab stays inside, Escape or a click outside closes it (a click that
+// only closes it never follows a link underneath) and focus returns to the
+// anchor. On phones the callers
 // use a bottom Sheet instead. Keep PopoverProps stable (additions optional).
 
 import { useLayoutEffect, useRef } from "react";
@@ -53,6 +55,11 @@ export default function Popover({ open, onClose, anchorRef, label, align = "star
     const panel = panelRef.current;
     if (!panel) return;
     let frame = 0;
+    // The side (under or above the anchor) is chosen on open, scroll and resize only. A change of
+    // the panel's own content (paging the calendar) keeps it: a flip would move the control the
+    // guest is clicking, and the next click would land on the page underneath.
+    let side: "bottom" | "top" | null = null;
+    let reconsiderSide = true;
 
     const place = () => {
       const anchor = anchorRef.current;
@@ -69,7 +76,9 @@ export default function Popover({ open, onClose, anchorRef, label, align = "star
 
       const spaceBelow = vh - a.bottom - GAP_PX - VIEWPORT_MARGIN_PX;
       const spaceAbove = a.top - GAP_PX - VIEWPORT_MARGIN_PX;
-      const below = height <= spaceBelow || spaceBelow >= spaceAbove;
+      const below = side !== null && !reconsiderSide ? side === "bottom" : height <= spaceBelow || spaceBelow >= spaceAbove;
+      side = below ? "bottom" : "top";
+      reconsiderSide = false;
       const available = Math.max(160, below ? spaceBelow : spaceAbove);
       const shown = Math.min(height, available);
       const top = below ? a.bottom + GAP_PX : a.top - GAP_PX - shown;
@@ -84,6 +93,10 @@ export default function Popover({ open, onClose, anchorRef, label, align = "star
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(place);
     };
+    const scheduleAndReconsider = () => {
+      reconsiderSide = true;
+      schedule();
+    };
 
     // On open, scroll the page just enough for the whole panel to fit under
     // its anchor (never pushing the anchor under the sticky site header).
@@ -96,14 +109,14 @@ export default function Popover({ open, onClose, anchorRef, label, align = "star
       if (need > 0 && room > 0) window.scrollBy({ top: Math.min(need, room), behavior: "instant" });
     }
     place();
-    window.addEventListener("resize", schedule);
-    window.addEventListener("scroll", schedule, true);
+    window.addEventListener("resize", scheduleAndReconsider);
+    window.addEventListener("scroll", scheduleAndReconsider, true);
     const observer = new ResizeObserver(schedule);
     observer.observe(panel);
     return () => {
       cancelAnimationFrame(frame);
-      window.removeEventListener("resize", schedule);
-      window.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", scheduleAndReconsider);
+      window.removeEventListener("scroll", scheduleAndReconsider, true);
       observer.disconnect();
     };
   }, [open, align, anchorRef]);
