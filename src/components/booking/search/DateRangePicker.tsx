@@ -194,6 +194,7 @@ function OpenDateRangePicker({ onClose, checkIn, checkOut, onChange, minDate, ma
         open
         variant="fullscreen"
         onClose={onClose}
+        returnFocusRef={anchorRef}
         title="Select stay dates"
         subtitle={
           draft.checkIn

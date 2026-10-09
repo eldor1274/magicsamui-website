@@ -41,7 +41,7 @@ export default function PickerOverlay({
 
   if (isMobile) {
     return (
-      <Sheet open onClose={onClose} title={title} subtitle={subtitle} footer={actions} initialFocusRef={initialFocusRef}>
+      <Sheet open onClose={onClose} title={title} subtitle={subtitle} footer={actions} initialFocusRef={initialFocusRef} returnFocusRef={anchorRef}>
         {children}
       </Sheet>
     );

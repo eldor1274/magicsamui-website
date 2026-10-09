@@ -366,12 +366,38 @@ test("date picker: paging months never moves the calendar, and a click that only
   // The popover chooses its side on open, scroll and resize only; a content resize keeps it.
   const popover = repoSrc("components/booking/ui/Popover.tsx");
   assert.ok(popover.includes("const observer = new ResizeObserver(schedule);"));
-  assert.ok(popover.includes('window.addEventListener("scroll", scheduleAndReconsider, true);'));
+  assert.ok(popover.includes('window.addEventListener("scroll", onScroll, true);'));
+  // A clamped panel (short screens) stays scrollable: its own scroll never re-places it, and measuring never clears max-height.
+  assert.ok(popover.includes("if (e.target instanceof Node && panel.contains(e.target)) return;"));
+  assert.ok(popover.includes("const height = panel.scrollHeight + panel.offsetHeight - panel.clientHeight;"));
+  assert.doesNotMatch(popover, /panel\.style\.maxHeight = "";/);
   assert.ok(popover.includes('window.addEventListener("resize", scheduleAndReconsider);'));
   assert.match(popover, /side !== null && !reconsiderSide \? side === "bottom"/);
 
   // The homepage hero photo is one big link to /rooms: closing the calendar by clicking it must not open /rooms.
   const overlay = repoSrc("components/booking/ui/overlay.ts");
-  assert.match(overlay, /cur\.onClose\(\);\s*const link = [^\n]*closest\("a\[href\]"\);\s*if \(link\) swallowNextClickOn\(link\);/);
+  assert.match(overlay, /cur\.onClose\(\);[\s\S]{0,200}const plain = e\.button === 0 && !e\.ctrlKey && !e\.metaKey && !e\.shiftKey && !e\.altKey;\s*const link = [^\n]*closest\("a\[href\]"\);\s*if \(link && plain\) swallowNextClickOn\(link\);/);
   assert.ok(overlay.includes('document.addEventListener("click", onClick, true);'));
+  // Only that one click: a press that became a scroll, menu or drag (or any new press or key) disarms it.
+  assert.ok(overlay.includes('const PRESS_ENDED_WITHOUT_CLICK = ["pointerdown", "pointercancel", "contextmenu", "dragstart", "keydown"] as const;'));
+  assert.ok(overlay.includes("for (const type of PRESS_ENDED_WITHOUT_CLICK) document.addEventListener(type, done, true);"));
+});
+
+test("closing a sheet or modal on an iPhone never scrolls to the footer (owner, 9 Oct)", () => {
+  // Safari never focuses a tapped button, so the "opener" was <body> and returning focus to it scrolled to its bottom edge.
+  const overlay = repoSrc("components/booking/ui/overlay.ts");
+  assert.ok(overlay.includes("const previouslyFocused = currentOpener();"));
+  assert.match(overlay, /function currentOpener\(\): HTMLElement \| null \{\s*const active = document\.activeElement;\s*if \(active instanceof HTMLElement && active !== document\.body && active !== document\.documentElement\) return active;/);
+  assert.ok(overlay.includes("performance.now() - lastPress.at < OPENER_PRESS_MS"), "only a press from the last moment stands in for the opener");
+  assert.doesNotMatch(overlay, /const previouslyFocused = document\.activeElement instanceof HTMLElement \? document\.activeElement : null;/);
+
+  // The reveal never scrolls for the page itself or for a control inside a fixed bar or sheet.
+  const bars = repoSrc("components/booking/bottomBars.ts");
+  assert.ok(bars.includes("if (!el || el === document.body || el === document.documentElement || insideFixedBox(el)) return;"));
+  assert.ok(bars.includes("const by = Math.min(rect.bottom - limit, rect.top - topClearance);"), "a tall block keeps its top in view");
+
+  // Phone sheets opened from a pill go back to that pill.
+  assert.ok(repoSrc("components/booking/ui/Sheet.tsx").includes("useOverlay({ open, containerRef: panelRef, onClose, initialFocusRef, returnFocusRef, lockScroll: true });"));
+  assert.ok(repoSrc("components/booking/ui/PickerOverlay.tsx").includes("returnFocusRef={anchorRef}"));
+  assert.match(repoSrc("components/booking/search/DateRangePicker.tsx"), /variant="fullscreen"\s*onClose=\{onClose\}\s*returnFocusRef=\{anchorRef\}/);
 });

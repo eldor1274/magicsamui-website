@@ -6,9 +6,11 @@
 // - focus: moves into the overlay on open, is trapped while open (over real
 //   tab stops only), and returns to the opener (or a given element) on close -
 //   unless the overlay's own action already moved focus somewhere on purpose;
-//   the returned-to control is then scrolled clear of the fixed bottom bars
+//   the returned-to control is then scrolled clear of the fixed bottom bars.
+//   On Safari a tapped button never has focus, so the opener is the control
+//   pressed just before opening (one document pointerdown listener)
 // - ref-counted page scroll lock with scrollbar-width compensation
-// Everything is DOM work inside effects - no React state is set here.
+// Everything else is DOM work inside effects - no React state is set here.
 
 import { useEffect, useLayoutEffect, useRef } from "react";
 import type { RefObject } from "react";
@@ -69,6 +71,36 @@ function unlockPageScroll(): void {
   savedStyles = null;
 }
 
+/* -------------------------------- the opener ------------------------------- */
+
+// Safari (iPhone, iPad and Mac, and every iPhone browser) does not focus a
+// button when it is tapped or clicked, so document.activeElement is still
+// <body> when an overlay opens from one. The control pressed just before the
+// overlay opened stands in for the opener there. Only a press from the last
+// moment counts: an overlay that opens by itself must not send focus (and the
+// page) back to some earlier button.
+const OPENER_PRESS_MS = 2000;
+let lastPress: { el: HTMLElement; at: number } | null = null;
+
+if (typeof document !== "undefined") {
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      const el = e.target instanceof Element ? e.target.closest<HTMLElement>(FOCUSABLE) : null;
+      lastPress = el ? { el, at: performance.now() } : null;
+    },
+    true,
+  );
+}
+
+/** What opened an overlay: the focused element, else (Safari) the control pressed just now. Never <body>. */
+function currentOpener(): HTMLElement | null {
+  const active = document.activeElement;
+  if (active instanceof HTMLElement && active !== document.body && active !== document.documentElement) return active;
+  if (lastPress && lastPress.el.isConnected && performance.now() - lastPress.at < OPENER_PRESS_MS) return lastPress.el;
+  return null;
+}
+
 /**
  * Where focus goes when an overlay closes: the opener if it sits inside the
  * requested return target (e.g. the check-out button inside the dates pill),
@@ -82,15 +114,22 @@ function resolveReturnFocus(target: HTMLElement | null, previouslyFocused: HTMLE
   return focusableWithin(target)[0] ?? previouslyFocused;
 }
 
+/** Anything that means the press being watched will not end in its click (or that a new gesture began). */
+const PRESS_ENDED_WITHOUT_CLICK = ["pointerdown", "pointercancel", "contextmenu", "dragstart", "keydown"] as const;
+
 /**
- * A press outside a popover only closes it. When it lands on a link (the
+ * A plain press outside a popover only closes it. When it lands on a link (the
  * homepage hero photo is one big link to /rooms), the click that follows must
  * not open that page as well. Capture phase on document: it runs before the
- * browser follows the link and before React (next/link) sees the click.
+ * browser follows the link and before React (next/link) sees the click. Only
+ * that one click: a press that turns into a scroll, a context menu or a drag
+ * disarms it, so a later deliberate click on the link always works. (The
+ * pointerdown listener added here does not fire for the press being handled.)
  */
 function swallowNextClickOn(link: Element): void {
   const done = () => {
     document.removeEventListener("click", onClick, true);
+    for (const type of PRESS_ENDED_WITHOUT_CLICK) document.removeEventListener(type, done, true);
     window.clearTimeout(timer);
   };
   const onClick = (e: MouseEvent) => {
@@ -100,8 +139,9 @@ function swallowNextClickOn(link: Element): void {
     }
     done();
   };
-  const timer = window.setTimeout(done, 3000);
+  const timer = window.setTimeout(done, 1500);
   document.addEventListener("click", onClick, true);
+  for (const type of PRESS_ENDED_WITHOUT_CLICK) document.addEventListener(type, done, true);
 }
 
 /* --------------------------------- the hook -------------------------------- */
@@ -139,7 +179,8 @@ export function useOverlay(options: OverlayOptions): void {
     const id = Symbol("booking-overlay");
     stack.push(id);
     const opts = latest.current;
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // Never <body>: "returning" focus to it scrolled the page to its bottom edge, the footer (iPhone, 9 Oct).
+    const previouslyFocused = currentOpener();
     const locks = opts.lockScroll === true;
     if (locks) lockPageScroll();
 
@@ -197,8 +238,10 @@ export function useOverlay(options: OverlayOptions): void {
       if (!target || !root || root.contains(target)) return;
       if (cur.ignoreRefs?.some((r) => r.current?.contains(target))) return;
       cur.onClose();
+      // Only a plain primary press: middle/modifier clicks open the link in a new tab, as asked.
+      const plain = e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey;
       const link = (target instanceof Element ? target : target.parentElement)?.closest("a[href]");
-      if (link) swallowNextClickOn(link);
+      if (link && plain) swallowNextClickOn(link);
     };
 
     document.addEventListener("keydown", onKeyDown, true);

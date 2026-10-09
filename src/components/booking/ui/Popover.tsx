@@ -67,9 +67,10 @@ export default function Popover({ open, onClose, anchorRef, label, align = "star
       const a = anchor.getBoundingClientRect();
       const vw = document.documentElement.clientWidth;
       const vh = window.innerHeight;
-      panel.style.maxHeight = "";
       const width = panel.offsetWidth;
-      const height = panel.offsetHeight;
+      // Natural height, measured without clearing max-height: a layout with no overflow would
+      // reset a clamped panel's own scroll position to the top.
+      const height = panel.scrollHeight + panel.offsetHeight - panel.clientHeight;
 
       let left = align === "start" ? a.left : align === "end" ? a.right - width : a.left + a.width / 2 - width / 2;
       left = Math.max(VIEWPORT_MARGIN_PX, Math.min(left, vw - width - VIEWPORT_MARGIN_PX));
@@ -85,7 +86,7 @@ export default function Popover({ open, onClose, anchorRef, label, align = "star
 
       panel.style.left = `${Math.round(left)}px`;
       panel.style.top = `${Math.round(top)}px`;
-      if (height > available) panel.style.maxHeight = `${Math.floor(available)}px`;
+      panel.style.maxHeight = height > available ? `${Math.floor(available)}px` : "";
       panel.dataset.side = below ? "bottom" : "top";
     };
 
@@ -96,6 +97,11 @@ export default function Popover({ open, onClose, anchorRef, label, align = "star
     const scheduleAndReconsider = () => {
       reconsiderSide = true;
       schedule();
+    };
+    // Scrolling inside the panel (a clamped calendar on a short screen) moves nothing outside it.
+    const onScroll = (e: Event) => {
+      if (e.target instanceof Node && panel.contains(e.target)) return;
+      scheduleAndReconsider();
     };
 
     // On open, scroll the page just enough for the whole panel to fit under
@@ -110,13 +116,13 @@ export default function Popover({ open, onClose, anchorRef, label, align = "star
     }
     place();
     window.addEventListener("resize", scheduleAndReconsider);
-    window.addEventListener("scroll", scheduleAndReconsider, true);
+    window.addEventListener("scroll", onScroll, true);
     const observer = new ResizeObserver(schedule);
     observer.observe(panel);
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener("resize", scheduleAndReconsider);
-      window.removeEventListener("scroll", scheduleAndReconsider, true);
+      window.removeEventListener("scroll", onScroll, true);
       observer.disconnect();
     };
   }, [open, align, anchorRef]);

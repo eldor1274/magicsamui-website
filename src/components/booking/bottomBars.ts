@@ -43,17 +43,29 @@ export function useBottomBar(name: BottomBarName, ref: RefObject<HTMLElement | n
   }, [name, ref, active]);
 }
 
+/** Inside a position: fixed box (a bottom bar, an open sheet): scrolling the page never moves it. */
+function insideFixedBox(el: HTMLElement): boolean {
+  for (let node: HTMLElement | null = el; node && node !== document.body; node = node.parentElement) {
+    if (getComputedStyle(node).position === "fixed") return true;
+  }
+  return false;
+}
+
 /**
  * Programmatic focus() does not scroll a field that is "visible" but sits
  * under the fixed bottom bars or the sticky header (browsers ignore
  * scroll-padding for elements already in the viewport). Call after focusing
- * to scroll it clear of both.
+ * to scroll it clear of both. Never for the page itself (its bottom edge is
+ * the footer) or a control in a fixed bar, and a block taller than the gap
+ * keeps its top in view.
  */
 export function revealAboveBars(el: HTMLElement | null, topClearance = 96): void {
-  if (!el) return;
+  if (!el || el === document.body || el === document.documentElement || insideFixedBox(el)) return;
   const lift = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--bk-fab-lift")) || 0;
   const rect = el.getBoundingClientRect();
   const limit = window.innerHeight - lift - 16;
-  if (rect.bottom > limit) window.scrollBy({ top: rect.bottom - limit, behavior: "auto" });
-  else if (rect.top < topClearance) window.scrollBy({ top: rect.top - topClearance, behavior: "auto" });
+  if (rect.bottom > limit) {
+    const by = Math.min(rect.bottom - limit, rect.top - topClearance);
+    if (by > 0) window.scrollBy({ top: by, behavior: "auto" });
+  } else if (rect.top < topClearance) window.scrollBy({ top: rect.top - topClearance, behavior: "auto" });
 }

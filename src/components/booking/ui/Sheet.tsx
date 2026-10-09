@@ -25,19 +25,21 @@ export interface SheetProps {
   children: ReactNode;
   footer?: ReactNode;
   initialFocusRef?: RefObject<HTMLElement | null>;
+  /** Focused on close (e.g. the pill that opened a picker). Default: the opener. */
+  returnFocusRef?: RefObject<HTMLElement | null>;
 }
 
 /** Drag distance (px) past which releasing the handle closes the sheet. */
 const DISMISS_DRAG_PX = 90;
 
-export default function Sheet({ open, onClose, title, subtitle, variant = "bottom", children, footer, initialFocusRef }: SheetProps) {
+export default function Sheet({ open, onClose, title, subtitle, variant = "bottom", children, footer, initialFocusRef, returnFocusRef }: SheetProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const dragStartY = useRef<number | null>(null);
   const titleId = useId();
   const subtitleId = useId();
   const fullscreen = variant === "fullscreen";
 
-  useOverlay({ open, containerRef: panelRef, onClose, initialFocusRef, lockScroll: true });
+  useOverlay({ open, containerRef: panelRef, onClose, initialFocusRef, returnFocusRef, lockScroll: true });
 
   if (!open || typeof document === "undefined") return null;
 
