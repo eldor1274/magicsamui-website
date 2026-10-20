@@ -66,6 +66,28 @@ export const INDEX_PRUNE_MS = 7 * 24 * 3600_000;
 /** The open-holds index holding more entries than this alerts the owner (it should hold a handful). */
 export const INDEX_SIZE_ALERT = 50;
 
+/**
+ * One line for the Cloudbeds reservation note when the sweeper gives a hold back: what the guest's payment page
+ * did (2026-10-20: the reason only lived in server logs, which expire). A session without a PaymentIntent was never
+ * submitted; with one, a payment was started.
+ */
+export function releaseNoteText(sessions: { session: Pick<CheckoutSession, "payment_intent">; state: SessionPaymentState }[]): string {
+  if (sessions.length === 0) {
+    return "Hold released by the sweeper: no payment page was ever created (the booking page failed before Stripe). Nothing was charged.";
+  }
+  if (sessions.some((x) => x.state === "failed")) {
+    return "Hold released by the sweeper: a payment was attempted on the Stripe page but did not go through. Nothing was charged.";
+  }
+  const attempted = sessions.some((x) => x.session.payment_intent !== null && x.session.payment_intent !== undefined);
+  return attempted
+    ? "Hold released by the sweeper: the Stripe payment page was opened and a payment was started but never completed. Nothing was charged."
+    : "Hold released by the sweeper: the Stripe payment page was created but no payment was ever attempted. Nothing was charged.";
+}
+
+async function noteRelease(deps: StripeDeps, reservationId: string, text: string): Promise<void> {
+  await deps.writer.addNote(reservationId, text).catch((e) => deps.log("release_note_failed", { reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) }));
+}
+
 export interface SweepSummary {
   sessionsChecked: number;
   fulfilled: number;
@@ -148,7 +170,10 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
         if ((await deps.kv.get(keys.releaseDone(meta.reservationId))) !== null) continue;
         // Another session may exist for the same hold (never in practice: one session per hold).
         const r = await releaseHold(meta.reservationId, deps, `sweeper: session ${state}`);
-        if (r.state === "released") summary.released++;
+        if (r.state === "released") {
+          summary.released++;
+          await noteRelease(deps, meta.reservationId, releaseNoteText(list));
+        }
       }
     } catch (e) {
       summary.errors++;
@@ -369,7 +394,10 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
       }
       // No payable session (expired/failed, or none was ever created): release.
       const r = await releaseHold(reservationId, deps, "sweeper: stale hold");
-      if (r.state === "released") summary.released++;
+      if (r.state === "released") {
+        summary.released++;
+        await noteRelease(deps, reservationId, releaseNoteText(seen));
+      }
       if (r.state === "already_released" || r.state === "released" || r.state === "refused_paid" || r.state === "refused_confirmed") {
         await closeHold(deps.kv, reservationId);
       } else {

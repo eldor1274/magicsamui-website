@@ -748,6 +748,10 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
     try {
       // Only ever called before the guest has a payment page (or after its session was expired): nobody can have paid.
       await releaseHold(reservationId, deps, why, { neverPayable: true });
+      // The reason stays readable in Cloudbeds (server logs expire). Best effort.
+      await deps.writer
+        .addNote(reservationId, `Hold cancelled by the booking page before any payment: ${why}. Nothing was charged.`)
+        .catch((x) => deps.log("cancel_note_failed", { ref, reservationId, error: redactForLog(x instanceof Error ? x.message : String(x)) }));
     } catch (e) {
       deps.log("hold_cancel_failed", { ref, reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) });
       await deps.alert(
@@ -758,6 +762,11 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
     }
   };
 
+  // Any unexpected error from here used to leave the hold in Cloudbeds with no cancel and no alert until the
+  // sweeper found it 30+ minutes later (2026-10-20). Now: expire the session if one exists, give the hold
+  // back, note it in Cloudbeds, alert the owner.
+  let sessionForCleanup: CheckoutSession | null = null;
+  try {
   if (recordError !== null) {
     // Without a record nothing would track this hold: give it back now (the intent stays for the sweeper if this fails too).
     deps.log("hold_record_failed", { ref, reservationId, error: redactForLog(recordError instanceof Error ? recordError.message : String(recordError)) });
@@ -1020,6 +1029,7 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
     return fail(502, { error: "upstream_error", message: `We couldn't reach our payment provider. ${NOTHING_CHARGED} Please try again in a moment.` });
   }
 
+  sessionForCleanup = session;
   // Anything failing from here leaves an OPEN session: expire it (so it can never be paid) and release the hold.
   try {
     if (!isStripeCheckoutUrl(session.url, config.stripe.mock ? ctx.origin : null)) throw new Error("Unexpected Checkout URL host");
@@ -1053,6 +1063,29 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
       holdReservationId: reservationId,
     },
   };
+  } catch (e) {
+    const message = redactForLog(e instanceof Error ? e.message : String(e));
+    const sessionId = sessionForCleanup?.id ?? null;
+    deps.log("checkout_crashed_after_hold", { ref, reservationId, sessionId, message });
+    if (sessionId) {
+      await deps.stripe.checkout.sessions
+        .expire(sessionId)
+        .catch((x: unknown) => deps.log("stripe_session_expire_failed", { ref, sessionId, error: redactForLog(x instanceof Error ? x.message : String(x)) }));
+    }
+    await cancelHold("unexpected error on our side after the hold");
+    await deps.alert(
+      "Booking stopped: unexpected error after the hold",
+      [
+        `Booking ${ref} (Cloudbeds reservation ${reservationId}) failed on our side after the hold was created: ${message}`,
+        sessionId
+          ? `The Stripe payment page ${sessionId} was expired, the hold was cancelled and nothing was charged.`
+          : "No payment page existed yet; the hold was cancelled and nothing was charged.",
+        "If this repeats, online bookings are failing on our side: check the Vercel logs for checkout_crashed_after_hold.",
+      ],
+      { key: "checkout-crash", severity: "warning" },
+    );
+    return fail(500, { error: "server_error", message: `Something went wrong on our side. ${NOTHING_CHARGED} Please try again in a moment.` });
+  }
 }
 
 /**
