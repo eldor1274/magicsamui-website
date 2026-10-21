@@ -95,7 +95,19 @@ export interface Kit {
   now: { ms: number };
 }
 
-export function makeKit(options: { env?: Env; cb?: FakeCloudbedsOptions; livemode?: boolean; kv?: KvStore; now?: { ms: number } } = {}): Kit {
+export function makeKit(
+  options: {
+    env?: Env;
+    cb?: FakeCloudbedsOptions;
+    livemode?: boolean;
+    kv?: KvStore;
+    now?: { ms: number };
+    /** Booking-ref characters for checkoutDeps (default: random; refCharSequence() pins them). */
+    pickRefChar?: (max: number) => number;
+    /** Wraps the fake Stripe's fetch the SDK talks to (e.g. to record request headers). */
+    stripeFetch?: (fakeFetch: typeof fetch) => typeof fetch;
+  } = {},
+): Kit {
   const now = options.now ?? { ms: NOW };
   const env = options.env ?? STRIPE_TEST_ENV;
   const config = getBookingConfig(env);
@@ -140,7 +152,7 @@ export function makeKit(options: { env?: Env; cb?: FakeCloudbedsOptions; livemod
   });
   const deps: StripeDeps = {
     config,
-    stripe: createStripeClient(config.stripe?.secretKey ?? "sk_test_x", { fetchImpl: fakeStripe.fetch }),
+    stripe: createStripeClient(config.stripe?.secretKey ?? "sk_test_x", { fetchImpl: options.stripeFetch ? options.stripeFetch(fakeStripe.fetch) : fakeStripe.fetch }),
     writer,
     kv,
     alert,
@@ -165,6 +177,7 @@ export function makeKit(options: { env?: Env; cb?: FakeCloudbedsOptions; livemod
       fetchImpl: fakeCb.fetch,
       log,
       stripe: deps,
+      ...(options.pickRefChar ? { pickRefChar: options.pickRefChar } : {}),
       nonce: () => "nonce",
       // The Stage B staff cookie (only checked when the test guard is active).
       testAccessToken: config.testGuard?.accessKey ? testAccessCookieValue(config.tokenSecret, config.testGuard.accessKey) : null,
@@ -210,4 +223,67 @@ export function sessionIdOf(body: CheckoutResponse): string {
   const id = new URL(ok.redirectUrl).pathname.split("/").pop();
   if (!id) throw new Error("no session id in the redirect URL");
   return id;
+}
+
+/**
+ * Deterministic booking-ref characters (the golden snapshot): a fixed walk through the alphabet, so the
+ * refs of one kit are the same on every run and successive refs differ.
+ */
+export function refCharSequence(): (max: number) => number {
+  let i = 0;
+  return (max) => (i++ * 7 + 3) % max;
+}
+
+/** One write a recordingKv saw: the key, the value and its TTL (seconds), or the sorted-set member and score. */
+export interface KvWrite {
+  op: "setNx" | "set" | "del" | "delIfEquals" | "zadd" | "zrem" | "incr";
+  key: string;
+  value?: string;
+  ttl?: number;
+  score?: number;
+  member?: string;
+  /** setNx / delIfEquals: whether it took effect; incr: the new count. */
+  result?: boolean | number;
+}
+
+/** Wraps a store and records every write, in order, once it returned (reads are passed through unrecorded). */
+export function recordingKv(inner: KvStore): KvStore & { writes: KvWrite[] } {
+  const writes: KvWrite[] = [];
+  return {
+    kind: inner.kind,
+    writes,
+    async setNx(key, value, ttlSeconds) {
+      const result = await inner.setNx(key, value, ttlSeconds);
+      writes.push({ op: "setNx", key, value, ttl: ttlSeconds, result });
+      return result;
+    },
+    async set(key, value, ttlSeconds) {
+      await inner.set(key, value, ttlSeconds);
+      writes.push({ op: "set", key, value, ttl: ttlSeconds });
+    },
+    get: (key) => inner.get(key),
+    async del(key) {
+      await inner.del(key);
+      writes.push({ op: "del", key });
+    },
+    async delIfEquals(key, value) {
+      const result = await inner.delIfEquals(key, value);
+      writes.push({ op: "delIfEquals", key, value, result });
+      return result;
+    },
+    async zadd(key, score, member) {
+      await inner.zadd(key, score, member);
+      writes.push({ op: "zadd", key, score, member });
+    },
+    zrangeByScore: (key, min, max, limit) => inner.zrangeByScore(key, min, max, limit),
+    async zrem(key, member) {
+      await inner.zrem(key, member);
+      writes.push({ op: "zrem", key, member });
+    },
+    async incr(key, ttlSeconds) {
+      const result = await inner.incr(key, ttlSeconds);
+      writes.push({ op: "incr", key, ttl: ttlSeconds, result });
+      return result;
+    },
+  };
 }
