@@ -6,6 +6,7 @@ import type { BookingConfig } from "./config.ts";
 import type { CloudbedsWriter } from "./cloudbedsWrite.ts";
 import type { PromoRestrictionInput, RestrictionResult } from "./cloudbedsProvider.ts";
 import type { KvStore } from "./kv.ts";
+import type { PaymentGateway } from "./payments/gateway.ts";
 import type { StripeClient } from "./payments/stripe.ts";
 import type { IsoDate } from "./types.ts";
 
@@ -47,6 +48,18 @@ export interface CoreDeps {
 
 /** CoreDeps plus the Stripe client (checkout sessions, fulfil, sweep, status). */
 export type StripeDeps = CoreDeps & { stripe: StripeClient };
+
+/** CoreDeps plus the gateway of the provider that takes the money (status and abandon). */
+export interface ProviderDeps {
+  deps: CoreDeps;
+  gw: PaymentGateway;
+}
+
+/**
+ * The deps that finish a provider's payments: the active config's when it is
+ * that provider, else that provider's drain; null when it has neither.
+ */
+export type ProviderDepsFn = (provider: PaymentGateway["provider"]) => ProviderDeps | null;
 
 export function nowOf(deps: Pick<CoreDeps, "now">): number {
   return deps.now ? deps.now() : Date.now();

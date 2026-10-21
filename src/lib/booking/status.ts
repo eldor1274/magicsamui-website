@@ -1,22 +1,27 @@
 // Payment status for the return page (server). Never trusts the query
 // string alone: the booking token is verified, then the status comes from a
-// signed demo proof (demo mode), from Beam itself (beam-* modes) or from
-// Stripe itself (stripe-* modes). In stripe modes a paid session is also
-// FULFILLED here (Stripe recommends the return page triggers fulfilment too):
-// the answer says whether the Cloudbeds reservation is confirmed yet.
+// signed demo proof (demo mode), from Beam itself (the beam-* link preview)
+// or, in the hold-first modes (stripe-*), from the provider itself through
+// its PaymentGateway. The deps and gateway are picked by the BOOKING's
+// provider (deps.providerDeps: the active config's, or that provider's
+// drain). There a paid payment is also FULFILLED (Stripe recommends the
+// return page triggers fulfilment too): the answer says whether the Cloudbeds
+// reservation is confirmed yet.
 
 import { getPaymentLink, listPaymentLinkCharges, mapLinkStatus } from "./beam.ts";
 import type { BeamCharge } from "./beam.ts";
 import { redactForLog } from "./cloudbedsWrite.ts";
 import type { BookingConfig } from "./config.ts";
-import { alertFulfilFailure, bookingPointer, fulfilSession, releaseSession } from "./fulfil.ts";
+import { alertFulfilPaymentFailure, bookingPointer, fulfilPayment, releasePayment } from "./fulfil.ts";
 import { keys } from "./lock.ts";
-import { isSessionId, parseSessionMeta, retrieveSession, sessionPaymentState } from "./payments/stripe.ts";
-import { isLiveMode, providerOf } from "./payments/provider.ts";
+import type { PaymentGateway } from "./payments/gateway.ts";
+import { isSessionId } from "./payments/stripe.ts";
+import { stripeGateway } from "./payments/stripeGateway.ts";
+import { isHoldFirstMode, isLiveMode, providerOf } from "./payments/provider.ts";
 import { satangToBaht } from "./quote.ts";
-import type { StripeDeps } from "./stripeDeps.ts";
+import type { ProviderDeps, ProviderDepsFn, StripeDeps } from "./stripeDeps.ts";
 import { verifyBookingToken, verifyDemoProof } from "./token.ts";
-import type { ApiError, BookingSummary, FulfilmentView, PaymentStatus, PurchaseView, StatusResponse } from "./types.ts";
+import type { ApiError, BookingSummary, FulfilmentView, PaymentMode, PaymentStatus, PurchaseView, StatusResponse } from "./types.ts";
 
 export interface StatusParams {
   t: string | null;
@@ -31,17 +36,65 @@ export interface StatusDeps {
   nowMs?: number;
   fetchImpl?: typeof fetch;
   log?: (message: string, data?: Record<string, unknown>) => void;
-  /** Stripe modes. */
-  stripe?: StripeDeps;
   /**
-   * Drain: after BOOKING_PAYMENT_PROVIDER moved away from stripe, Stripe
-   * bookings already started are still checked (and confirmed) with the
-   * Stripe credentials (runtime.ts getStripeFulfilmentDeps).
+   * Hold-first modes: the deps and gateway that finish a provider's payments,
+   * the active config's for its own provider, else that provider's drain
+   * (after BOOKING_PAYMENT_PROVIDER moved away from it, its bookings already
+   * started are still checked and confirmed with its credentials). The routes
+   * pass runtime.ts providerDepsFor(config).
    */
+  providerDeps?: ProviderDepsFn;
+  /** Stripe shorthand, used only without providerDeps: the active config's Stripe deps. */
+  stripe?: StripeDeps;
+  /** Stripe shorthand, used only without providerDeps: the Stripe drain (runtime.ts getStripeFulfilmentDeps). */
   stripeDrain?: () => StripeDeps | null;
 }
 
 const NOT_APPLICABLE: FulfilmentView = { state: "not_applicable", reservationId: null };
+
+/**
+ * deps.providerDeps, else one made of the Stripe shorthand: `stripe` while the
+ * active config is a Stripe mode, `stripeDrain` otherwise.
+ */
+export function providerDepsOf(deps: {
+  config: BookingConfig;
+  providerDeps?: ProviderDepsFn;
+  stripe?: StripeDeps | null;
+  stripeDrain?: () => StripeDeps | null;
+}): ProviderDepsFn {
+  if (deps.providerDeps) return deps.providerDeps;
+  return (provider) => {
+    if (provider !== "stripe") return null;
+    const sd = providerOf(deps.config.paymentMode) === "stripe" ? deps.stripe : deps.stripeDrain?.();
+    return sd ? { deps: sd, gw: stripeGateway(sd) } : null;
+  };
+}
+
+/** The provider of a hold-first mode (one finished through a PaymentGateway), else null. */
+export function holdFirstProvider(mode: PaymentMode): PaymentGateway["provider"] | null {
+  const provider = providerOf(mode);
+  return isHoldFirstMode(mode) && provider !== "demo" ? provider : null;
+}
+
+/** An id in the shape the provider issues (Stripe: a Checkout Session id). No other provider's id is read from a request yet. */
+function isProviderPaymentId(provider: PaymentGateway["provider"], id: unknown): id is string {
+  return provider === "stripe" && isSessionId(id);
+}
+
+/**
+ * The payment key a return or cancel request names itself, before the
+ * pointer msv:booking:{ref} is read: the provider's id in the redirect (s:
+ * Stripe's {CHECKOUT_SESSION_ID}), else the link token's (l) when that token
+ * is this booking's. Only an id in the shape the provider issues counts.
+ */
+export function requestPaymentKey(s: unknown, l: unknown, booking: BookingSummary, tokenSecret: string, gw: PaymentGateway, nowMs: number): string | null {
+  if (isProviderPaymentId(gw.provider, s)) return gw.keyOf(s);
+  if (typeof l !== "string" || l === "") return null;
+  const link = verifyBookingToken(l, tokenSecret, nowMs);
+  if (!link.ok || link.payload.booking.ref !== booking.ref) return null;
+  const id = link.payload.paymentLinkId;
+  return isProviderPaymentId(gw.provider, id) ? gw.keyOf(id) : null;
+}
 
 export interface StatusResult {
   status: number;
@@ -116,10 +169,13 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
     };
   }
   const booking = verified.payload.booking;
-  if (booking.paymentMode !== config.paymentMode && providerOf(booking.paymentMode) === "stripe" && deps.stripeDrain) {
-    const drain = deps.stripeDrain();
-    if (drain && drain.config.paymentMode === booking.paymentMode) {
-      return stripeStatus(booking, params, { ...deps, config: drain.config, stripe: drain }, nowMs);
+  const providerDeps = providerDepsOf(deps);
+  const bookingProvider = holdFirstProvider(booking.paymentMode);
+  if (booking.paymentMode !== config.paymentMode && bookingProvider) {
+    // Drain: the booking's provider is no longer the active one (or runs in another mode).
+    const drain = providerDeps(bookingProvider);
+    if (drain && drain.deps.config.paymentMode === booking.paymentMode) {
+      return holdFirstStatus(booking, params, { config: drain.deps.config, log: deps.log }, drain, nowMs);
     }
   }
   if (booking.paymentMode !== config.paymentMode) {
@@ -140,7 +196,12 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
     return ok(booking, pendingOrExpired(booking, nowMs), null, nowMs);
   }
 
-  if (providerOf(config.paymentMode) === "stripe") return stripeStatus(booking, params, deps, nowMs);
+  const provider = holdFirstProvider(config.paymentMode);
+  if (provider) {
+    const active = providerDeps(provider);
+    if (!active) return { status: 503, body: { ok: false, error: "payment_unavailable", message: "Payment status is unavailable." } };
+    return holdFirstStatus(booking, params, deps, active, nowMs);
+  }
 
   if (!config.beam) {
     return { status: 503, body: { ok: false, error: "payment_unavailable", message: "Payment status is unavailable." } };
@@ -192,55 +253,64 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
   }
 }
 
-/* ------------------------------- Stripe ------------------------------- */
+/* ----------------------------- hold-first ----------------------------- */
 
-async function stripeStatus(booking: BookingSummary, params: StatusParams, deps: StatusDeps, nowMs: number): Promise<StatusResult> {
-  const sd = deps.stripe;
-  if (!sd) return { status: 503, body: { ok: false, error: "payment_unavailable", message: "Payment status is unavailable." } };
+/**
+ * A hold-first booking: the payment is re-read from its provider through the
+ * gateway (never trusted from the request), released when it can no longer be
+ * paid and fulfilled when paid. ctx.config is the config the booking belongs
+ * to (the active one, or its provider's drain); log names follow the provider
+ * (stripe_status_mismatch, ...).
+ */
+async function holdFirstStatus(
+  booking: BookingSummary,
+  params: StatusParams,
+  ctx: Pick<StatusDeps, "config" | "log">,
+  { deps, gw }: ProviderDeps,
+  nowMs: number,
+): Promise<StatusResult> {
   try {
-    // Session id: the success_url's {CHECKOUT_SESSION_ID}, else the link token, else what checkout recorded for the ref.
-    let sessionId: string | null = isSessionId(params.s) ? params.s : null;
-    if (!sessionId && params.l) {
-      const link = verifyBookingToken(params.l, deps.config.tokenSecret, nowMs);
-      if (link.ok && link.payload.booking.ref === booking.ref && isSessionId(link.payload.paymentLinkId)) sessionId = link.payload.paymentLinkId;
-    }
-    if (!sessionId) sessionId = (await bookingPointer(sd, booking.ref))?.sessionId ?? null;
-    if (!sessionId) return ok(booking, "pending", null, nowMs, { state: "awaiting_payment", reservationId: null });
+    // The key: the redirect's own id (Stripe: the success_url's {CHECKOUT_SESSION_ID}), else the link token, else what checkout recorded for the ref.
+    let key = requestPaymentKey(params.s, params.l, booking, ctx.config.tokenSecret, gw, nowMs);
+    if (!key) key = (await bookingPointer(deps, booking.ref))?.sessionId ?? null;
+    if (!key) return ok(booking, "pending", null, nowMs, { state: "awaiting_payment", reservationId: null });
 
-    const session = await retrieveSession(sd.stripe, sessionId);
-    const meta = parseSessionMeta(session);
-    // The session must be THIS booking's, for exactly the amount the token says.
-    if (!meta || meta.ref !== booking.ref || session.amount_total !== booking.dueNowSatang || (session.currency ?? "").toLowerCase() !== "thb") {
-      deps.log?.("stripe_status_mismatch", { ref: booking.ref, sessionId });
+    const payment = await gw.get(key);
+    const meta = payment.meta;
+    // The payment must be THIS booking's, for exactly the amount the token says.
+    if (!meta || meta.ref !== booking.ref || payment.amountSatang !== booking.dueNowSatang || (payment.currency ?? "").toLowerCase() !== "thb") {
+      ctx.log?.(`${gw.provider}_status_mismatch`, { ref: booking.ref, sessionId: key });
       return ok(booking, "failed", "AMOUNT_OR_REFERENCE_MISMATCH", nowMs, { state: "not_applicable", reservationId: null });
     }
-    const payment = sessionPaymentState(session);
-    if (payment === "open" || payment === "processing") {
+    const state = payment.state;
+    if (state === "open" || state === "processing") {
       return ok(booking, "pending", null, nowMs, { state: "awaiting_payment", reservationId: null });
     }
-    if (payment === "expired" || payment === "failed") {
+    if (state === "expired" || state === "failed") {
       // Best effort: the webhook/sweeper release it too.
-      await releaseSession(sessionId, sd, payment === "expired" ? "session expired" : "delayed payment failed").catch((e) =>
-        deps.log?.("stripe_status_release_failed", { ref: booking.ref, error: e instanceof Error ? e.message : String(e) }),
+      await releasePayment(key, deps, gw, state === "expired" ? `${gw.text.sessionLabel.short} expired` : "delayed payment failed").catch((e) =>
+        ctx.log?.(`${gw.provider}_status_release_failed`, { ref: booking.ref, error: e instanceof Error ? e.message : String(e) }),
       );
       const fulfilment: FulfilmentView = { state: "released", reservationId: null };
-      if (payment === "failed") return ok(booking, "failed", "PAYMENT_FAILED", nowMs, fulfilment);
-      const abandoned = (await sd.kv.get(keys.abandoned(sessionId))) !== null;
+      if (state === "failed") return ok(booking, "failed", "PAYMENT_FAILED", nowMs, fulfilment);
+      const abandoned = (await deps.kv.get(keys.abandoned(key))) !== null;
       return ok(booking, abandoned ? "cancelled" : "expired", null, nowMs, fulfilment);
     }
+    // Refunded at the provider (Stripe never reports it): never fulfilled from here.
+    if (state === "refunded") return ok(booking, "refunded", null, nowMs, NOT_APPLICABLE);
 
     // Paid: make sure the Cloudbeds reservation is confirmed (idempotent).
     let fulfilment: FulfilmentView = { state: "confirming", reservationId: null };
     try {
-      const outcome = await fulfilSession(sessionId, sd);
+      const outcome = await fulfilPayment(key, deps, gw);
       if (outcome.state === "confirmed") fulfilment = { state: "confirmed", reservationId: outcome.reservationId };
       else if (outcome.state === "needs_attention") fulfilment = { state: "needs_attention", reservationId: outcome.reservationId };
     } catch (e) {
-      await alertFulfilFailure(sd, sessionId, e);
+      await alertFulfilPaymentFailure(deps, gw, key, e);
     }
-    return ok(booking, "paid", null, nowMs, fulfilment, purchaseFor(deps.config, booking, fulfilment));
+    return ok(booking, "paid", null, nowMs, fulfilment, purchaseFor(ctx.config, booking, fulfilment));
   } catch (e) {
-    deps.log?.("stripe_status_failed", { ref: booking.ref, message: redactForLog(e instanceof Error ? e.message : String(e)) });
+    ctx.log?.(`${gw.provider}_status_failed`, { ref: booking.ref, message: redactForLog(e instanceof Error ? e.message : String(e)) });
     return { status: 502, body: { ok: false, error: "upstream_error", message: "We couldn't check the payment just now." } };
   }
 }

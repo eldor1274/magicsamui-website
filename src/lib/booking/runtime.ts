@@ -1,5 +1,8 @@
 // Builds the Stripe-mode dependencies for route handlers and server pages
 // (server only): Stripe client, Cloudbeds writer, KV store, alerts, logging.
+// getProviderDeps and getFulfilmentProviderDeps hand them out with the
+// provider's PaymentGateway, so status and abandon pick them by the booking's
+// provider (only Stripe has a gateway so far).
 //
 // - stripe-live: real Stripe, real Cloudbeds writer, Upstash Redis (config
 //   refuses live without Redis), alerts by email.
@@ -31,8 +34,9 @@ import { createFakeStripe } from "./mock/fakeStripe.ts";
 import type { FakeStripe } from "./mock/fakeStripe.ts";
 import { createStripeClient } from "./payments/stripe.ts";
 import type { StripeClient } from "./payments/stripe.ts";
+import { stripeGateway } from "./payments/stripeGateway.ts";
 import { logEvent } from "./routeUtils.ts";
-import type { AlertFn, StripeDeps } from "./stripeDeps.ts";
+import type { AlertFn, ProviderDeps, ProviderDepsFn, StripeDeps } from "./stripeDeps.ts";
 
 interface MockWorld {
   stripe: FakeStripe;
@@ -171,4 +175,33 @@ export function getStripeFulfilmentDeps(env: Record<string, string | undefined> 
     logEvent("stripe_drain_mode", { mode: drain.paymentMode });
   }
   return getStripeDeps(drain);
+}
+
+/** The active config's deps with its provider's gateway (Stripe: getStripeDeps), or null (demo; Beam has no gateway yet). */
+export function getProviderDeps(config: BookingConfig): ProviderDeps | null {
+  const deps = getStripeDeps(config);
+  return deps ? { deps, gw: stripeGateway(deps) } : null;
+}
+
+/**
+ * Deps for FINISHING one provider's payments (return page, abandon), with its
+ * gateway. Stripe: getStripeFulfilmentDeps (the normal config's, else the
+ * drain config's). null when that provider is not configured, and for Beam
+ * (no gateway yet). Never use this for checkout.
+ */
+export function getFulfilmentProviderDeps(env: Record<string, string | undefined>, provider: ProviderDeps["gw"]["provider"]): ProviderDeps | null {
+  if (provider !== "stripe") return null;
+  const deps = getStripeFulfilmentDeps(env);
+  return deps ? { deps, gw: stripeGateway(deps) } : null;
+}
+
+/**
+ * providerDeps for the status and abandon routes and the return page's server
+ * render: the active config's deps, built at once (as the routes always did),
+ * for its own provider; any other provider's fulfilment deps (its drain) are
+ * built only when a booking of that provider asks for them.
+ */
+export function providerDepsFor(config: BookingConfig, env: Record<string, string | undefined> = process.env): ProviderDepsFn {
+  const active = getProviderDeps(config);
+  return (provider) => (active && active.gw.provider === provider ? active : getFulfilmentProviderDeps(env, provider));
 }

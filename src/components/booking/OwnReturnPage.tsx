@@ -3,7 +3,7 @@ import BookingThemeRoot from "@/components/booking/BookingThemeRoot";
 import ReturnStatus from "@/components/booking/return/ReturnStatus";
 import { getFulfilmentConfig, getPublicBookingConfig } from "@/lib/booking/config";
 import { createRateLimiter, ipFromHeaders } from "@/lib/booking/routeUtils";
-import { getStripeDeps, getStripeFulfilmentDeps } from "@/lib/booking/runtime";
+import { providerDepsFor } from "@/lib/booking/runtime";
 import { runStatus } from "@/lib/booking/status";
 import { parseTheme } from "@/lib/booking/theme";
 import type { ApiError, StatusResponse } from "@/lib/booking/types";
@@ -34,8 +34,9 @@ async function initialStatus(t: string | null, p: string | null, s: string | nul
   try {
     // getFulfilmentConfig: the emergency stop (BOOKING_ALLOW_LIVE_PAYMENTS=false) blocks NEW charges only;
     // a guest who already paid must still see (and get) a confirmed booking.
+    // The provider's deps are picked by the booking's provider, exactly as the status API does.
     const config = getFulfilmentConfig();
-    const result = await runStatus({ t, p, l: null, s }, { config, stripe: getStripeDeps(config) ?? undefined, stripeDrain: () => getStripeFulfilmentDeps() });
+    const result = await runStatus({ t, p, l: null, s }, { config, providerDeps: providerDepsFor(config) });
     return result.body;
   } catch {
     return { ok: false, error: "payment_unavailable", message: "We couldn't check this payment right now. Please refresh in a moment." };
