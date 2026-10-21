@@ -29,9 +29,13 @@ export type RestrictionsFn = (
   promo?: PromoRestrictionInput | null,
 ) => Promise<RestrictionResult>;
 
-export interface StripeDeps {
+/**
+ * What the hold-first flow needs whatever takes the money: holds, releases,
+ * the checks before a hold and alert re-sends never touch the payment
+ * provider, so they take only these.
+ */
+export interface CoreDeps {
   config: BookingConfig;
-  stripe: StripeClient;
   writer: CloudbedsWriter;
   kv: KvStore;
   alert: AlertFn;
@@ -41,6 +45,9 @@ export interface StripeDeps {
   now?: () => number;
 }
 
-export function nowOf(deps: Pick<StripeDeps, "now">): number {
+/** CoreDeps plus the Stripe client (checkout sessions, fulfil, sweep, status). */
+export type StripeDeps = CoreDeps & { stripe: StripeClient };
+
+export function nowOf(deps: Pick<CoreDeps, "now">): number {
   return deps.now ? deps.now() : Date.now();
 }

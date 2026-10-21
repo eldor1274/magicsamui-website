@@ -51,7 +51,7 @@ import type { BookingPointer, HoldRecord, PaidPending } from "./lock.ts";
 import { chargeId, isMissingSessionError, isNotOpenError, parseSessionMeta, paymentIntentId, retrieveSession, sessionPaymentState } from "./payments/stripe.ts";
 import type { CheckoutSession, SessionMeta, SessionPaymentState } from "./payments/stripe.ts";
 import { satangToBahtString } from "./quote.ts";
-import type { StripeDeps } from "./stripeDeps.ts";
+import type { CoreDeps, StripeDeps } from "./stripeDeps.ts";
 import { nowOf } from "./stripeDeps.ts";
 
 export interface FulfilDone {
@@ -113,7 +113,7 @@ export const PAYMENT_DOUBT_COOLDOWN_MS = 10 * 60_000;
 const MOCK_WRITER_PAYMENT_METHOD = "mock-stripe";
 
 /** Prefix for everything written to Cloudbeds outside live mode. */
-export function testMoneyLabel(deps: Pick<StripeDeps, "config">): string {
+export function testMoneyLabel(deps: Pick<CoreDeps, "config">): string {
   return deps.config.paymentMode === "stripe-live" ? "" : "TEST MODE - NOT REAL MONEY. ";
 }
 
@@ -524,7 +524,7 @@ export async function alertPaidStuck(deps: StripeDeps, paid: PaidPending, detail
  */
 export async function releaseHold(
   reservationId: string,
-  deps: StripeDeps,
+  deps: CoreDeps,
   reason: string,
   options: {
     /**
@@ -661,10 +661,10 @@ export async function abandonSession(sessionId: string, deps: StripeDeps, expect
 }
 
 /** Where the session id for a booking ref was recorded at checkout (status/abandon fallback). */
-export async function bookingPointer(deps: Pick<StripeDeps, "kv">, ref: string): Promise<BookingPointer | null> {
+export async function bookingPointer(deps: Pick<CoreDeps, "kv">, ref: string): Promise<BookingPointer | null> {
   return readJson<BookingPointer>(deps.kv, keys.booking(ref));
 }
 
-export async function holdRecord(deps: Pick<StripeDeps, "kv">, reservationId: string): Promise<HoldRecord | null> {
+export async function holdRecord(deps: Pick<CoreDeps, "kv">, reservationId: string): Promise<HoldRecord | null> {
   return readJson<HoldRecord>(deps.kv, keys.hold(reservationId));
 }

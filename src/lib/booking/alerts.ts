@@ -17,7 +17,7 @@
 import { createHash } from "node:crypto";
 import type { KvStore } from "./kv.ts";
 import { keys, readJson, writeJson } from "./lock.ts";
-import type { AlertFn, AlertSeverity, LogFn } from "./stripeDeps.ts";
+import type { AlertFn, AlertSeverity, CoreDeps, LogFn } from "./stripeDeps.ts";
 
 /** Repeat suppression window once an alert was delivered. */
 export const ALERT_WINDOW_SECONDS = 6 * 3600;
@@ -141,7 +141,7 @@ export function createAlerter(options: AlerterOptions): AlertFn {
  * sweeper). Returns how many were still undelivered at the start of the run.
  */
 export async function resendPendingAlerts(
-  deps: { kv: KvStore; alert: AlertFn; log: LogFn },
+  deps: Pick<CoreDeps, "kv" | "alert" | "log">,
   scope: string,
   nowMs: number,
   limit = 20,

@@ -40,7 +40,7 @@ import type { HoldRecord, Lock } from "./lock.ts";
 import { buildCheckoutSessionParams, isStripeCheckoutUrl, stripeErrorInfo } from "./payments/stripe.ts";
 import type { CheckoutSession } from "./payments/stripe.ts";
 import { bookingItemDiscount, satangToBahtString } from "./quote.ts";
-import type { StripeDeps } from "./stripeDeps.ts";
+import type { CoreDeps, StripeDeps } from "./stripeDeps.ts";
 import { STALE_HOLD_MS, SWEEP_STALE_ALERT_MS } from "./sweep.ts";
 import { hasTestAccess } from "./testAccess.ts";
 import { createBookingToken, generateBookingRef, generateNonce } from "./token.ts";
@@ -411,7 +411,7 @@ export async function slugsOverlappingOpenHolds(
  * availability). One failure is a blip; several within half an hour mean the
  * read key, its scopes or Cloudbeds itself: every guest is being turned away.
  */
-export async function noteCheckoutReadFailure(deps: Pick<StripeDeps, "kv" | "alert" | "log" | "config">, step: string, error: string): Promise<void> {
+export async function noteCheckoutReadFailure(deps: Pick<CoreDeps, "kv" | "alert" | "log" | "config">, step: string, error: string): Promise<void> {
   try {
     const n = await deps.kv.incr(keys.checkoutReadFailures(keyScope(deps.config.paymentMode)), 30 * 60);
     if (n < READ_FAILURE_ALERT_COUNT) return;
@@ -435,7 +435,7 @@ export async function noteCheckoutReadFailure(deps: Pick<StripeDeps, "kv" | "ale
  * (the configured plan prefixes). null = the base rate - or a discount the deployment can't confirm, which the
  * check then refuses as derived.
  */
-function selectedDiscount(inv: RoomInventory | undefined, input: StripeCheckoutInput, deps: StripeDeps): PromoRestrictionInput | null {
+function selectedDiscount(inv: RoomInventory | undefined, input: StripeCheckoutInput, deps: CoreDeps): PromoRestrictionInput | null {
   const d = inv?.discount;
   if (!d) return null;
   if (d.kind === "direct") return input.promo ? { cloudbedsCode: input.promo.cloudbedsCode, baseRateId: d.baseRateId } : null;
@@ -444,7 +444,7 @@ function selectedDiscount(inv: RoomInventory | undefined, input: StripeCheckoutI
 }
 
 /** Our own open holds, then restrictions + availability fresh from Cloudbeds. Runs under the unit lock. null = clear to hold. */
-async function checkBeforeHold(input: StripeCheckoutInput, deps: StripeDeps, nowMs: number): Promise<StripeCheckoutResult | null> {
+async function checkBeforeHold(input: StripeCheckoutInput, deps: CoreDeps, nowMs: number): Promise<StripeCheckoutResult | null> {
   let overlapping: string[];
   try {
     overlapping = await slugsOverlappingOpenHolds(deps.kv, input.items, input.checkIn, input.checkOut, nowMs);
@@ -1140,7 +1140,7 @@ export function rateNotForSourceFix(message: string, input: Pick<StripeCheckoutI
 async function holdFailed(
   e: unknown,
   input: StripeCheckoutInput,
-  deps: StripeDeps,
+  deps: CoreDeps,
   ref: string,
   settleIntent: () => Promise<unknown>,
 ): Promise<StripeCheckoutResult> {
