@@ -1,17 +1,25 @@
-// Fulfilment and release of Stripe-paid bookings (WI-6, WI-7 server side).
+// Fulfilment and release of bookings paid online (WI-6, WI-7 server side).
 //
-// fulfilSession(sessionId): turns a PAID Checkout Session into a confirmed
+// The payment provider is reached only through its PaymentGateway
+// (payments/gateway.ts): gw.get re-reads a payment, gw.cancel closes its page,
+// and gw.brand / gw.text hold every provider word written to Cloudbeds and the
+// alerts. Every Redis key is built from the payment's key (Stripe: the Checkout
+// Session id), so the live Stripe keys keep their names. fulfilSession,
+// releaseSession, abandonSession, alertFulfilFailure and alertPaidStuck are the
+// Stripe wrappers (stripeGateway) with their old signatures.
+//
+// fulfilPayment(key, deps, gw): turns a PAID payment into a confirmed
 // Cloudbeds reservation. Called by the webhook, the return page (status) and
 // the sweeper - possibly at the same time - so it is idempotent:
 //   1. 30-day done marker -> return at once;
 //   2. SET NX lock (120 s) -> a second caller gets "in_progress";
-//   3. re-read the session from Stripe (never trust the caller): paid, ours,
-//      amount = metadata total, currency thb, livemode = ours;
+//   3. re-read the payment from the provider (never trust the caller): paid,
+//      ours, amount = metadata total, currency thb, mode = ours;
 //   4. mark the reservation "paid" BEFORE any write, so release() can never
-//      cancel it from now on, and list the session as paid-but-unfinished
-//      (the sweeper retries it beyond Stripe's own retries and escalates it);
-//      then a best-effort note on the reservation: "PAID via Stripe - do NOT
-//      cancel" (so staff never take it for a stale unpaid hold);
+//      cancel it from now on, and list the payment as paid-but-unfinished
+//      (the sweeper retries it beyond the provider's own retries and escalates
+//      it); then a best-effort note on the reservation: "PAID via Stripe - do
+//      NOT cancel" (so staff never take it for a stale unpaid hold);
 //   5. fee line via postCustomItem (referenceID dedupes) + step marker - but
 //      nothing is posted when the folio already carries additional items (a
 //      fresh hold has none: added by hand, or by an earlier post whose answer
@@ -20,8 +28,8 @@
 //      booking confirmed, the fee is retried once more after confirming
 //      (or before step 6 hands the booking to the owner as needs_attention),
 //      and the owner is alerted if it still did not succeed (to check the folio: it may have landed);
-//   6. postPayment (custom "Stripe" method, baht, Stripe ids in the
-//      description) unless the folio already shows it paid + step marker.
+//   6. postPayment (the provider's custom method, e.g. "Stripe", baht, its
+//      ids in the description) unless the folio already shows it paid + step marker.
 //      postPayment has no dedupe key, so the attempt is CLAIMED (with its
 //      time) before it is sent: when its answer is lost (timeout, 5xx) a retry
 //      does not post again until the folio has had PAYMENT_DOUBT_COOLDOWN_MS
@@ -35,22 +43,24 @@
 //      added no taxes/fees of its own (alert if not);
 //   8. done marker; drop the hold from the open-holds and paid indexes; notify the owner.
 // Outside live mode every text written to Cloudbeds starts with
-// "TEST MODE - NOT REAL MONEY" (and CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD can
-// route test money to its own Cloudbeds payment method).
+// "TEST MODE - NOT REAL MONEY" (and the provider's test method variable, e.g.
+// CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD, can route test money to its own
+// Cloudbeds payment method).
 //
 // releaseHold(reservationId): cancels an unpaid hold (putReservation
 // status=canceled) under its own lock - but NEVER when a paid marker exists,
 // the folio shows a payment, the guest is checked in, or staff confirmed a
-// hold we had marked pending. releaseSession(sessionId) only releases when
-// Stripe says the session is expired or its delayed payment failed.
+// hold we had marked pending. releasePayment(key) only releases when the
+// provider says the payment can no longer be paid (Stripe: the session is
+// expired or its delayed payment failed).
 
 import { CloudbedsWriteError, redactForLog } from "./cloudbedsWrite.ts";
 import type { ReservationInfo } from "./cloudbedsWrite.ts";
 import { closeHold, keyScope, keys, readJson, withLock, writeJson, DONE_TTL_SECONDS } from "./lock.ts";
 import type { BookingPointer, HoldRecord, PaidPending } from "./lock.ts";
+import type { GatewayPayment, GatewayState, PaymentGateway, PaymentMeta } from "./payments/gateway.ts";
 import { isLiveMode } from "./payments/provider.ts";
-import { chargeId, isMissingSessionError, isNotOpenError, parseSessionMeta, paymentIntentId, retrieveSession, sessionPaymentState } from "./payments/stripe.ts";
-import type { CheckoutSession, SessionMeta, SessionPaymentState } from "./payments/stripe.ts";
+import { stripeGateway } from "./payments/stripeGateway.ts";
 import { satangToBahtString } from "./quote.ts";
 import type { CoreDeps, StripeDeps } from "./stripeDeps.ts";
 import { nowOf } from "./stripeDeps.ts";
@@ -68,7 +78,7 @@ export type FulfilOutcome =
   | { state: "confirmed"; reservationId: string; ref: string; totalSatang: number; alreadyDone: boolean }
   | { state: "needs_attention"; reservationId: string; ref: string; reason: string }
   | { state: "in_progress" }
-  | { state: "not_paid"; payment: SessionPaymentState }
+  | { state: "not_paid"; payment: GatewayState }
   | { state: "not_ours" };
 
 export type ReleaseOutcome =
@@ -100,7 +110,7 @@ export function feeItemFor(mode: string): { appItemId: string; itemSku: string; 
       };
 }
 
-/** A paid session still not confirmed after this long is escalated to a CRITICAL (stored, re-sent) alert. */
+/** A paid payment still not confirmed after this long is escalated to a CRITICAL (stored, re-sent) alert. */
 export const PAID_UNCONFIRMED_ESCALATE_MS = 2 * 3600_000;
 
 /**
@@ -118,81 +128,82 @@ export function testMoneyLabel(deps: Pick<CoreDeps, "config">): string {
   return isLiveMode(deps.config.paymentMode) ? "" : "TEST MODE - NOT REAL MONEY. ";
 }
 
-/** True when the session belongs to this deployment's Stripe mode (test vs live). */
-function modeMatches(session: Pick<CheckoutSession, "livemode">, deps: StripeDeps): boolean {
-  return session.livemode === (deps.config.stripe?.livemode ?? false);
-}
-
 function money(satang: number): string {
   // A folio balance can be negative (a credit): never throw while reporting it.
   return satang < 0 ? `-THB ${satangToBahtString(-satang)}` : `THB ${satangToBahtString(satang)}`;
 }
 
-async function markDone(deps: StripeDeps, sessionId: string, done: FulfilDone): Promise<void> {
-  await writeJson(deps.kv, keys.fulfilDone(sessionId), done, DONE_TTL_SECONDS);
+async function markDone(deps: CoreDeps, key: string, done: FulfilDone): Promise<void> {
+  await writeJson(deps.kv, keys.fulfilDone(key), done, DONE_TTL_SECONDS);
   await closeHold(deps.kv, done.reservationId);
-  await deps.kv.zrem(keys.paidIndex(keyScope(deps.config.paymentMode)), sessionId).catch(() => undefined);
+  await deps.kv.zrem(keys.paidIndex(keyScope(deps.config.paymentMode)), key).catch(() => undefined);
 }
 
-/** Lists a paid session as not yet fulfilled (until its done marker exists); keeps the first "paid" time. */
-async function notePaid(deps: StripeDeps, sessionId: string, meta: SessionMeta): Promise<void> {
-  const existing = await readJson<PaidPending>(deps.kv, keys.paidPending(sessionId));
+/** Lists a paid payment as not yet fulfilled (until its done marker exists); keeps the first "paid" time. */
+async function notePaid(deps: CoreDeps, key: string, meta: PaymentMeta): Promise<void> {
+  const existing = await readJson<PaidPending>(deps.kv, keys.paidPending(key));
   const rec: PaidPending = existing ?? {
-    sessionId,
+    sessionId: key,
     ref: meta.ref,
     reservationId: meta.reservationId,
     totalSatang: meta.totalSatang,
     paidAt: nowOf(deps),
     mode: deps.config.paymentMode,
   };
-  if (!existing) await writeJson(deps.kv, keys.paidPending(sessionId), rec, DONE_TTL_SECONDS);
-  await deps.kv.zadd(keys.paidIndex(keyScope(deps.config.paymentMode)), rec.paidAt, sessionId);
+  if (!existing) await writeJson(deps.kv, keys.paidPending(key), rec, DONE_TTL_SECONDS);
+  await deps.kv.zadd(keys.paidIndex(keyScope(deps.config.paymentMode)), rec.paidAt, key);
+}
+
+/** fulfilPayment for a Stripe Checkout Session (key = the session id). */
+export async function fulfilSession(sessionId: string, deps: StripeDeps): Promise<FulfilOutcome> {
+  return fulfilPayment(sessionId, deps, stripeGateway(deps));
 }
 
 /**
- * Confirms a paid session in Cloudbeds. Never throws for "not paid" or "not
- * ours"; throws on transient failures (Cloudbeds/Stripe down) so the webhook
- * answers 5xx and Stripe retries (the sweeper and the return page retry too).
+ * Confirms a paid payment in Cloudbeds. Never throws for "not paid" or "not
+ * ours"; throws on transient failures (Cloudbeds or the provider down) so the
+ * webhook answers 5xx and the provider retries (the sweeper and the return
+ * page retry too).
  */
-export async function fulfilSession(sessionId: string, deps: StripeDeps): Promise<FulfilOutcome> {
-  const done = await readJson<FulfilDone>(deps.kv, keys.fulfilDone(sessionId));
+export async function fulfilPayment(key: string, deps: CoreDeps, gw: PaymentGateway): Promise<FulfilOutcome> {
+  const done = await readJson<FulfilDone>(deps.kv, keys.fulfilDone(key));
   if (done) {
     return done.state === "confirmed"
       ? { state: "confirmed", reservationId: done.reservationId, ref: done.ref, totalSatang: done.totalSatang, alreadyDone: true }
       : { state: "needs_attention", reservationId: done.reservationId, ref: done.ref, reason: done.reason ?? "needs attention" };
   }
 
-  const locked = await withLock(deps.kv, keys.fulfilLock(sessionId), () => fulfilLocked(sessionId, deps));
+  const locked = await withLock(deps.kv, keys.fulfilLock(key), () => fulfilLocked(key, deps, gw));
   if (!locked.acquired) return { state: "in_progress" };
   return locked.value;
 }
 
-async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<FulfilOutcome> {
+async function fulfilLocked(key: string, deps: CoreDeps, gw: PaymentGateway): Promise<FulfilOutcome> {
   // Re-check under the lock: another caller may have finished in between.
-  const done = await readJson<FulfilDone>(deps.kv, keys.fulfilDone(sessionId));
+  const done = await readJson<FulfilDone>(deps.kv, keys.fulfilDone(key));
   if (done) {
     return done.state === "confirmed"
       ? { state: "confirmed", reservationId: done.reservationId, ref: done.ref, totalSatang: done.totalSatang, alreadyDone: true }
       : { state: "needs_attention", reservationId: done.reservationId, ref: done.ref, reason: done.reason ?? "needs attention" };
   }
 
-  const session = await retrieveSession(deps.stripe, sessionId);
-  const meta = parseSessionMeta(session);
-  if (!meta || !modeMatches(session, deps)) return { state: "not_ours" };
-  const payment = sessionPaymentState(session);
-  if (payment !== "paid") return { state: "not_paid", payment };
+  const payment: GatewayPayment = await gw.get(key);
+  const meta = payment.meta;
+  if (!meta) return { state: "not_ours" };
+  if (payment.state !== "paid") return { state: "not_paid", payment: payment.state };
 
   const { reservationId, ref } = meta;
   // From here on this reservation must never be released, whatever happens below.
-  await deps.kv.set(keys.reservationPaid(reservationId), sessionId, DONE_TTL_SECONDS);
-  await notePaid(deps, sessionId, meta);
+  await deps.kv.set(keys.reservationPaid(reservationId), key, DONE_TTL_SECONDS);
+  await notePaid(deps, key, meta);
 
-  const pi = paymentIntentId(session) ?? "-";
-  const charge = chargeId(session) ?? "-";
+  const pi = payment.receipt.primaryId ?? "-";
+  const brand = gw.brand;
+  const text = gw.text;
   const label = testMoneyLabel(deps);
 
   // Staff must never take a paid booking for a stale unpaid hold, even while confirming it keeps failing.
-  if ((await deps.kv.get(keys.fulfilStep(sessionId, "paid-note"))) === null) {
+  if ((await deps.kv.get(keys.fulfilStep(key, "paid-note"))) === null) {
     // "After 11 PM" lived only in the best-effort pre-payment note: repeat it here.
     const lateArrival = meta.arrivalLate === true ? "\nEstimated arrival: after 11 PM." : "";
     // Which booking terms the guest agreed to (unknown on sessions created before msv_terms existed).
@@ -201,10 +212,10 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
     try {
       await deps.writer.addNote(
         reservationId,
-        `${label}PAID via Stripe ${pi} (${money(meta.totalSatang)}) for online booking ${ref} - do NOT cancel. The "cancelled automatically if unpaid" rule no longer applies.${terms}${lateArrival}`,
+        `${label}PAID ${text.paidVia(payment.receipt, money(meta.totalSatang))} for online booking ${ref} - do NOT cancel. The "cancelled automatically if unpaid" rule no longer applies.${terms}${lateArrival}`,
       );
       paidNoteSaved = true;
-      await deps.kv.set(keys.fulfilStep(sessionId, "paid-note"), "1", DONE_TTL_SECONDS);
+      await deps.kv.set(keys.fulfilStep(key, "paid-note"), "1", DONE_TTL_SECONDS);
     } catch (e) {
       deps.log("fulfil_paid_note_failed", { ref, reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) });
     }
@@ -225,17 +236,18 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
     }
   }
 
-  if (session.amount_total !== meta.totalSatang || (session.currency ?? "").toLowerCase() !== "thb") {
-    return needsAttention(deps, sessionId, meta, `Stripe amount ${session.amount_total} ${session.currency} does not match the booking total ${meta.totalSatang} satang`);
+  if (payment.amountSatang !== meta.totalSatang || (payment.currency ?? "").toLowerCase() !== "thb") {
+    return needsAttention(deps, gw, key, meta, `${brand} amount ${payment.amountSatang} ${payment.currency} does not match the booking total ${meta.totalSatang} satang`);
   }
 
   const reservation = await deps.writer.getReservation(reservationId);
   if (reservation.status === "canceled") {
     return needsAttention(
       deps,
-      sessionId,
+      gw,
+      key,
       meta,
-      "The guest PAID but the Cloudbeds hold is CANCELLED. Re-instate or re-book the guest in Cloudbeds (if the unit is still free) or refund in Stripe.",
+      `The guest PAID but the Cloudbeds hold is CANCELLED. Re-instate or re-book the guest in Cloudbeds (if the unit is still free) or refund ${text.refundWhere}.`,
     );
   }
   // Last resort, never blocking: Cloudbeds should file it under the fee-free source sent (s-N and s-N-1 are the same source).
@@ -260,19 +272,19 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
   const itemsBefore = reservation.additionalItemsSatang;
   let feeSkipped = false;
   const addFee = async (): Promise<boolean> => {
-    if (meta.feeSatang <= 0 || (await deps.kv.get(keys.fulfilStep(sessionId, "fee"))) !== null) return true;
+    if (meta.feeSatang <= 0 || (await deps.kv.get(keys.fulfilStep(key, "fee"))) !== null) return true;
     if (itemsBefore !== null && itemsBefore > 0) {
       feeSkipped = true;
       deps.log("fulfil_fee_item_skipped", { ref, reservationId, additionalItemsSatang: itemsBefore });
       await deps.alert(
         `Booking ${ref}: the processing fee line was not added (the folio already has items)`,
         [
-          `Cloudbeds reservation ${reservationId} (paid ${money(meta.totalSatang)} via Stripe, ${pi}) already carried additional items of ${money(itemsBefore)} before we added our "${FEE_ITEM_NAME}" line (${money(meta.feeSatang)}), so we did NOT add it: it may have been added by hand, or by an earlier attempt whose answer was lost.`,
+          `Cloudbeds reservation ${reservationId} (paid ${money(meta.totalSatang)} via ${brand}, ${pi}) already carried additional items of ${money(itemsBefore)} before we added our "${FEE_ITEM_NAME}" line (${money(meta.feeSatang)}), so we did NOT add it: it may have been added by hand, or by an earlier attempt whose answer was lost.`,
           `Open the folio: exactly one "${FEE_ITEM_NAME}" line of ${money(meta.feeSatang)} should be listed. If none is, add it once by hand; if there are two, remove one.`,
         ],
         { key: `fee-skipped:${reservationId}`, severity: "warning" },
       );
-      await deps.kv.set(keys.fulfilStep(sessionId, "fee"), "1", DONE_TTL_SECONDS);
+      await deps.kv.set(keys.fulfilStep(key, "fee"), "1", DONE_TTL_SECONDS);
       return true;
     }
     try {
@@ -281,7 +293,7 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
       deps.log("fulfil_fee_item_failed", { ref, reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) });
       return false;
     }
-    await deps.kv.set(keys.fulfilStep(sessionId, "fee"), "1", DONE_TTL_SECONDS);
+    await deps.kv.set(keys.fulfilStep(key, "fee"), "1", DONE_TTL_SECONDS);
     return true;
   };
   let feeOk = await addFee();
@@ -294,7 +306,8 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
     if (!feeOk) feeOk = await addFee();
     return needsAttention(
       deps,
-      sessionId,
+      gw,
+      key,
       meta,
       feeOk ? reason : `${reason} ALSO: ${feeByHand}`,
     );
@@ -303,8 +316,8 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
   // 6. Payment. postPayment has no dedupe key: the step marker, the attempt
   // claim and the folio's own "paid" figure guard against posting it twice
   // (a lost response followed by a retry while Cloudbeds is still committing it).
-  if ((await deps.kv.get(keys.fulfilStep(sessionId, "payment"))) === null) {
-    const attemptKey = keys.fulfilStep(sessionId, "payment-attempt");
+  if ((await deps.kv.get(keys.fulfilStep(key, "payment"))) === null) {
+    const attemptKey = keys.fulfilStep(key, "payment-attempt");
     const before = await deps.writer.getReservation(reservationId);
     const attemptRaw = await deps.kv.get(attemptKey);
     const attemptAt = attemptRaw === null ? null : Number(attemptRaw);
@@ -321,7 +334,7 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
           reservationId,
           amountSatang: meta.totalSatang,
           method,
-          description: `${label}Stripe ${pi} charge ${charge} session ${sessionId} ref ${ref}`,
+          description: `${label}${text.paymentDescription(payment.receipt, ref)}`,
         });
       } catch (e) {
         // Refused outright (never processed): the next retry may post at once.
@@ -335,13 +348,13 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
       // We only ever post the full amount: a part on the folio was recorded by hand. Posting the full amount
       // on top would count money twice, so a person settles it.
       return paymentAttention(
-        `PART OF THE PAYMENT IS ALREADY ON THE FOLIO: Cloudbeds reservation ${reservationId} shows ${money(before.paidSatang)} paid of the ${money(meta.totalSatang)} the guest paid via Stripe (${pi}), so someone recorded part of it by hand. We did NOT record the Stripe payment, so nothing is counted twice. Do NOT cancel: the guest has paid. Make the folio show the full ${money(meta.totalSatang)} once (add the missing ${money(meta.totalSatang - before.paidSatang)} or correct the manual entry, with the Stripe payment method), then set the reservation to Confirmed.`,
+        `PART OF THE PAYMENT IS ALREADY ON THE FOLIO: Cloudbeds reservation ${reservationId} shows ${money(before.paidSatang)} paid of the ${money(meta.totalSatang)} the guest paid via ${brand} (${pi}), so someone recorded part of it by hand. We did NOT record the ${brand} payment, so nothing is counted twice. Do NOT cancel: the guest has paid. Make the folio show the full ${money(meta.totalSatang)} once (add the missing ${money(meta.totalSatang - before.paidSatang)} or correct the manual entry, with the ${brand} payment method), then set the reservation to Confirmed.`,
       );
     } else if (attemptAt !== null && Number.isFinite(attemptAt)) {
       // An earlier postPayment may have landed without us seeing the answer.
       if (before.paidSatang === null) {
         return paymentAttention(
-          `PAYMENT RECORD IN DOUBT: recording the Stripe payment in Cloudbeds got no clear answer, and the folio's paid amount can't be read. Check reservation ${reservationId}: if the ${money(meta.totalSatang)} Stripe payment (${pi}) is not on the folio, add it once with the Stripe payment method; then set the reservation to Confirmed. Do not add it twice.`,
+          `PAYMENT RECORD IN DOUBT: recording the ${brand} payment in Cloudbeds got no clear answer, and the folio's paid amount can't be read. Check reservation ${reservationId}: if the ${money(meta.totalSatang)} ${brand} payment (${pi}) is not on the folio, add it once with the ${brand} payment method; then set the reservation to Confirmed. Do not add it twice.`,
         );
       }
       if (nowOf(deps) - attemptAt < PAYMENT_DOUBT_COOLDOWN_MS) {
@@ -354,7 +367,7 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
     } else {
       await post();
     }
-    await deps.kv.set(keys.fulfilStep(sessionId, "payment"), "1", DONE_TTL_SECONDS);
+    await deps.kv.set(keys.fulfilStep(key, "payment"), "1", DONE_TTL_SECONDS);
   }
 
   // 7. Confirm - only a reservation still "Confirmation pending". One staff already confirmed, checked in
@@ -367,9 +380,10 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
   } else if (current.status !== "confirmed") {
     return needsAttention(
       deps,
-      sessionId,
+      gw,
+      key,
       meta,
-      `The guest PAID (${money(meta.totalSatang)} via Stripe, ${pi}) and the payment is recorded on the folio, but Cloudbeds reservation ${reservationId} is "${String(current.status).slice(0, 30)}", so it was not confirmed automatically. Check it in Cloudbeds: re-instate and confirm it, or refund in Stripe.`,
+      `The guest PAID (${money(meta.totalSatang)} via ${brand}, ${pi}) and the payment is recorded on the folio, but Cloudbeds reservation ${reservationId} is "${String(current.status).slice(0, 30)}", so it was not confirmed automatically. Check it in Cloudbeds: re-instate and confirm it, or refund ${text.refundWhere}.`,
     );
   }
   const feeWasMissing = !feeOk;
@@ -378,7 +392,7 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
     await deps.alert(
       `Booking ${ref}: the processing fee line is missing in Cloudbeds`,
       [
-        `Cloudbeds reservation ${reservationId} is paid (${money(meta.totalSatang)} via Stripe, ${pi}) and confirmed, but ${feeByHand}`,
+        `Cloudbeds reservation ${reservationId} is paid (${money(meta.totalSatang)} via ${brand}, ${pi}) and confirmed, but ${feeByHand}`,
         "If this repeats, check that the booking API key has the write:item scope.",
       ],
       { key: `fee-missing:${reservationId}`, severity: "warning" },
@@ -391,7 +405,7 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
     await deps.alert(
       `Booking ${ref}: Cloudbeds added taxes/fees on top of our fee line`,
       [
-        `Cloudbeds reservation ${reservationId} is paid (${money(meta.totalSatang)} via Stripe, ${pi}) and confirmed, but its folio also carries Cloudbeds taxes/fees of ${money(final.taxesFeesSatang ?? 0)} on top of our "${FEE_ITEM_NAME}" line${final.balanceSatang !== null ? ` (balance ${money(final.balanceSatang)})` : ""}. The guest may be asked to pay twice.`,
+        `Cloudbeds reservation ${reservationId} is paid (${money(meta.totalSatang)} via ${brand}, ${pi}) and confirmed, but its folio also carries Cloudbeds taxes/fees of ${money(final.taxesFeesSatang ?? 0)} on top of our "${FEE_ITEM_NAME}" line${final.balanceSatang !== null ? ` (balance ${money(final.balanceSatang)})` : ""}. The guest may be asked to pay twice.`,
         `Remove the Cloudbeds tax/fee with a negative Adjustment on this folio, and check the reservation source in Cloudbeds (Settings > Property > Sources): the source of online bookings (${deps.config.cloudbedsSourceId ? `CLOUDBEDS_SOURCE_ID ${deps.config.cloudbedsSourceId}` : "CLOUDBEDS_SOURCE_ID is not set"}) must carry no taxes or fees.`,
       ],
       { key: `taxes-fees:${reservationId}`, severity: "warning" },
@@ -400,68 +414,73 @@ async function fulfilLocked(sessionId: string, deps: StripeDeps): Promise<Fulfil
     await deps.alert(
       `Booking ${ref}: Cloudbeds balance is not zero after payment`,
       [
-        `Cloudbeds reservation ${reservationId} shows a balance of ${money(final.balanceSatang)} after we recorded ${money(meta.totalSatang)} from Stripe.`,
+        `Cloudbeds reservation ${reservationId} shows a balance of ${money(final.balanceSatang)} after we recorded ${money(meta.totalSatang)} from ${brand}.`,
         "The reservation is confirmed. Please check the folio (taxes, a rate change or a second fee line in Cloudbeds?).",
       ],
       { key: `balance:${reservationId}`, severity: "warning" },
     );
   }
 
-  await markDone(deps, sessionId, { state: "confirmed", reservationId, ref, totalSatang: meta.totalSatang, at: nowOf(deps) });
+  await markDone(deps, key, { state: "confirmed", reservationId, ref, totalSatang: meta.totalSatang, at: nowOf(deps) });
   deps.log("fulfil_confirmed", { ref, reservationId, amount: meta.totalSatang, mode: deps.config.paymentMode });
   await deps.alert(
     `New direct booking ${ref} confirmed (${money(meta.totalSatang)})`,
     [
       `Cloudbeds reservation ${reservationId}, ${meta.checkIn} to ${meta.checkOut}.`,
-      `Paid ${money(meta.totalSatang)} via Stripe (${pi}); the payment${feeOk && !feeSkipped ? " and the fee line are" : " is"} on the folio and the reservation is confirmed.`,
+      `Paid ${money(meta.totalSatang)} via ${brand} (${pi}); the payment${feeOk && !feeSkipped ? " and the fee line are" : " is"} on the folio and the reservation is confirmed.`,
     ],
     { key: `booked:${reservationId}`, severity: "info" },
   );
   return { state: "confirmed", reservationId, ref, totalSatang: meta.totalSatang, alreadyDone: false };
 }
 
-async function needsAttention(deps: StripeDeps, sessionId: string, meta: SessionMeta, reason: string): Promise<FulfilOutcome> {
-  await markDone(deps, sessionId, { state: "needs_attention", reservationId: meta.reservationId, ref: meta.ref, totalSatang: meta.totalSatang, reason, at: nowOf(deps) });
+async function needsAttention(deps: CoreDeps, gw: PaymentGateway, key: string, meta: PaymentMeta, reason: string): Promise<FulfilOutcome> {
+  await markDone(deps, key, { state: "needs_attention", reservationId: meta.reservationId, ref: meta.ref, totalSatang: meta.totalSatang, reason, at: nowOf(deps) });
   deps.log("fulfil_needs_attention", { ref: meta.ref, reservationId: meta.reservationId });
   await deps.alert(
     `URGENT: paid booking ${meta.ref} needs attention`,
-    [reason, `Stripe Checkout Session ${sessionId}, Cloudbeds reservation ${meta.reservationId}, ${meta.checkIn} to ${meta.checkOut}, ${money(meta.totalSatang)}.`],
-    { key: `attention:${sessionId}`, severity: "critical" },
+    [reason, `${gw.brand} ${gw.text.sessionLabel.long} ${key}, Cloudbeds reservation ${meta.reservationId}, ${meta.checkIn} to ${meta.checkOut}, ${money(meta.totalSatang)}.`],
+    { key: `attention:${key}`, severity: "critical" },
   );
   return { state: "needs_attention", reservationId: meta.reservationId, ref: meta.ref, reason };
 }
 
+/** alertFulfilPaymentFailure for a Stripe Checkout Session. */
+export async function alertFulfilFailure(deps: StripeDeps, sessionId: string, error: unknown): Promise<void> {
+  return alertFulfilPaymentFailure(deps, stripeGateway(deps), sessionId, error);
+}
+
 /**
- * Called when fulfil throws: one alert per session per window (the alerter
+ * Called when fulfil throws: one alert per payment per window (the alerter
  * frees the window again if the mail was not delivered, so every later retry
  * that still fails tries again), then rethrow upstream. Once fulfil has seen
- * the session paid, the alert names the booking (ref, Cloudbeds reservation,
+ * the payment paid, the alert names the booking (ref, Cloudbeds reservation,
  * amount); once it has been paid for PAID_UNCONFIRMED_ESCALATE_MS without
  * being confirmed, the alert is CRITICAL (stored and re-sent until delivered).
  */
-export async function alertFulfilFailure(deps: StripeDeps, sessionId: string, error: unknown): Promise<void> {
+export async function alertFulfilPaymentFailure(deps: CoreDeps, gw: PaymentGateway, key: string, error: unknown): Promise<void> {
   const message = redactForLog(error instanceof Error ? error.message : String(error));
-  deps.log("fulfil_failed", { sessionId, error: message });
-  const paid = await readJson<PaidPending>(deps.kv, keys.paidPending(sessionId)).catch(() => null);
+  deps.log("fulfil_failed", { sessionId: key, error: message });
+  const paid = await readJson<PaidPending>(deps.kv, keys.paidPending(key)).catch(() => null);
   const ageMs = paid ? nowOf(deps) - paid.paidAt : 0;
   if (paid && isPaymentRefusal(error)) {
     // Deterministic (it repeats on every retry until the cause is fixed): no point waiting for the 2 h escalation.
-    await alertPaymentRefused(deps, paid, message);
+    await alertPaymentRefused(deps, gw, paid, message);
     return;
   }
   if (paid && ageMs >= PAID_UNCONFIRMED_ESCALATE_MS) {
-    await alertPaidStuck(deps, paid, `${Math.round(ageMs / 60_000)} minutes; latest error: ${message.slice(0, 200)}`);
+    await alertPaidPaymentStuck(deps, gw, paid, `${Math.round(ageMs / 60_000)} minutes; latest error: ${message.slice(0, 200)}`);
     return;
   }
   await deps.alert(
     `Paid booking ${paid ? `${paid.ref} ` : ""}not yet confirmed in Cloudbeds (retrying)`,
     [
       paid
-        ? `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}, ${money(paid.totalSatang)}, Stripe session ${sessionId}) is PAID, but confirming it in Cloudbeds failed: ${message.slice(0, 200)}`
-        : `Stripe Checkout Session ${sessionId} is paid but confirming it in Cloudbeds failed: ${message.slice(0, 200)}`,
-      "It is retried automatically (Stripe webhook retries, the guest's return page and the sweeper). Do NOT cancel the reservation. If this repeats, check Cloudbeds.",
+        ? `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}, ${money(paid.totalSatang)}, ${gw.brand} ${gw.text.sessionLabel.short} ${key}) is PAID, but confirming it in Cloudbeds failed: ${message.slice(0, 200)}`
+        : `${gw.brand} ${gw.text.sessionLabel.long} ${key} is paid but confirming it in Cloudbeds failed: ${message.slice(0, 200)}`,
+      `It is retried automatically (${gw.text.webhookRetryHint}, the guest's return page and the sweeper). Do NOT cancel the reservation. If this repeats, check Cloudbeds.`,
     ],
-    { key: `fulfil-fail:${sessionId}`, severity: "warning" },
+    { key: `fulfil-fail:${key}`, severity: "warning" },
   );
 }
 
@@ -486,31 +505,38 @@ function isPaymentRefusal(error: unknown): boolean {
 const FEE_WHILE_RETRYING = `If the "${FEE_ITEM_NAME}" line is not on the folio yet, recording the full amount leaves a credit equal to that fee: this is expected while the booking is still being retried. Do NOT add the "${FEE_ITEM_NAME}" line by hand: it is added automatically once Cloudbeds accepts it, and "the processing fee line is missing" follows if it never can.`;
 
 /** CRITICAL at once: Cloudbeds refused to record the payment of a paid booking (stored and re-sent until delivered). */
-async function alertPaymentRefused(deps: StripeDeps, paid: PaidPending, detail: string): Promise<void> {
+async function alertPaymentRefused(deps: CoreDeps, gw: PaymentGateway, paid: PaidPending, detail: string): Promise<void> {
+  const brand = gw.brand;
   const method = deps.config.cloudbedsPaymentMethod;
-  const testVar = isLiveMode(deps.config.paymentMode) ? "" : " (outside live: CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD when set)";
+  const testVar = isLiveMode(deps.config.paymentMode) ? "" : ` (outside live: ${gw.text.testMethodEnvVar} when set)`;
   await deps.alert(
     `URGENT: paid booking ${paid.ref}: Cloudbeds refused to record the payment`,
     [
-      `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}) was PAID via Stripe (${money(paid.totalSatang)}, session ${paid.sessionId}), but Cloudbeds refused to record the payment: ${detail.slice(0, 200)}`,
-      `Payment method sent: ${method === null ? "none" : JSON.stringify(method)}, from CLOUDBEDS_STRIPE_PAYMENT_METHOD${testVar}. ${
+      `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}) was PAID via ${brand} (${money(paid.totalSatang)}, ${gw.text.sessionLabel.short} ${paid.sessionId}), but Cloudbeds refused to record the payment: ${detail.slice(0, 200)}`,
+      `Payment method sent: ${method === null ? "none" : JSON.stringify(method)}, from ${gw.text.methodEnvVar}${testVar}. ${
         deps.config.cloudbedsPaymentMethodProblem ??
-        "It must be the exact 'method' value scripts/cloudbeds-wi0-check.mjs prints for the custom Stripe method (for HTTP 401/403, check the booking key's write:payment scope instead)."
+        `It must be the exact 'method' value scripts/cloudbeds-wi0-check.mjs prints for the custom ${brand} method (for HTTP 401/403, check the booking key's write:payment scope instead).`
       }`,
-      `Do NOT cancel this reservation: the guest has paid. First open the folio: Stripe, the guest's return page and the sweeper keep retrying, so if a Stripe payment of ${money(paid.totalSatang)} is already listed, it was recorded automatically after this alert - do not add it again, only confirm the reservation if it is not Confirmed yet. Otherwise EITHER fix the value and redeploy (the sweeper then records the payment and confirms the booking) OR record the FULL amount ${money(paid.totalSatang)} (rooms + fee) once on the folio by hand and confirm it - never both.`,
+      `Do NOT cancel this reservation: the guest has paid. First open the folio: ${brand}, the guest's return page and the sweeper keep retrying, so if a ${brand} payment of ${money(paid.totalSatang)} is already listed, it was recorded automatically after this alert - do not add it again, only confirm the reservation if it is not Confirmed yet. Otherwise EITHER fix the value and redeploy (the sweeper then records the payment and confirms the booking) OR record the FULL amount ${money(paid.totalSatang)} (rooms + fee) once on the folio by hand and confirm it - never both.`,
       FEE_WHILE_RETRYING,
     ],
     { key: `payment-refused:${paid.sessionId}`, severity: "critical" },
   );
 }
 
-/** CRITICAL: a paid session is still not confirmed long after payment (stored and re-sent until delivered). */
+/** alertPaidPaymentStuck for a Stripe Checkout Session. */
 export async function alertPaidStuck(deps: StripeDeps, paid: PaidPending, detail: string): Promise<void> {
+  return alertPaidPaymentStuck(deps, stripeGateway(deps), paid, detail);
+}
+
+/** CRITICAL: a paid payment is still not confirmed long after payment (stored and re-sent until delivered). */
+export async function alertPaidPaymentStuck(deps: CoreDeps, gw: PaymentGateway, paid: PaidPending, detail: string): Promise<void> {
+  const brand = gw.brand;
   await deps.alert(
     `URGENT: paid booking ${paid.ref} still not confirmed in Cloudbeds`,
     [
-      `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}) was PAID via Stripe (${money(paid.totalSatang)}, session ${paid.sessionId}), but confirming it in Cloudbeds has failed for ${detail}`,
-      `Do NOT cancel this reservation: the guest has paid. First open the folio: the sweeper keeps retrying it, so if a Stripe payment of ${money(paid.totalSatang)} is already listed, it was recorded automatically - do not add it again, only confirm the reservation if it is not Confirmed yet. Otherwise record the FULL Stripe payment (${money(paid.totalSatang)}, rooms + fee) once on its folio (the custom Stripe method) and confirm it by hand - or fix the cause (CLOUDBEDS_STRIPE_PAYMENT_METHOD, the booking key's scopes) - never both.`,
+      `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}) was PAID via ${brand} (${money(paid.totalSatang)}, ${gw.text.sessionLabel.short} ${paid.sessionId}), but confirming it in Cloudbeds has failed for ${detail}`,
+      `Do NOT cancel this reservation: the guest has paid. First open the folio: the sweeper keeps retrying it, so if a ${brand} payment of ${money(paid.totalSatang)} is already listed, it was recorded automatically - do not add it again, only confirm the reservation if it is not Confirmed yet. Otherwise record the FULL ${brand} payment (${money(paid.totalSatang)}, rooms + fee) once on its folio (the custom ${brand} method) and confirm it by hand - or fix the cause (${gw.text.methodEnvVar}, the booking key's scopes) - never both.`,
       FEE_WHILE_RETRYING,
     ],
     { key: `fulfil-stuck:${paid.sessionId}`, severity: "critical" },
@@ -612,51 +638,54 @@ export async function releaseHold(
   return locked.acquired ? locked.value : { state: "in_progress" };
 }
 
-/** Releases the hold of a session Stripe says can no longer be paid (expired, or delayed payment failed). */
+/** releasePayment for a Stripe Checkout Session (expired, or its delayed payment failed). */
 export async function releaseSession(sessionId: string, deps: StripeDeps, reason: string): Promise<ReleaseOutcome> {
-  const session = await retrieveSession(deps.stripe, sessionId);
-  const meta = parseSessionMeta(session);
-  if (!meta || !modeMatches(session, deps)) return { state: "not_ours" };
-  const payment = sessionPaymentState(session);
-  if (payment === "paid") return { state: "refused_paid", reservationId: meta.reservationId };
-  if (payment === "open" || payment === "processing") return { state: "refused_open" };
+  return releasePayment(sessionId, deps, stripeGateway(deps), reason);
+}
+
+/** Releases the hold of a payment the provider says can no longer be paid. */
+export async function releasePayment(key: string, deps: CoreDeps, gw: PaymentGateway, reason: string): Promise<ReleaseOutcome> {
+  const payment = await gw.get(key);
+  const meta = payment.meta;
+  if (!meta) return { state: "not_ours" };
+  if (payment.state === "paid") return { state: "refused_paid", reservationId: meta.reservationId };
+  if (payment.state === "open" || payment.state === "processing") return { state: "refused_open" };
   return releaseHold(meta.reservationId, deps, reason);
 }
 
 export type AbandonOutcome = { state: "released" | "paid" | "pending" | "closed" };
 
+/** abandonPayment for a Stripe Checkout Session (cancel = expire the session). */
+export async function abandonSession(sessionId: string, deps: StripeDeps, expectedRef: string | null = null): Promise<AbandonOutcome> {
+  return abandonPayment(sessionId, deps, stripeGateway(deps), expectedRef);
+}
+
 /**
- * The guest pressed Cancel/Back: expire the session (so it can never be paid
- * afterwards) and release the hold. A session that is already paid is
+ * The guest pressed Cancel/Back: cancel the payment page (so it can never be
+ * paid afterwards) and release the hold. A payment that is already paid is
  * fulfilled instead - never cancelled.
  */
-export async function abandonSession(sessionId: string, deps: StripeDeps, expectedRef: string | null = null): Promise<AbandonOutcome> {
-  // Only the booking's own session may be expired (a token for booking A must never cancel booking B).
-  let first: CheckoutSession;
+export async function abandonPayment(key: string, deps: CoreDeps, gw: PaymentGateway, expectedRef: string | null): Promise<AbandonOutcome> {
+  // Only the booking's own payment may be cancelled (a token for booking A must never cancel booking B).
+  let first: GatewayPayment;
   try {
-    first = await retrieveSession(deps.stripe, sessionId);
+    first = await gw.get(key);
   } catch (e) {
-    // No such session (in this account and mode): nothing can be paid or expired. Network/5xx errors rethrow.
-    if (isMissingSessionError(e)) return { state: "closed" };
+    // No such payment (in this account and mode): nothing can be paid or cancelled. Network/5xx errors rethrow.
+    if (gw.isMissing(e)) return { state: "closed" };
     throw e;
   }
-  const firstMeta = parseSessionMeta(first);
-  if (!firstMeta || !modeMatches(first, deps) || (expectedRef !== null && firstMeta.ref !== expectedRef)) return { state: "closed" };
-  try {
-    await deps.stripe.checkout.sessions.expire(sessionId);
-    await deps.kv.set(keys.abandoned(sessionId), "1", 2 * 24 * 3600);
-  } catch (e) {
-    if (!isNotOpenError(e)) throw e; // network/5xx: let the caller answer an error; the sweeper covers it
-  }
-  const session = await retrieveSession(deps.stripe, sessionId);
-  const meta = parseSessionMeta(session);
-  if (!meta || !modeMatches(session, deps)) return { state: "closed" };
-  const payment = sessionPaymentState(session);
-  if (payment === "paid") {
-    await fulfilSession(sessionId, deps).catch((e) => alertFulfilFailure(deps, sessionId, e));
+  if (!first.meta || (expectedRef !== null && first.meta.ref !== expectedRef)) return { state: "closed" };
+  // network/5xx: gw.cancel throws, so the caller answers an error; the sweeper covers it
+  if ((await gw.cancel(key)) === "cancelled") await deps.kv.set(keys.abandoned(key), "1", 2 * 24 * 3600);
+  const payment = await gw.get(key);
+  const meta = payment.meta;
+  if (!meta) return { state: "closed" };
+  if (payment.state === "paid") {
+    await fulfilPayment(key, deps, gw).catch((e) => alertFulfilPaymentFailure(deps, gw, key, e));
     return { state: "paid" };
   }
-  if (payment === "processing" || payment === "open") return { state: "pending" };
+  if (payment.state === "processing" || payment.state === "open") return { state: "pending" };
   const released = await releaseHold(meta.reservationId, deps, "guest abandoned checkout");
   return { state: released.state === "released" ? "released" : "closed" };
 }
