@@ -23,29 +23,32 @@
 // whose outcome is unknown (timeout/5xx) stays in the intent index, and the
 // sweeper finds and releases it by its thirdPartyIdentifier. Personal data
 // goes only to Cloudbeds and Stripe.
+//
+// The chain itself is startHoldFirstCheckout (holdFirstCheckout.ts), which
+// leaves only the payment page to the provider. This file keeps its
+// constants and helpers (the checks before the hold, the price check,
+// holdFailed) and the Stripe side: stripeCheckoutAdapter (the Checkout
+// Session as the payment page) and startStripeCheckout, the core with it.
 
 import { createHash } from "node:crypto";
 import { getCatalogueRoom } from "./catalogue.ts";
 import type { PromoRestrictionInput } from "./cloudbedsProvider.ts";
 import { CloudbedsWriteError, MIN_CALL_MS, redactForLog } from "./cloudbedsWrite.ts";
 import type { ReservationInfo } from "./cloudbedsWrite.ts";
-import { MERCHANT_NAME, PAYMENT_LINK_TTL_MINUTES, TOKEN_TTL_HOURS } from "./config.ts";
+import { MERCHANT_NAME, PAYMENT_LINK_TTL_MINUTES } from "./config.ts";
+import type { StripeSettings } from "./config.ts";
 import { addMonths, compareIso } from "./dates.ts";
-import { releaseHold } from "./fulfil.ts";
-import { cloudbedsArrivalTime, internationalPhone } from "./guest.ts";
 import type { GuestDetails } from "./guest.ts";
+import { startHoldFirstCheckout } from "./holdFirstCheckout.ts";
+import type { CheckoutAdapter } from "./holdFirstCheckout.ts";
 import type { KvStore } from "./kv.ts";
-import { acquireLock, closeIntent, holdIdentifier, keyScope, keys, readJson, recordHold, recordIntent, releaseLock, writeJson } from "./lock.ts";
+import { acquireLock, keyScope, keys, readJson, releaseLock } from "./lock.ts";
 import type { HoldRecord, Lock } from "./lock.ts";
 import { isLiveMode } from "./payments/provider.ts";
-import { buildCheckoutSessionParams, isStripeCheckoutUrl, stripeErrorInfo } from "./payments/stripe.ts";
-import type { CheckoutSession } from "./payments/stripe.ts";
-import { bookingItemDiscount, satangToBahtString } from "./quote.ts";
+import { STRIPE_MAX_CHARGE_SATANG, buildCheckoutSessionParams, isStripeCheckoutUrl, stripeErrorInfo } from "./payments/stripe.ts";
 import type { CoreDeps, StripeDeps } from "./stripeDeps.ts";
 import { STALE_HOLD_MS, SWEEP_STALE_ALERT_MS } from "./sweep.ts";
-import { hasTestAccess } from "./testAccess.ts";
-import { createBookingToken, generateBookingRef, generateNonce } from "./token.ts";
-import type { BookingSummary, CartItemInput, CheckoutFailure, CheckoutResponse, DataSource, IsoDate, Quote, RoomInventory, ThemeName } from "./types.ts";
+import type { CartItemInput, CheckoutFailure, CheckoutResponse, DataSource, IsoDate, Quote, RoomInventory, ThemeName } from "./types.ts";
 import { stripeCancelUrl, stripeReturnUrl } from "./urls.ts";
 
 /** A unit lock outlives the slowest restrictions + postReservation chain. */
@@ -62,11 +65,11 @@ export const MAX_HOLDS_PER_IP = 15;
 export const CLIENT_BRAKE_MINUTES = Math.round(STALE_HOLD_MS / 60_000);
 /** Time a checkout must have left before it writes a hold (postReservation may take 15 s, then a cancel). */
 export const HOLD_MIN_REMAINING_MS = 17_000;
-/** Time needed for the Stripe call after the hold (else the hold is given back at once). */
+/** Time needed for the payment page's call after the hold (else the hold is given back at once). */
 export const SESSION_MIN_REMAINING_MS = 4_000;
-/** Kept back from the Stripe call for cancelling the hold if it fails. */
+/** Kept back from the payment page's call for cancelling the hold if it fails. */
 export const CANCEL_RESERVE_MS = 2_500;
-/** Time needed to read the hold's folio back and still make the Stripe call (or a cancel) afterwards. */
+/** Time needed to read the hold's folio back and still make the payment page's call (or a cancel) afterwards. */
 export const FOLIO_CHECK_MIN_REMAINING_MS = MIN_CALL_MS + SESSION_MIN_REMAINING_MS + CANCEL_RESERVE_MS;
 /** Pause before the one retry of a failed folio read. */
 export const FOLIO_RETRY_PAUSE_MS = 400;
@@ -75,6 +78,7 @@ export const MAX_SOURCE_FEE_PCT = 15;
 /** Checkouts refused on Cloudbeds reads within the window before the owner is alerted. */
 export const READ_FAILURE_ALERT_COUNT = 3;
 
+/** The checkout's cart, guest and server quote. Nothing in it is Stripe's: the hold-first core takes it as it is. */
 export interface StripeCheckoutInput {
   checkIn: IsoDate;
   checkOut: IsoDate;
@@ -128,13 +132,13 @@ export interface StripeCheckoutResult {
   body: CheckoutResponse;
 }
 
-function fail(status: number, body: Omit<CheckoutFailure, "ok">): StripeCheckoutResult {
+export function fail(status: number, body: Omit<CheckoutFailure, "ok">): StripeCheckoutResult {
   return { status, body: { ok: false, ...body } };
 }
 
-const NOTHING_CHARGED = "Nothing has been charged.";
-const LIVE_UNCONFIRMED = `We could not confirm live availability. ${NOTHING_CHARGED} Please try again in a moment.`;
-const MESSAGE_US = "Message us on WhatsApp and we'll complete the booking for you.";
+export const NOTHING_CHARGED = "Nothing has been charged.";
+export const LIVE_UNCONFIRMED = `We could not confirm live availability. ${NOTHING_CHARGED} Please try again in a moment.`;
+export const MESSAGE_US = "Message us on WhatsApp and we'll complete the booking for you.";
 
 /** One Stripe idempotency key per booking attempt (same ref + salt -> same key). */
 export function stripeIdempotencyKey(ref: string, mode: string, salt: string): string {
@@ -189,7 +193,7 @@ export function directAtBaseMessage(code: string, plans: string[] = []): string 
 export const DIRECT_AT_BASE_ALERT = "DIRECT bookings blocked: Cloudbeds priced the Direct rate at the base rate - set BOOKING_DIRECT_PROMO=off and redeploy";
 
 /** "the "Long term" rate" / "the "A" and "B" rates": a promo code's plans in an alert. */
-function codePlansText(plans: string[]): string {
+export function codePlansText(plans: string[]): string {
   if (plans.length === 0) return "the code's rate";
   return plans.length === 1 ? `the "${plans[0]}" rate` : `the ${plans.map((p) => `"${p}"`).join(" and ")} rates`;
 }
@@ -203,12 +207,12 @@ export function codeAtBaseAlert(code: string, plans: string[]): string {
 }
 
 /** The names of the promo-code rates the quote's rooms are on ("Direct rate" for DIRECT, the plans' public names for another code). */
-function codeRateNames(quote: Quote): string[] {
+export function codeRateNames(quote: Quote): string[] {
   return [...new Set(quote.lines.flatMap((l) => (l.listRoomSatang !== undefined && l.discount?.kind === "direct" ? [l.discount.name] : [])))];
 }
 
 /** The fixed-key alert for a promo-code hold priced at the base rate: DIRECT's own, or one per other code (naming its plans). */
-function codeAtBaseAlertOf(input: StripeCheckoutInput, quote: Quote): { subject: string; key: string; code: string; plans: string[] } {
+export function codeAtBaseAlertOf(input: StripeCheckoutInput, quote: Quote): { subject: string; key: string; code: string; plans: string[] } {
   const code = quote.directRate?.code ?? input.promo?.code ?? "DIRECT";
   if (!input.promo?.generic) return { subject: DIRECT_AT_BASE_ALERT, key: "direct-at-base", code, plans: [] };
   const plans = codeRateNames(quote);
@@ -216,7 +220,7 @@ function codeAtBaseAlertOf(input: StripeCheckoutInput, quote: Quote): { subject:
 }
 
 /** The fix line of a non-DIRECT code's at-base alert: the switch turns off every code, and dropping the code from the plan is no fix. */
-const CODE_AT_BASE_FIX =
+export const CODE_AT_BASE_FIX =
   "Fix now: set BOOKING_DIRECT_PROMO=off in Vercel and redeploy. That switches off EVERY code on the own page, DIRECT included: guests who enter a code are sent to /booking/classic, and bookings without a code are not affected. Then ask Cloudbeds support how postReservation applies the plan's rate (rooms[0][roomRateID] + promoCode) before switching it back on. Removing the code from the plan in Cloudbeds is no fix: a plan without a code whose public name starts with one of BOOKING_AUTO_DISCOUNT_PLANS (e.g. \"Long term\") is then sold automatically.";
 
 /** The guest's message when Cloudbeds priced an automatic-discount hold at the base rate (the hold was cancelled). */
@@ -363,7 +367,7 @@ export async function lockUnits(
   }
 }
 
-async function unlockAll(kv: KvStore, locks: Lock[]): Promise<void> {
+export async function unlockAll(kv: KvStore, locks: Lock[]): Promise<void> {
   for (const lock of locks) await releaseLock(kv, lock).catch(() => undefined);
 }
 
@@ -445,7 +449,7 @@ function selectedDiscount(inv: RoomInventory | undefined, input: StripeCheckoutI
 }
 
 /** Our own open holds, then restrictions + availability fresh from Cloudbeds. Runs under the unit lock. null = clear to hold. */
-async function checkBeforeHold(input: StripeCheckoutInput, deps: CoreDeps, nowMs: number): Promise<StripeCheckoutResult | null> {
+export async function checkBeforeHold(input: StripeCheckoutInput, deps: CoreDeps, nowMs: number): Promise<StripeCheckoutResult | null> {
   let overlapping: string[];
   try {
     overlapping = await slugsOverlappingOpenHolds(deps.kv, input.items, input.checkIn, input.checkOut, nowMs);
@@ -545,7 +549,7 @@ async function checkBeforeHold(input: StripeCheckoutInput, deps: CoreDeps, nowMs
 }
 
 /** Live only: alert when the sweeper (the only recovery for lost holds) has not run recently. */
-async function checkSweeperFresh(deps: StripeDeps, nowMs: number): Promise<void> {
+export async function checkSweeperFresh(deps: Pick<CoreDeps, "config" | "kv" | "alert">, nowMs: number): Promise<void> {
   if (!isLiveMode(deps.config.paymentMode)) return;
   try {
     const last = Number(await deps.kv.get(keys.lastSweep(keyScope(deps.config.paymentMode))));
@@ -565,528 +569,64 @@ async function checkSweeperFresh(deps: StripeDeps, nowMs: number): Promise<void>
   }
 }
 
-export async function startStripeCheckout(input: StripeCheckoutInput, ctx: StripeCheckoutContext): Promise<StripeCheckoutResult> {
-  const { nowMs } = ctx;
-  const clock = ctx.clock ?? Date.now;
-  // Every Cloudbeds call on this path fits the route's time limit: the budget wait, the fetch timeout and
-  // 429 retries are cut to the time left, so a hold can never still be in flight when the platform stops us.
-  const deps: StripeDeps =
-    ctx.deadlineMs !== undefined && ctx.deps.writer.bounded ? { ...ctx.deps, writer: ctx.deps.writer.bounded(ctx.deadlineMs, clock) } : ctx.deps;
-  const { config } = deps;
-  const { quote } = input;
-  const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  /** Time left before the route must answer (Infinity without a deadline). */
-  const remaining = () => (ctx.deadlineMs === undefined ? Number.POSITIVE_INFINITY : ctx.deadlineMs - clock());
-  if (!config.stripe) return fail(503, { error: "payment_unavailable", message: `Online payment is not available right now. ${NOTHING_CHARGED}` });
-
-  // Never charge real money at simulated prices; never write a real hold priced from demo data.
-  if (deps.writer.mode === "live" && input.dataSource !== "cloudbeds") {
-    deps.log("checkout_refused_data_source", { mode: config.paymentMode, dataSource: input.dataSource });
-    return fail(503, { error: "payment_unavailable", message: LIVE_UNCONFIRMED });
-  }
-
-  // Without a usable Cloudbeds payment method EVERY paid booking would stay unconfirmed: refuse before anything is held.
-  if (deps.writer.mode === "live" && config.cloudbedsPaymentMethodProblem) {
-    deps.log("checkout_refused_payment_method", { mode: config.paymentMode });
-    await deps.alert(
-      "Online bookings stopped: the Cloudbeds payment method is not set up",
-      [
-        config.cloudbedsPaymentMethodProblem,
-        "Every online checkout is refused before anything is reserved or charged until this is fixed; guests are asked to message us on WhatsApp.",
-      ],
-      { key: "payment-method-config", severity: "warning" },
-    );
-    return fail(503, { error: "payment_unavailable", message: `Online payment is not available right now. ${NOTHING_CHARGED} ${MESSAGE_US}` });
-  }
-
-  // 1. Test-mode guard (Cloudbeds has no sandbox: test holds block real OTA inventory).
-  const access = hasTestAccess(config.testGuard?.accessKey ?? null, config.tokenSecret, ctx.testAccessToken);
-  const refusal = testModeRefusal(config.testGuard, input.checkIn, input.guest.email, input.today, access);
-  if (refusal) {
-    deps.log("checkout_test_guard_refused", { access, configured: Boolean(config.testGuard?.guestEmail && config.testGuard?.accessKey) });
-    return fail(403, { error: "test_mode_restricted", message: refusal });
-  }
-
-  const rooms = input.items.map((item) => {
-    const room = getCatalogueRoom(item.slug);
-    const inv = input.inventory.find((i) => i.slug === item.slug);
-    return { roomTypeId: room?.cloudbedsRoomTypeId ?? "", rateId: inv?.rateId ?? null, adults: item.adults };
-  });
-  if (rooms.some((r) => r.roomTypeId === "")) return fail(409, { error: "unavailable", message: "A room in your reservation can't be booked online." });
-  // Rooms the server's re-quote put on the code's Cloudbeds rate (never anything the browser sent); an automatic
-  // discount is held on its roomRateID alone (no code).
-  const directRooms = input.promo ? input.items.some((item) => input.inventory.find((i) => i.slug === item.slug)?.discount?.kind === "direct") : false;
-
-  await checkSweeperFresh(deps, nowMs);
-
-  // 2. Brake on open holds (each one blocks real OTA inventory for up to ~40 minutes).
-  try {
-    const open = await deps.kv.zrangeByScore(keys.holdIndex(), nowMs - STALE_HOLD_MS, nowMs + 3_600_000, MAX_OPEN_HOLDS + 1);
-    if (open.length >= MAX_OPEN_HOLDS) {
-      deps.log("checkout_refused_open_holds", { open: open.length });
-      await deps.alert(
-        "Online bookings paused: too many unpaid holds",
-        [`${open.length} unpaid holds are open at once, so new online bookings are refused until some are paid or released (abuse brake).`],
-        { key: "too-many-holds", severity: "warning" },
-      );
-      return fail(503, {
-        error: "payment_unavailable",
-        message: `We're handling several bookings at once right now. ${NOTHING_CHARGED} Please try again in a few minutes.`,
-      });
-    }
-  } catch (e) {
-    deps.log("checkout_kv_failed", { step: "open_holds", error: redactForLog(e instanceof Error ? e.message : String(e)) });
-    return fail(503, { error: "payment_unavailable", message: `We couldn't start your booking safely just now. ${NOTHING_CHARGED} Please try again in a moment.` });
-  }
-
-  // 3. A fresh ref (refs are short: never reuse one already pointing at a session or attempt).
-  let ref = generateBookingRef(input.today, ctx.pickRefChar);
-  for (let i = 0; i < 5 && ((await deps.kv.get(keys.booking(ref))) !== null || (await deps.kv.get(keys.intent(ref))) !== null); i++) {
-    ref = generateBookingRef(input.today, ctx.pickRefChar);
-  }
-  const identifier = holdIdentifier(ref, config.paymentMode);
-
-  // 4. Intent BEFORE any Cloudbeds write: whatever happens next, the sweeper can find this attempt.
-  try {
-    await recordIntent(deps.kv, { ref, identifier, mode: config.paymentMode, createdAt: nowMs, reservationId: null });
-  } catch (e) {
-    deps.log("checkout_kv_failed", { step: "intent", ref, error: redactForLog(e instanceof Error ? e.message : String(e)) });
-    return fail(503, { error: "payment_unavailable", message: `We couldn't start your booking safely just now. ${NOTHING_CHARGED} Please try again in a moment.` });
-  }
-  const settleIntent = () => closeIntent(deps.kv, ref).catch((e) => deps.log("intent_close_failed", { ref, error: e instanceof Error ? e.message : String(e) }));
-
-  // 5. Our own checkouts never race each other for a unit: lock, re-check fresh, hold, unlock.
-  const locks = await lockUnits(deps.kv, cartUnits(input.items), ctx.unitLockWaitMs ?? UNIT_LOCK_WAIT_MS, sleep).catch(() => null);
-  if (!locks) {
-    await settleIntent();
-    deps.log("checkout_unit_busy", { ref });
-    return fail(503, {
-      error: "upstream_error",
-      message: `Someone is completing a booking for this room right now. ${NOTHING_CHARGED} Please try again in a minute.`,
-    });
-  }
-  const units = cartUnits(input.items);
-  let hold;
-  let recordError: unknown = null;
-  try {
-    const blocked = await checkBeforeHold(input, deps, nowMs);
-    if (blocked) {
-      await settleIntent();
-      return blocked;
-    }
-    if (ctx.clientIp) {
-      // Per guest (IP + email): a shared IP (hotel Wi-Fi, carrier NAT) never locks other guests out;
-      // per IP with a higher cap: one connection can't cycle through made-up emails.
-      const brakeWindow = STALE_HOLD_MS / 1000;
-      const guestKey = clientKeyOf(config.tokenSecret, `${ctx.clientIp}|${input.guest.email.trim().toLowerCase()}`);
-      const perGuest = await deps.kv.incr(keys.clientHolds(guestKey), brakeWindow).catch(() => 0);
-      const perIp = await deps.kv.incr(keys.clientHolds(clientKeyOf(config.tokenSecret, ctx.clientIp)), brakeWindow).catch(() => 0);
-      if (perGuest > MAX_HOLDS_PER_CLIENT || perIp > MAX_HOLDS_PER_IP) {
-        await settleIntent();
-        deps.log("checkout_refused_client_holds", { ref, perGuest, perIp });
-        return fail(429, {
-          error: "rate_limited",
-          message: `You've started several bookings in a short time, so online payment is paused for this connection for up to ${CLIENT_BRAKE_MINUTES} minutes. ${NOTHING_CHARGED}`,
-          retryAfterMinutes: CLIENT_BRAKE_MINUTES,
-        });
-      }
-    }
-    // Never start a hold we may not have time to finish (or give back) before the platform stops the function.
-    if (remaining() < HOLD_MIN_REMAINING_MS) {
-      await settleIntent();
-      deps.log("checkout_out_of_time", { ref, step: "before_hold", remainingMs: Math.round(remaining()) });
-      return fail(503, { error: "payment_unavailable", message: `Our reservation system is slow right now. ${NOTHING_CHARGED} Please try again in a moment.` });
-    }
-    try {
-      hold = await deps.writer.createHold({
+/**
+ * The Stripe side of the hold-first checkout (holdFirstCheckout.ts): the payment page is a Checkout Session, whose
+ * id is both the key (every Redis key keeps its name) and the payment id the booking token carries.
+ */
+export function stripeCheckoutAdapter(
+  deps: Pick<StripeDeps, "config" | "stripe">,
+  stripe: StripeSettings,
+  at: { origin: string; nowMs: number; theme?: ThemeName },
+): CheckoutAdapter<ReturnType<typeof stripeErrorInfo>> {
+  const mode = deps.config.paymentMode;
+  return {
+    provider: "stripe",
+    brand: "Stripe",
+    maxChargeSatang: STRIPE_MAX_CHARGE_SATANG,
+    async createPage({ ref, reservationId, quote, guest, token, basePath, guestFlags, budgetMs, nonce }) {
+      // Sized to the budget: Stripe's own timeout, and its one network retry only when that still fits.
+      const requestOptions = Number.isFinite(budgetMs) ? { timeout: Math.min(15_000, Math.floor(budgetMs)), maxNetworkRetries: budgetMs > 20_000 ? 1 : 0 } : {};
+      const params = buildCheckoutSessionParams({
         ref,
-        identifier,
-        checkIn: input.checkIn,
-        checkOut: input.checkOut,
-        rooms,
-        guest: {
-          firstName: input.guest.firstName,
-          lastName: input.guest.lastName,
-          email: input.guest.email,
-          phone: internationalPhone(input.guest),
-          country: input.guest.country,
-          zip: (input.guest.postcode ?? "").trim() || config.guestZipPlaceholder,
-        },
-        estimatedArrivalTime: cloudbedsArrivalTime(input.guest.arrivalTime),
-        paymentMethod: config.reservationPaymentMethod,
-        sourceId: config.cloudbedsSourceId,
-        // A room on the code's roomRateID: Cloudbeds' promo code (its own spelling) goes with it (the price check below proves it was applied).
-        promoCode: directRooms ? input.promo?.cloudbedsCode ?? null : null,
-        expectedRoomsSatang: quote.roomsSubtotalSatang,
+        reservationId,
+        quote,
+        customerEmail: guest.email,
+        successUrl: stripeReturnUrl(at.origin, basePath, ref, token, at.theme),
+        cancelUrl: stripeCancelUrl(at.origin, basePath, ref, token, at.theme),
+        nowMs: at.nowMs,
+        ttlMinutes: PAYMENT_LINK_TTL_MINUTES,
+        allowedPaymentMethodTypes: stripe.allowedPaymentMethodTypes,
+        merchantName: MERCHANT_NAME,
+        mode,
+        guestFlags,
       });
-    } catch (e) {
-      return await holdFailed(e, input, deps, ref, settleIntent);
-    }
-    // Recorded BEFORE the unit lock is released: the next checkout's overlap check must see it.
-    try {
-      await recordHold(deps.kv, {
-        ref,
-        reservationId: hold.reservationId,
-        sessionId: null,
-        createdAt: nowMs,
-        mode: config.paymentMode,
-        pendingMarked: hold.status === "not_confirmed",
-        units,
-        checkIn: input.checkIn,
-        checkOut: input.checkOut,
+      const session = await deps.stripe.checkout.sessions.create(params, {
+        idempotencyKey: stripeIdempotencyKey(ref, mode, nonce()),
+        ...requestOptions,
       });
-    } catch (e) {
-      recordError = e;
-    }
-  } finally {
-    await unlockAll(deps.kv, locks);
-  }
-
-  const reservationId = hold.reservationId;
-  let pendingMarked = hold.status === "not_confirmed";
-  const holdBase = { ref, reservationId, createdAt: nowMs, mode: config.paymentMode, units, checkIn: input.checkIn, checkOut: input.checkOut };
-  const cancelHold = async (why: string) => {
-    try {
-      // Only ever called before the guest has a payment page (or after its session was expired): nobody can have paid.
-      await releaseHold(reservationId, deps, why, { neverPayable: true });
-      // The reason stays readable in Cloudbeds (server logs expire). Best effort.
-      await deps.writer
-        .addNote(reservationId, `Hold cancelled by the booking page before any payment: ${why}. Nothing was charged.`)
-        .catch((x) => deps.log("cancel_note_failed", { ref, reservationId, error: redactForLog(x instanceof Error ? x.message : String(x)) }));
-    } catch (e) {
-      deps.log("hold_cancel_failed", { ref, reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) });
-      await deps.alert(
-        `Hold ${reservationId} could not be cancelled`,
-        [`Booking ${ref} stopped before payment (${why}) and cancelling Cloudbeds reservation ${reservationId} failed. The sweeper will retry; please check it.`],
-        { key: `cancel-fail:${reservationId}`, severity: "warning" },
-      );
-    }
-  };
-
-  // Any unexpected error from here used to leave the hold in Cloudbeds with no cancel and no alert until the
-  // sweeper found it 30+ minutes later (2026-10-20). Now: expire the session if one exists, give the hold
-  // back, note it in Cloudbeds, alert the owner.
-  let sessionForCleanup: CheckoutSession | null = null;
-  try {
-  if (recordError !== null) {
-    // Without a record nothing would track this hold: give it back now (the intent stays for the sweeper if this fails too).
-    deps.log("hold_record_failed", { ref, reservationId, error: redactForLog(recordError instanceof Error ? recordError.message : String(recordError)) });
-    await cancelHold("could not record the hold");
-    return fail(503, { error: "payment_unavailable", message: `We couldn't start your booking safely just now. ${NOTHING_CHARGED} Please try again in a moment.` });
-  }
-  await settleIntent(); // the open-holds index tracks it from here
-  // Cloudbeds' own creation stamp (no zone) next to our log time calibrates its clock (Stage B).
-  deps.log("hold_created", { ref, reservationId, status: hold.status, mode: config.paymentMode, cloudbedsDateCreated: hold.dateCreated });
-
-  // 6. Price assertion: Cloudbeds prices the reservation itself; we only ever charge what it holds. The folio is
-  // ALWAYS read back before the payment page (a failed read is tried once more when time allows): postReservation's
-  // total may leave out taxes/fees that the folio carries (the guest would pay our fee AND be asked for Cloudbeds' at check-in).
-  const quoted = quote.roomsSubtotalSatang;
-  const timeForFolio = remaining() >= FOLIO_CHECK_MIN_REMAINING_MS;
-  let folio: ReservationInfo | null = null;
-  if (timeForFolio) {
-    // The read must leave time for the Stripe call or a cancel.
-    const reader =
-      ctx.deadlineMs !== undefined && deps.writer.bounded ? deps.writer.bounded(ctx.deadlineMs - SESSION_MIN_REMAINING_MS - CANCEL_RESERVE_MS, clock) : deps.writer;
-    folio = await reader
-      .getReservation(reservationId)
-      .catch(async (e) => {
-        // One blip must not cost a correctly priced hold: a GET is never ambiguous, so read once more when that still fits.
-        if (!(e instanceof CloudbedsWriteError) || e.kind === "budget" || remaining() < FOLIO_CHECK_MIN_REMAINING_MS + FOLIO_RETRY_PAUSE_MS) throw e;
-        deps.log("hold_folio_read_retry", { ref, reservationId, error: redactForLog(e.message) });
-        await sleep(FOLIO_RETRY_PAUSE_MS);
-        return reader.getReservation(reservationId);
-      })
-      .catch((e) => {
-        deps.log("hold_folio_read_failed", { ref, reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) });
-        return null;
-      });
-  }
-  const check = classifyHoldTotal({
-    quotedRoomsSatang: quoted,
-    holdTotalSatang: hold.grandTotalSatang,
-    folio,
-    baseRoomsSatang: quote.directRate?.baseRoomsSatang ?? null,
-    autoBaseRoomsSatang: quote.autoDiscount?.baseRoomsSatang ?? null,
-  });
-  if (check.kind === "unreadable" && !timeForFolio) {
-    deps.log("checkout_out_of_time", { ref, reservationId, step: "before_folio_check", remainingMs: Math.round(remaining()) });
-    await cancelHold("out of time before the folio check");
-    return fail(503, { error: "payment_unavailable", message: `Our systems are slow right now. ${NOTHING_CHARGED} Please try again in a moment.` });
-  }
-  if (check.kind === "unreadable") {
-    deps.log("hold_total_unreadable", { ref, reservationId });
-    await cancelHold("hold total unreadable");
-    await deps.alert(
-      "Booking stopped: Cloudbeds returned no price for the hold",
-      [
-        `Booking ${ref}: Cloudbeds created reservation ${reservationId} but its total could not be verified (the folio read back with getReservation was unreadable or failed). The hold was cancelled and nothing was charged.`,
-        "If this repeats, every online booking is failing: check the booking API key's scopes (read:reservation) and the Cloudbeds API status.",
-      ],
-      { key: "hold-total-unreadable", severity: "warning" },
-    );
-    return fail(502, { error: "upstream_error", message: `We couldn't get an answer from our reservation system. ${NOTHING_CHARGED} Please try again in a minute.` });
-  }
-  if (check.kind === "cloudbeds_fees") {
-    const source = config.cloudbedsSourceId
-      ? `CLOUDBEDS_SOURCE_ID ${config.cloudbedsSourceId}`
-      : "Website / Booking engine (default; CLOUDBEDS_SOURCE_ID is not set or not a primary source id)";
-    const shown = folio?.sourceId ? ` Cloudbeds shows the hold under ${folio.source ?? "source"} ${folio.sourceId}.` : "";
-    // A source already configured: the fee is on that source, or Cloudbeds ignored the id's form (s-N vs s-N-1).
-    const fix = config.cloudbedsSourceId
-      ? `Fix: in Cloudbeds (Settings > Property > Sources; scripts/cloudbeds-wi0-check.mjs section 4b) check that source ${config.cloudbedsSourceId} carries no taxes or fees, and remove any that was added. If it carries none, Cloudbeds probably ignored the id: switch CLOUDBEDS_SOURCE_ID to the other form (s-N or s-N-1, Stage B case 19) and redeploy.`
-      : "Fix: in Cloudbeds go to Settings > Property > Sources and add a primary source for the own booking page with NO taxes or fees; put its id (s-<number>) in CLOUDBEDS_SOURCE_ID and redeploy.";
-    deps.log("hold_taxes_fees", { ref, reservationId, quoted, extra: check.extraSatang, pct: check.pctOfRooms, sourceId: config.cloudbedsSourceId });
-    await cancelHold("Cloudbeds taxes/fees on the hold");
-    await deps.alert(
-      "Online bookings blocked: Cloudbeds adds taxes/fees to online holds",
-      [
-        `Booking ${ref} (${input.checkIn} to ${input.checkOut}): Cloudbeds added THB ${satangToBahtString(check.extraSatang)} of taxes/fees (${check.pctOfRooms}% of the rooms) on top of the THB ${satangToBahtString(quoted)} the page quoted for the rooms. The hold was cancelled and nothing was charged; the guest was asked to message us on WhatsApp. Every online booking is refused this way until it is fixed.`,
-        `Reservation source used: ${source}.${shown}`,
-        `${fix} Never remove the Card Charging Fee from the "Website / Booking Engine" source while the classic booking engine uses it.`,
-      ],
-      // One alert per mode (the alerter scopes keys by mode), not per room and date: it hits every booking.
-      { key: "hold-taxes-fees", severity: "warning" },
-    );
-    return fail(503, { error: "payment_unavailable", message: `We couldn't reserve this room online just now. ${NOTHING_CHARGED} ${MESSAGE_US}` });
-  }
-  if (check.kind === "promo_at_base") {
-    const at = codeAtBaseAlertOf(input, quote);
-    const code = at.code;
-    if (input.promo?.generic) {
-      // A code other than DIRECT: its own log line and alert (one per code), naming the code, its plans and the switch.
-      deps.log("hold_code_at_base", { ref, reservationId, quoted, cloudbeds: check.totalSatang, code, plans: at.plans });
-      await cancelHold(`Cloudbeds priced code ${code}'s rate at the base rate`);
-      await deps.alert(
-        at.subject,
-        [
-          `Booking ${ref} (${input.checkIn} to ${input.checkOut}): the page quoted THB ${satangToBahtString(quoted)} for the rooms on ${codePlansText(at.plans)} (code ${code}; Cloudbeds promo code ${input.promo.cloudbedsCode}), but Cloudbeds priced the hold at THB ${satangToBahtString(check.totalSatang)}, exactly the base rate. The hold was cancelled and nothing was charged; the guest was offered the classic booking page (where Cloudbeds applies the code) and WhatsApp. Every online booking with the code is refused this way until this is fixed.`,
-          CODE_AT_BASE_FIX,
-        ],
-        // One alert per code and mode (the alerter scopes keys by mode), not per booking: it hits every booking with the code.
-        { key: at.key, severity: "warning" },
-      );
-      return fail(503, { error: "payment_unavailable", message: directAtBaseMessage(code, at.plans) });
-    }
-    deps.log("hold_direct_at_base", { ref, reservationId, quoted, cloudbeds: check.totalSatang });
-    await cancelHold("Cloudbeds priced the Direct rate at the base rate");
-    await deps.alert(
-      DIRECT_AT_BASE_ALERT,
-      [
-        `Booking ${ref} (${input.checkIn} to ${input.checkOut}): the page quoted THB ${satangToBahtString(quoted)} for the rooms on the Direct rate (code ${code}; Cloudbeds promo code ${input.promo?.cloudbedsCode ?? "-"}), but Cloudbeds priced the hold at THB ${satangToBahtString(check.totalSatang)}, exactly the base rate. The hold was cancelled and nothing was charged; the guest was offered the classic booking page (where Cloudbeds applies the code) and WhatsApp. Every online booking with the code is refused this way until this is fixed.`,
-        "Fix now: set BOOKING_DIRECT_PROMO=off in Vercel and redeploy. Guests who enter the code on the own page are then sent to /booking/classic, and bookings without the code are not affected. Then ask Cloudbeds support how postReservation applies a promo rate (rooms[0][roomRateID] + promoCode) before switching it back on.",
-      ],
-      // One alert per mode (the alerter scopes keys by mode), not per booking: it hits every booking with the code.
-      { key: "direct-at-base", severity: "warning" },
-    );
-    return fail(503, { error: "payment_unavailable", message: directAtBaseMessage(code) });
-  }
-  if (check.kind === "auto_at_base") {
-    const names = quote.autoDiscount?.names ?? [];
-    const plan = names.length > 0 ? names.join(" and ") : "the automatic discount";
-    deps.log("hold_auto_discount_at_base", { ref, reservationId, quoted, cloudbeds: check.totalSatang, plans: names, alsoDirect: check.alsoDirect });
-    await cancelHold("Cloudbeds priced the automatic discount at the base rate");
-    await deps.alert(
-      autoAtBaseAlert(plan),
-      [
-        `Booking ${ref} (${input.checkIn} to ${input.checkOut}): the page quoted THB ${satangToBahtString(quoted)} for the rooms with ${plan} applied automatically (no code), but Cloudbeds priced the hold at THB ${satangToBahtString(check.totalSatang)}, exactly the base rate for ${check.alsoDirect ? "those rooms and the Direct-rate rooms" : "those rooms"}. The hold was cancelled and nothing was charged; the guest was offered the classic booking page and WhatsApp. Every online booking on that plan is refused this way until this is fixed.`,
-        "Fix now: set BOOKING_AUTO_DISCOUNTS=off in Vercel and redeploy. The own page then sells the base rate without the automatic discounts (the Direct rate for the code is not affected). Then ask Cloudbeds support how postReservation applies a derived rate sent as rooms[0][roomRateID] without a promo code before switching it back on.",
-      ],
-      // One alert per mode (the alerter scopes keys by mode), not per booking or plan: it hits every booking on the plan.
-      { key: "auto-discount-at-base", severity: "warning" },
-    );
-    const at = codeAtBaseAlertOf(input, quote);
-    if (check.alsoDirect) {
-      await deps.alert(
-        at.subject,
-        [
-          `Booking ${ref} (${input.checkIn} to ${input.checkOut}): Cloudbeds priced the ${input.promo?.generic ? `code ${at.code}` : "Direct-rate"} rooms of a cart that also had automatic discounts at the base rate as well (see "${AUTO_AT_BASE_ALERT_PREFIX} ..."). The hold was cancelled and nothing was charged.`,
-          `If bookings with the code alone are refused the same way, set BOOKING_DIRECT_PROMO=off in Vercel and redeploy${input.promo?.generic ? " (it switches off every code, DIRECT included)" : ""}.`,
-        ],
-        { key: at.key, severity: "warning" },
-      );
-    }
-    return fail(503, { error: "payment_unavailable", message: check.alsoDirect ? directAtBaseMessage(at.code, at.plans) : autoAtBaseMessage(names) });
-  }
-  if (check.kind === "price_changed") {
-    deps.log("hold_price_mismatch", { ref, reservationId, cloudbeds: check.totalSatang, quoted, pct: check.pctOfQuote });
-    await cancelHold("price mismatch");
-    await deps.alert(
-      "Booking stopped: Cloudbeds price differs from the quote",
-      [
-        `Booking ${ref} (${input.checkIn} to ${input.checkOut}): Cloudbeds priced the hold at ${check.totalSatang} satang (${check.pctOfQuote}% against the quote), the page quoted ${quoted} satang for the rooms.`,
-        "The hold was cancelled and nothing was charged. A repeat of this means taxes/fees or a rate plan in Cloudbeds differ from what getAvailableRoomTypes returns (WI-0).",
-      ],
-      { key: `price-mismatch:${input.items.map((i) => i.slug).join(",")}:${input.checkIn}`, severity: "warning" },
-    );
-    return fail(409, {
-      error: "price_changed",
-      message: `The price for your stay has just changed in our reservation system. ${NOTHING_CHARGED} Please search again, or message us on WhatsApp and we'll book it for you.`,
-    });
-  }
-
-  // 7. Mark it "Confirmation pending" so staff never mistake an unpaid hold for a booking (best effort).
-  // Both are best effort: skipped when the Stripe call would otherwise run out of time.
-  if (!pendingMarked && remaining() >= SESSION_MIN_REMAINING_MS + CANCEL_RESERVE_MS + 4_000) {
-    try {
-      await deps.writer.markPending(reservationId);
-      pendingMarked = true;
-    } catch (e) {
-      deps.log("hold_mark_pending_failed", { ref, reservationId, error: e instanceof Error ? e.message : String(e) });
-    }
-  }
-  const testLabel = isLiveMode(config.paymentMode) ? "" : "TEST MODE - NOT REAL MONEY. ";
-  // "After 11 PM" (estimatedArrivalTime null) and the guest's requests reach Cloudbeds ONLY through this note.
-  const guestFlags = { arrivalLate: input.guest.arrivalTime === "late", hasRequests: input.guest.specialRequests.trim() !== "", noteSaved: false };
-  const noteParts = [
-    `${testLabel}Online booking ${ref} via magicsamui.com (Stripe). Awaiting payment - the hold is cancelled automatically if unpaid after ${PAYMENT_LINK_TTL_MINUTES} minutes.`,
-    guestFlags.arrivalLate ? "Estimated arrival: after 11 PM." : "",
-    // The promo-code rate: "Direct rate (code DIRECT)." / "Long term (code LONGSTAY)."
-    quote.directRate ? `${codeRateNames(quote).join(", ") || "Direct rate"} (code ${quote.directRate.code}).` : "",
-    quote.autoDiscount ? `Automatic discount: ${quote.autoDiscount.names.join(", ")}.` : "",
-    guestFlags.hasRequests ? `Guest requests: ${input.guest.specialRequests.trim()}` : "",
-  ].filter(Boolean);
-  if (remaining() >= SESSION_MIN_REMAINING_MS + CANCEL_RESERVE_MS + 4_000) {
-    // Best effort; whether it was saved goes into the session metadata, so fulfil can flag a PAID booking that lacks it.
-    guestFlags.noteSaved = await deps.writer.addNote(reservationId, noteParts.join("\n")).then(
-      () => true,
-      (e) => {
-        deps.log("hold_note_failed", { ref, reservationId, error: e instanceof Error ? e.message : String(e) });
-        return false;
-      },
-    );
-  } else {
-    deps.log("hold_note_skipped_time", { ref, reservationId });
-  }
-
-  // 8. Stripe Checkout Session.
-  const booking: BookingSummary = {
-    ref,
-    paymentMode: config.paymentMode,
-    checkIn: quote.checkIn,
-    checkOut: quote.checkOut,
-    nights: quote.nights,
-    items: input.items,
-    itemRoomSatang: quote.lines.map((l) => l.roomSatang),
-    // The discounted rate of each room (the return page shows it with the base price struck through).
-    ...(quote.lines.some((l) => l.listRoomSatang !== undefined) ? { itemDiscounts: quote.lines.map((l) => bookingItemDiscount(l, quote)) } : {}),
-    // The guest's code when the Direct rate was booked (return page and GA4 purchase `coupon`).
-    promoCode: quote.directRate?.code ?? null,
-    totalSatang: quote.totalSatang,
-    cardFeeSatang: quote.cardFeeSatang,
-    dueNowSatang: quote.dueNowSatang,
-    createdAt: new Date(nowMs).toISOString(),
-    linkExpiresAt: new Date(nowMs + PAYMENT_LINK_TTL_MINUTES * 60_000).toISOString(),
-    ...(input.theme ? { theme: input.theme } : {}),
-  };
-  const ttl = TOKEN_TTL_HOURS * 3600;
-  const token = createBookingToken(booking, null, config.tokenSecret, ttl, nowMs);
-  const basePath = config.bookingEngine === "own" ? "/booking" : "/booking-preview";
-
-  // The Stripe call gets what is left (minus time to give the hold back if it fails).
-  const stripeBudgetMs = remaining() - CANCEL_RESERVE_MS;
-  if (stripeBudgetMs < SESSION_MIN_REMAINING_MS) {
-    deps.log("checkout_out_of_time", { ref, reservationId, step: "before_session", remainingMs: Math.round(remaining()) });
-    await cancelHold("out of time before the payment page");
-    return fail(503, { error: "payment_unavailable", message: `Our systems are slow right now. ${NOTHING_CHARGED} Please try again in a moment.` });
-  }
-  const stripeRequestOptions = Number.isFinite(stripeBudgetMs)
-    ? { timeout: Math.min(15_000, Math.floor(stripeBudgetMs)), maxNetworkRetries: stripeBudgetMs > 20_000 ? 1 : 0 }
-    : {};
-
-  let session: CheckoutSession;
-  try {
-    const params = buildCheckoutSessionParams({
-      ref,
-      reservationId,
-      quote,
-      customerEmail: input.guest.email,
-      successUrl: stripeReturnUrl(ctx.origin, basePath, ref, token, input.theme),
-      cancelUrl: stripeCancelUrl(ctx.origin, basePath, ref, token, input.theme),
-      nowMs,
-      ttlMinutes: PAYMENT_LINK_TTL_MINUTES,
-      allowedPaymentMethodTypes: config.stripe.allowedPaymentMethodTypes,
-      merchantName: MERCHANT_NAME,
-      mode: config.paymentMode,
-      guestFlags,
-    });
-    session = await deps.stripe.checkout.sessions.create(params, {
-      idempotencyKey: stripeIdempotencyKey(ref, config.paymentMode, (ctx.nonce ?? generateNonce)()),
-      ...stripeRequestOptions,
-    });
-  } catch (e) {
-    const info = stripeErrorInfo(e);
-    deps.log("stripe_session_failed", { ref, reservationId, ...info, message: redactForLog(e instanceof Error ? e.message : String(e)) });
-    await cancelHold("stripe session failed");
+      return { key: session.id, paymentId: session.id, redirectUrl: session.url };
+    },
+    // stripe-mock's page is served from our own origin.
+    isAllowedUrl: (url) => isStripeCheckoutUrl(url, stripe.mock ? at.origin : null),
+    cancelPage: (key) => deps.stripe.checkout.sessions.expire(key),
+    errorInfo: stripeErrorInfo,
     // A persistent Stripe-side problem (key permission, PromptPay not activated, account restricted) breaks EVERY booking.
-    await deps.alert(
-      "Booking stopped: Stripe could not create the payment page",
-      [
+    pageFailedAlert: (info, ref) => ({
+      subject: "Booking stopped: Stripe could not create the payment page",
+      lines: [
         `Booking ${ref}: Stripe refused or failed to create the Checkout Session (${info.type}${info.code ? `, code ${info.code}` : ""}${info.statusCode ? `, HTTP ${info.statusCode}` : ""}${info.requestId ? `, request ${info.requestId}` : ""}).`,
         "The hold was cancelled and nothing was charged. If this repeats, every online booking is failing: check the restricted key's permissions, the payment methods (PromptPay) and the account status in the Stripe Dashboard.",
       ],
-      { key: `stripe-session-fail:${info.code ?? info.type}`, severity: "warning" },
-    );
-    return fail(502, { error: "upstream_error", message: `We couldn't reach our payment provider. ${NOTHING_CHARGED} Please try again in a moment.` });
-  }
-
-  sessionForCleanup = session;
-  // Anything failing from here leaves an OPEN session: expire it (so it can never be paid) and release the hold.
-  try {
-    if (!isStripeCheckoutUrl(session.url, config.stripe.mock ? ctx.origin : null)) throw new Error("Unexpected Checkout URL host");
-    await recordHold(deps.kv, { ...holdBase, sessionId: session.id, pendingMarked });
-    await writeJson(deps.kv, keys.booking(ref), { sessionId: session.id, reservationId }, ttl);
-    if ((await deps.kv.get(keys.releaseDone(reservationId))) !== null) throw new Error("the hold was released meanwhile");
-  } catch (e) {
-    deps.log("checkout_after_session_failed", { ref, reservationId, sessionId: session.id, error: redactForLog(e instanceof Error ? e.message : String(e)) });
-    await deps.stripe.checkout.sessions
-      .expire(session.id)
-      .catch((x) => deps.log("stripe_session_expire_failed", { ref, sessionId: session.id, error: redactForLog(x instanceof Error ? x.message : String(x)) }));
-    await cancelHold("could not finish starting the payment");
-    return fail(502, { error: "upstream_error", message: `Something went wrong while starting your payment. ${NOTHING_CHARGED} Please try again in a moment.` });
-  }
-
-  const linkToken = createBookingToken(booking, session.id, config.tokenSecret, ttl, nowMs);
-  deps.log("stripe_session_created", { ref, reservationId, sessionId: session.id, amount: quote.dueNowSatang, mode: config.paymentMode });
-
-  return {
-    status: 200,
-    body: {
-      ok: true,
-      ref,
-      redirectUrl: session.url as string,
-      paymentMode: config.paymentMode,
-      dataSource: input.dataSource,
-      quote,
-      expiresAt: booking.linkExpiresAt,
-      linkToken,
-      provider: "stripe",
-      holdReservationId: reservationId,
-    },
+      key: `stripe-session-fail:${info.code ?? info.type}`,
+    }),
   };
-  } catch (e) {
-    const message = redactForLog(e instanceof Error ? e.message : String(e));
-    const sessionId = sessionForCleanup?.id ?? null;
-    deps.log("checkout_crashed_after_hold", { ref, reservationId, sessionId, message });
-    if (sessionId) {
-      await deps.stripe.checkout.sessions
-        .expire(sessionId)
-        .catch((x: unknown) => deps.log("stripe_session_expire_failed", { ref, sessionId, error: redactForLog(x instanceof Error ? x.message : String(x)) }));
-    }
-    await cancelHold("unexpected error on our side after the hold");
-    await deps.alert(
-      "Booking stopped: unexpected error after the hold",
-      [
-        `Booking ${ref} (Cloudbeds reservation ${reservationId}) failed on our side after the hold was created: ${message}`,
-        sessionId
-          ? `The Stripe payment page ${sessionId} was expired, the hold was cancelled and nothing was charged.`
-          : "No payment page existed yet; the hold was cancelled and nothing was charged.",
-        "If this repeats, online bookings are failing on our side: check the Vercel logs for checkout_crashed_after_hold.",
-      ],
-      { key: "checkout-crash", severity: "warning" },
-    );
-    return fail(500, { error: "server_error", message: `Something went wrong on our side. ${NOTHING_CHARGED} Please try again in a moment.` });
-  }
+}
+
+/** The hold-first checkout (holdFirstCheckout.ts) with a Stripe Checkout Session as the payment page. */
+export async function startStripeCheckout(input: StripeCheckoutInput, ctx: StripeCheckoutContext): Promise<StripeCheckoutResult> {
+  const stripe = ctx.deps.config.stripe;
+  if (!stripe) return fail(503, { error: "payment_unavailable", message: `Online payment is not available right now. ${NOTHING_CHARGED}` });
+  return startHoldFirstCheckout(input, ctx, stripeCheckoutAdapter(ctx.deps, stripe, { origin: ctx.origin, nowMs: ctx.nowMs, theme: input.theme }));
 }
 
 /**
@@ -1138,7 +678,7 @@ export function rateNotForSourceFix(message: string, input: Pick<StripeCheckoutI
  * without an id) -> alert; the intent stays open so the sweeper finds and
  * releases a reservation Cloudbeds may have created anyway.
  */
-async function holdFailed(
+export async function holdFailed(
   e: unknown,
   input: StripeCheckoutInput,
   deps: CoreDeps,
