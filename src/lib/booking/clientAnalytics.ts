@@ -8,10 +8,11 @@
 // Google Ads.
 //
 // purchase (WI-10): fired once, only after the SERVER reported the booking
-// paid AND confirmed in Cloudbeds. In stripe-live the server says so by
-// returning StatusResponse.purchase (only then); transaction_id is the
-// Cloudbeds reservationID (the same id the Cloudbeds engine reports, so GA4
-// and the Google Ads import de-duplicate) and value is in baht.
+// paid AND confirmed in Cloudbeds (every mode but the demo). In a live mode
+// the server says so by returning StatusResponse.purchase (only then);
+// transaction_id is the Cloudbeds reservationID (the same id the Cloudbeds
+// engine reports, so GA4 and the Google Ads import de-duplicate) and value
+// is in baht.
 // Payloads never contain personal data (no name, email or phone).
 // Like Cloudbeds, every event carries property_id and item_name is the
 // Cloudbeds room type name (not the site's marketing name).
@@ -241,8 +242,8 @@ export function createBookingAnalytics(paymentMode: PaymentMode, vercelEnv?: str
       emit(enabled, "booking_help_click", { channel });
     },
     purchase(booking, confirmed = null) {
-      // Stripe: no purchase until the server confirms the Cloudbeds reservation (it then supplies the reservationID).
-      if (booking.paymentMode.startsWith("stripe-") && !confirmed) return;
+      // Every mode but the demo: no purchase until the server confirms the Cloudbeds reservation (it then supplies the reservationID).
+      if (booking.paymentMode !== "demo" && !confirmed) return;
       if (typeof window === "undefined" || purchaseAlreadySent(booking.ref)) return;
       purchaseQueued.add(booking.ref);
       const ref = booking.ref;

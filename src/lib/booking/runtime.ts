@@ -24,7 +24,7 @@ import { createMemoryKv } from "./kv.ts";
 import type { KvStore } from "./kv.ts";
 import { createUpstashKv } from "./kvUpstash.ts";
 import { keyScope } from "./lock.ts";
-import { ALERT_MAIL_TIMEOUT_MS, createAlerter } from "./alerts.ts";
+import { ALERT_MAIL_TIMEOUT_MS, alertEmailEnabled, alertSubjectPrefix, createAlerter } from "./alerts.ts";
 import { createFakeCloudbeds, mockHoldPricer } from "./mock/fakeCloudbeds.ts";
 import type { FakeCloudbeds } from "./mock/fakeCloudbeds.ts";
 import { createFakeStripe } from "./mock/fakeStripe.ts";
@@ -107,8 +107,8 @@ function alerterFor(config: BookingConfig, kv: KvStore): AlertFn {
   return createAlerter({
     kv,
     log: logEvent,
-    emailEnabled: config.paymentMode === "stripe-live" || process.env.BOOKING_ALERTS_IN_TEST === "true",
-    subjectPrefix: config.paymentMode === "stripe-live" ? "" : `[${config.paymentMode}] `,
+    emailEnabled: alertEmailEnabled(config.paymentMode, process.env),
+    subjectPrefix: alertSubjectPrefix(config.paymentMode),
     footer: `Mode: ${config.paymentMode}. Sent by ${site.domain} booking engine.`,
     scope: keyScope(config.paymentMode),
     send: (mail) =>

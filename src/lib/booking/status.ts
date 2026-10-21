@@ -12,7 +12,7 @@ import type { BookingConfig } from "./config.ts";
 import { alertFulfilFailure, bookingPointer, fulfilSession, releaseSession } from "./fulfil.ts";
 import { keys } from "./lock.ts";
 import { isSessionId, parseSessionMeta, retrieveSession, sessionPaymentState } from "./payments/stripe.ts";
-import { providerOf } from "./payments/provider.ts";
+import { isLiveMode, providerOf } from "./payments/provider.ts";
 import { satangToBaht } from "./quote.ts";
 import type { StripeDeps } from "./stripeDeps.ts";
 import { verifyBookingToken, verifyDemoProof } from "./token.ts";
@@ -71,6 +71,20 @@ function ok(
       checkedAt: new Date(nowMs).toISOString(),
     },
   };
+}
+
+/**
+ * The GA4 purchase a paid booking's answer may carry: only in a live mode on the production deployment, and
+ * only once the Cloudbeds reservation is confirmed (its reservationID is the transaction id).
+ */
+export function purchaseFor(
+  config: Pick<BookingConfig, "paymentMode" | "production">,
+  booking: BookingSummary,
+  fulfilment: FulfilmentView,
+): PurchaseView | null {
+  return fulfilment.state === "confirmed" && fulfilment.reservationId && isLiveMode(config.paymentMode) && config.production
+    ? { transactionId: fulfilment.reservationId, valueBaht: satangToBaht(booking.dueNowSatang), currency: "THB" }
+    : null;
 }
 
 /** Demo mode only (no Beam to ask): the simulated link simply lapses after its 30 minutes. */
@@ -224,11 +238,7 @@ async function stripeStatus(booking: BookingSummary, params: StatusParams, deps:
     } catch (e) {
       await alertFulfilFailure(sd, sessionId, e);
     }
-    const purchase: PurchaseView | null =
-      fulfilment.state === "confirmed" && fulfilment.reservationId && deps.config.paymentMode === "stripe-live" && deps.config.production
-        ? { transactionId: fulfilment.reservationId, valueBaht: satangToBaht(booking.dueNowSatang), currency: "THB" }
-        : null;
-    return ok(booking, "paid", null, nowMs, fulfilment, purchase);
+    return ok(booking, "paid", null, nowMs, fulfilment, purchaseFor(deps.config, booking, fulfilment));
   } catch (e) {
     deps.log?.("stripe_status_failed", { ref: booking.ref, message: redactForLog(e instanceof Error ? e.message : String(e)) });
     return { status: 502, body: { ok: false, error: "upstream_error", message: "We couldn't check the payment just now." } };

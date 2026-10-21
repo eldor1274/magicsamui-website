@@ -17,7 +17,9 @@
 import { createHash } from "node:crypto";
 import type { KvStore } from "./kv.ts";
 import { keys, readJson, writeJson } from "./lock.ts";
+import { isLiveMode } from "./payments/provider.ts";
 import type { AlertFn, AlertSeverity, CoreDeps, LogFn } from "./stripeDeps.ts";
+import type { PaymentMode } from "./types.ts";
 
 /** Repeat suppression window once an alert was delivered. */
 export const ALERT_WINDOW_SECONDS = 6 * 3600;
@@ -62,6 +64,16 @@ export interface AlerterOptions {
   /** Runs the send after the response when possible (next/server after()); default: await it. */
   defer?: (task: () => Promise<void>) => void;
   now?: () => number;
+}
+
+/** AlerterOptions.emailEnabled for a deployment (runtime.ts): any live mode, or BOOKING_ALERTS_IN_TEST=true. */
+export function alertEmailEnabled(mode: PaymentMode, env: Record<string, string | undefined>): boolean {
+  return isLiveMode(mode) || env.BOOKING_ALERTS_IN_TEST === "true";
+}
+
+/** AlerterOptions.subjectPrefix for a deployment (runtime.ts): none in a live mode, else the mode in brackets. */
+export function alertSubjectPrefix(mode: PaymentMode): string {
+  return isLiveMode(mode) ? "" : `[${mode}] `;
 }
 
 /** Stable id of a critical alert: its dedupe key, else a hash of its text. */

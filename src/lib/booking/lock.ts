@@ -8,6 +8,8 @@
 
 import { randomBytes } from "node:crypto";
 import type { KvStore } from "./kv.ts";
+import { isLiveMode } from "./payments/provider.ts";
+import type { PaymentMode } from "./types.ts";
 
 export const LOCK_TTL_SECONDS = 120;
 export const DONE_TTL_SECONDS = 30 * 24 * 3600;
@@ -85,12 +87,13 @@ export const TEST_HOLD_SUFFIX = "-TEST";
 const HOLD_ID_RE = /^(MSV-\d{8}-[A-HJ-NP-Z2-9]{4})(-TEST)?$/;
 
 /**
- * The thirdPartyIdentifier written on a Cloudbeds hold. Live holds carry the
- * plain booking ref; every other mode appends -TEST, so a live sweeper never
- * touches a test hold (or the reverse) and staff can tell test bookings apart.
+ * The thirdPartyIdentifier written on a Cloudbeds hold. Live holds (any live
+ * mode) carry the plain booking ref; every other mode appends -TEST, so a live
+ * sweeper never touches a test hold (or the reverse) and staff can tell test
+ * bookings apart.
  */
-export function holdIdentifier(ref: string, mode: string): string {
-  return mode === "stripe-live" ? ref : `${ref}${TEST_HOLD_SUFFIX}`;
+export function holdIdentifier(ref: string, mode: PaymentMode): string {
+  return isLiveMode(mode) ? ref : `${ref}${TEST_HOLD_SUFFIX}`;
 }
 
 /** Parses a thirdPartyIdentifier we wrote; null for anything else (OTA bookings, staff bookings). */

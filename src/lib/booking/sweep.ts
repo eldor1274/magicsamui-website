@@ -43,6 +43,7 @@ import type { ListedReservation } from "./cloudbedsWrite.ts";
 import { PAID_UNCONFIRMED_ESCALATE_MS, alertFulfilFailure, alertPaidStuck, fulfilSession, holdRecord, releaseHold } from "./fulfil.ts";
 import { closeHold, closeIntent, keyScope, keys, parseHoldIdentifier, readJson, recordHold } from "./lock.ts";
 import type { HoldIntent, PaidPending } from "./lock.ts";
+import { isLiveMode } from "./payments/provider.ts";
 import { listRecentSessions, parseSessionMeta, retrieveSession, sessionPaymentState } from "./payments/stripe.ts";
 import type { CheckoutSession, SessionPaymentState } from "./payments/stripe.ts";
 import type { StripeDeps } from "./stripeDeps.ts";
@@ -143,7 +144,7 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
   const mode = deps.config.paymentMode;
   const scope = keyScope(mode);
   const wantLive = deps.config.stripe?.livemode ?? false;
-  const liveTag = mode === "stripe-live";
+  const liveTag = isLiveMode(mode);
 
   // 1. Stripe side.
   const byReservation = new Map<string, { session: CheckoutSession; state: SessionPaymentState }[]>();

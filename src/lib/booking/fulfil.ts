@@ -48,6 +48,7 @@ import { CloudbedsWriteError, redactForLog } from "./cloudbedsWrite.ts";
 import type { ReservationInfo } from "./cloudbedsWrite.ts";
 import { closeHold, keyScope, keys, readJson, withLock, writeJson, DONE_TTL_SECONDS } from "./lock.ts";
 import type { BookingPointer, HoldRecord, PaidPending } from "./lock.ts";
+import { isLiveMode } from "./payments/provider.ts";
 import { chargeId, isMissingSessionError, isNotOpenError, parseSessionMeta, paymentIntentId, retrieveSession, sessionPaymentState } from "./payments/stripe.ts";
 import type { CheckoutSession, SessionMeta, SessionPaymentState } from "./payments/stripe.ts";
 import { satangToBahtString } from "./quote.ts";
@@ -112,9 +113,9 @@ export const PAYMENT_DOUBT_COOLDOWN_MS = 10 * 60_000;
 /** postPayment type with the MOCK writer when no method is configured (the in-repo fake; nothing reaches Cloudbeds). */
 const MOCK_WRITER_PAYMENT_METHOD = "mock-stripe";
 
-/** Prefix for everything written to Cloudbeds outside live mode. */
+/** Prefix for everything written to Cloudbeds outside a live mode. */
 export function testMoneyLabel(deps: Pick<CoreDeps, "config">): string {
-  return deps.config.paymentMode === "stripe-live" ? "" : "TEST MODE - NOT REAL MONEY. ";
+  return isLiveMode(deps.config.paymentMode) ? "" : "TEST MODE - NOT REAL MONEY. ";
 }
 
 /** True when the session belongs to this deployment's Stripe mode (test vs live). */
@@ -487,7 +488,7 @@ const FEE_WHILE_RETRYING = `If the "${FEE_ITEM_NAME}" line is not on the folio y
 /** CRITICAL at once: Cloudbeds refused to record the payment of a paid booking (stored and re-sent until delivered). */
 async function alertPaymentRefused(deps: StripeDeps, paid: PaidPending, detail: string): Promise<void> {
   const method = deps.config.cloudbedsPaymentMethod;
-  const testVar = deps.config.paymentMode === "stripe-live" ? "" : " (outside live: CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD when set)";
+  const testVar = isLiveMode(deps.config.paymentMode) ? "" : " (outside live: CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD when set)";
   await deps.alert(
     `URGENT: paid booking ${paid.ref}: Cloudbeds refused to record the payment`,
     [

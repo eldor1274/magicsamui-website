@@ -5,11 +5,12 @@
 // on: the payment provider (Stripe / Beam / simulated), the mode (demo / MOCK /
 // test / live / locked), where availability comes from and whether a real
 // Cloudbeds reservation is written - plus links to switch between the two
-// themes. Not shown to guests on a fully live Stripe page (nothing to warn
-// about there). Keep PreviewBannerProps stable (new props are optional).
+// themes. Not shown to guests on a fully live page (nothing to warn about
+// there). Keep PreviewBannerProps stable (new props are optional).
 
 import { CreditCard, Database, FlaskConical, Lock, MessageCircle, Palette, TriangleAlert } from "lucide-react";
 import { modeKind, previewHeadline } from "@/lib/booking/paymentCopy";
+import { isLiveMode } from "@/lib/booking/payments/provider";
 import type { DataSource, PaymentMode, PaymentProvider, ThemeName } from "@/lib/booking/types";
 
 export interface PreviewBannerProps {
@@ -59,8 +60,8 @@ export default function PreviewBanner({
   whatsappUrl,
 }: PreviewBannerProps) {
   const locked = paymentStatus === "locked";
-  // A fully live Stripe page is the real booking page: no preview banner for guests.
-  if (!locked && paymentMode === "stripe-live") return null;
+  // A fully live page is the real booking page: no preview banner for guests.
+  if (!locked && isLiveMode(paymentMode)) return null;
 
   const source = dataSource ? DATA_SOURCE[dataSource] : null;
   const kind = modeKind(paymentMode);

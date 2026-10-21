@@ -7,7 +7,7 @@ import { addDays } from "./dates.ts";
 import { classifyDemoCard, formatCardNumber, isValidExpiry } from "./demoCards.ts";
 import { demoInventory } from "./demoProvider.ts";
 import { computeQuote } from "./quote.ts";
-import type { BookingSummary, Quote } from "./types.ts";
+import type { BookingSummary, PaymentMode, PurchaseView, Quote } from "./types.ts";
 
 /* ----------------------- browser stand-ins for emit() ----------------------- */
 
@@ -148,8 +148,11 @@ test("purchase fires once per ref; the tab guard waits for gtag's event_callback
   const quote = sampleQuote();
   const booking = sampleBooking(quote, "MSV-20261005-T3ST");
   const live = createBookingAnalytics("beam-live", "production");
-  live.purchase(booking);
-  live.purchase(booking);
+  // Outside the demo a purchase needs the server's confirmation; this one carries the ref and amount as its
+  // transaction id and value, so the payload checks below read as before.
+  const confirmed: PurchaseView = { transactionId: booking.ref, valueBaht: booking.dueNowSatang / 100, currency: "THB" };
+  live.purchase(booking, confirmed);
+  live.purchase(booking, confirmed);
   assert.equal(win.dataLayer.length, 1, "queued once");
   const params = Array.from(win.dataLayer[0] as ArrayLike<unknown>)[2] as Record<string, unknown>;
   assert.equal(params.transaction_id, booking.ref);
@@ -167,6 +170,34 @@ test("purchase fires once per ref; the tab guard waits for gtag's event_callback
   demo.purchase(demoBooking);
   assert.equal(win.__bookingEvents?.filter((e) => e.name === "purchase").length, 1);
   assert.equal(store.get("msv_booking_purchase_sent_MSV-20261005-D3MO"), "1");
+});
+
+test("a beam-live 'paid' without the server's confirmation sends no purchase (every mode but the demo waits for it)", () => {
+  const { win, store } = fakeBrowser();
+  const quote = sampleQuote();
+  const booking = sampleBooking(quote, "MSV-20261005-B3AM");
+  const live = createBookingAnalytics("beam-live", "production");
+  assert.equal(live.enabled, true);
+  live.purchase(booking);
+  live.purchase(booking, null);
+  assert.equal(win.dataLayer.length, 0, "nothing reaches gtag");
+  assert.equal(win.__bookingEvents, undefined, "nothing recorded either");
+  assert.equal(store.size, 0, "no tab guard set");
+
+  // Not queued: the confirmed answer that follows still sends it, once, with the Cloudbeds reservationID.
+  const confirmed: PurchaseView = { transactionId: "48213377", valueBaht: booking.dueNowSatang / 100, currency: "THB" };
+  live.purchase(booking, confirmed);
+  live.purchase(booking, confirmed);
+  assert.equal(win.dataLayer.length, 1);
+  const params = Array.from(win.dataLayer[0] as ArrayLike<unknown>)[2] as Record<string, unknown>;
+  assert.equal(params.transaction_id, "48213377");
+
+  // The other non-demo modes wait too: nothing sent (stripe-live) and nothing recorded locally (the rest).
+  const modes: PaymentMode[] = ["beam-playground", "stripe-mock", "stripe-test", "stripe-live"];
+  modes.forEach((mode, i) => createBookingAnalytics(mode, "production").purchase({ ...sampleBooking(quote, `MSV-20261005-W${i}IT`), paymentMode: mode }));
+  assert.equal(win.dataLayer.length, 1);
+  assert.equal(win.__bookingEvents, undefined);
+  assert.equal(store.size, 0);
 });
 
 test("no analytics payload carries personal data", () => {

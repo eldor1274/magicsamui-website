@@ -37,6 +37,7 @@ import type { GuestDetails } from "./guest.ts";
 import type { KvStore } from "./kv.ts";
 import { acquireLock, closeIntent, holdIdentifier, keyScope, keys, readJson, recordHold, recordIntent, releaseLock, writeJson } from "./lock.ts";
 import type { HoldRecord, Lock } from "./lock.ts";
+import { isLiveMode } from "./payments/provider.ts";
 import { buildCheckoutSessionParams, isStripeCheckoutUrl, stripeErrorInfo } from "./payments/stripe.ts";
 import type { CheckoutSession } from "./payments/stripe.ts";
 import { bookingItemDiscount, satangToBahtString } from "./quote.ts";
@@ -545,7 +546,7 @@ async function checkBeforeHold(input: StripeCheckoutInput, deps: CoreDeps, nowMs
 
 /** Live only: alert when the sweeper (the only recovery for lost holds) has not run recently. */
 async function checkSweeperFresh(deps: StripeDeps, nowMs: number): Promise<void> {
-  if (deps.config.paymentMode !== "stripe-live") return;
+  if (!isLiveMode(deps.config.paymentMode)) return;
   try {
     const last = Number(await deps.kv.get(keys.lastSweep(keyScope(deps.config.paymentMode))));
     if (Number.isFinite(last) && last > 0 && nowMs - last < SWEEP_STALE_ALERT_MS) return;
@@ -934,7 +935,7 @@ export async function startStripeCheckout(input: StripeCheckoutInput, ctx: Strip
       deps.log("hold_mark_pending_failed", { ref, reservationId, error: e instanceof Error ? e.message : String(e) });
     }
   }
-  const testLabel = config.paymentMode === "stripe-live" ? "" : "TEST MODE - NOT REAL MONEY. ";
+  const testLabel = isLiveMode(config.paymentMode) ? "" : "TEST MODE - NOT REAL MONEY. ";
   // "After 11 PM" (estimatedArrivalTime null) and the guest's requests reach Cloudbeds ONLY through this note.
   const guestFlags = { arrivalLate: input.guest.arrivalTime === "late", hasRequests: input.guest.specialRequests.trim() !== "", noteSaved: false };
   const noteParts = [
