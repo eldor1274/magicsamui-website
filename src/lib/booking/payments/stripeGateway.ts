@@ -1,15 +1,16 @@
 // PaymentGateway for Stripe Checkout (see gateway.ts). Server only.
 //
 // A thin wrapper: it only calls what payments/stripe.ts already exports
-// (retrieveSession, parseSessionMeta, sessionPaymentState, paymentIntentId,
-// chargeId, isNotOpenError, isMissingSessionError) and sessions.expire, one
-// Stripe request per call, exactly as fulfil.ts and sweep.ts make them today.
-// key = the Checkout Session id, so every Redis key keeps its name. The text
-// values are the fulfil.ts and sweep.ts literals, copied verbatim.
+// (retrieveSession, listRecentSessions, parseSessionMeta, sessionPaymentState,
+// paymentIntentId, chargeId, isNotOpenError, isMissingSessionError) and
+// sessions.expire, one Stripe request per call (sweepRecent: the list's pages),
+// exactly as fulfil.ts and sweep.ts make them today. key = the Checkout Session
+// id, so every Redis key keeps its name. The text values are the fulfil.ts and
+// sweep.ts literals, copied verbatim.
 
 import type { StripeDeps } from "../stripeDeps.ts";
-import type { FeeItem, GatewayPayment, GatewayReceipt, GatewayText, PaymentGateway } from "./gateway.ts";
-import { chargeId, isMissingSessionError, isNotOpenError, parseSessionMeta, paymentIntentId, retrieveSession, sessionPaymentState } from "./stripe.ts";
+import type { FeeItem, GatewayPayment, GatewayReceipt, GatewayText, PaymentGateway, RecentPayment } from "./gateway.ts";
+import { chargeId, isMissingSessionError, isNotOpenError, listRecentSessions, parseSessionMeta, paymentIntentId, retrieveSession, sessionPaymentState } from "./stripe.ts";
 import type { CheckoutSession } from "./stripe.ts";
 
 const FEE_ITEM_NAME = "Payment processing fee";
@@ -88,6 +89,24 @@ export function stripeGateway(deps: Pick<StripeDeps, "config" | "stripe">): Paym
       }
     },
     isMissing: isMissingSessionError,
+    // = sweep.ts step 1 before the gateway: ours (metadata) and of this mode (livemode) only.
+    async sweepRecent(sinceMs) {
+      const wantLive = deps.config.stripe?.livemode ?? false;
+      const out: RecentPayment[] = [];
+      for (const listed of await listRecentSessions(deps.stripe, sinceMs)) {
+        const meta = parseSessionMeta(listed);
+        if (!meta || listed.livemode !== wantLive) continue;
+        out.push({
+          key: listed.id,
+          reservationId: meta.reservationId,
+          listedPaid: listed.payment_status === "paid",
+          // List entries don't expand the PaymentIntent; re-read when the state depends on it.
+          read: async () =>
+            stripePaymentOf(listed.id, listed.status === "complete" && listed.payment_status === "unpaid" ? await retrieveSession(deps.stripe, listed.id) : listed, wantLive),
+        });
+      }
+      return out;
+    },
     text: STRIPE_GATEWAY_TEXT,
   };
 }

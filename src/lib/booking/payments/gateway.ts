@@ -11,6 +11,8 @@
 //   the payment is not one of ours or belongs to the other mode (test vs live).
 // - text holds every provider-specific word the shared code writes into
 //   Cloudbeds notes, payment descriptions and owner alerts.
+// - sweepRecent lists the provider's recent payments of ours for the
+//   sweeper's step 1 (sweep.ts), which fulfils or releases them itself.
 
 import type { PaymentProvider } from "../types.ts";
 import type { SessionMeta } from "./stripe.ts";
@@ -52,6 +54,20 @@ export interface GatewayPayment {
   /** A payment was started on the provider's page (Stripe: the session has a PaymentIntent). */
   attempted: boolean;
   receipt: GatewayReceipt;
+}
+
+/** One payment of ours (this mode) the provider lists for the sweeper's step 1. */
+export interface RecentPayment {
+  key: string;
+  /** The Cloudbeds hold it was created for, as the provider's own copy of the booking names it. */
+  reservationId: string;
+  /** The listing already reports it paid: a failure to finish it then alerts as a paid booking's. */
+  listedPaid: boolean;
+  /**
+   * The payment in the gateway's shape. Re-reads it from the provider only when the listing can't tell its
+   * state (Stripe: a complete but unpaid session, whose PaymentIntent the list does not expand).
+   */
+  read(): Promise<GatewayPayment>;
 }
 
 /** The fee line's Cloudbeds item (see fulfil.ts feeItemFor: Cloudbeds keeps the first name/note an appItemID gets). */
@@ -104,5 +120,10 @@ export interface PaymentGateway {
   cancel(key: string): Promise<"cancelled" | "not_open">;
   /** The provider answered that the payment does not exist (in this account and mode): it can never be paid. */
   isMissing(e: unknown): boolean;
+  /**
+   * The provider's payments of ours (this mode) created since sinceMs, for the sweeper's step 1 (Stripe: the
+   * Checkout Sessions of the lookback window, foreign and other-mode ones left out). Throws on network/5xx.
+   */
+  sweepRecent(sinceMs: number): Promise<RecentPayment[]>;
   text: GatewayText;
 }

@@ -1,10 +1,14 @@
-// Safety net (WI-7): reconciles Stripe sessions and Cloudbeds holds that a
-// dropped webhook, a timeout or a crash left behind. Run every ~10 minutes
-// (POST/GET /api/booking/sweep with the sweep secret - the droplet cron, or a
-// Vercel cron on Pro; Hobby crons only run daily).
+// Safety net (WI-7): reconciles payments (Stripe: Checkout Sessions) and
+// Cloudbeds holds that a dropped webhook, a timeout or a crash left behind. Run
+// every ~10 minutes (POST/GET /api/booking/sweep with the sweep secret - the
+// droplet cron, or a Vercel cron on Pro; Hobby crons only run daily).
 //
-// 1. Stripe sessions created in the last 48 h that are ours (this mode):
-//    paid -> fulfil (no-op once done); expired / delayed-payment failed -> release.
+// runSweep(deps, gw, opts) sweeps for ONE payment provider, reached only
+// through its PaymentGateway (default: Stripe); the hold side is shared.
+//
+// 1. The provider's payments created in the last 48 h that are ours (this
+//    mode; gw.sweepRecent - Stripe: its session list): paid -> fulfil (no-op
+//    once done); expired / delayed-payment failed -> release.
 // 2. Holds, from three sources, each with an age WE can vouch for:
 //    a. our open-holds index (age = our own createdAt);
 //    b. hold INTENTS (written before postReservation): an attempt whose answer
@@ -16,8 +20,8 @@
 //       our record if we have one, else Cloudbeds' creation time read
 //       cautiously (never older than it could be).
 //    Only holds older than the session lifetime (+ margin) are considered:
-//    a paid session -> fulfil; an open one -> leave; otherwise -> release.
-// A hold is NEVER released while any session for it is paid (release refuses),
+//    a paid payment -> fulfil; an open one -> leave; otherwise -> release.
+// A hold is NEVER released while any payment for it is paid (release refuses),
 // nor when it carries our paid marker or the folio shows a payment. A
 // CONFIRMED reservation with an MSV id that we have no record or intent of
 // is never cancelled either (staff may have re-booked a guest under the ref,
@@ -36,17 +40,38 @@
 // its Cloudbeds side worked: a sweeper that can't list Cloudbeds reservations
 // can't find orphan holds, so it alerts after a few failed runs in a row and
 // the route answers 502 (the cron's curl -f then fails visibly).
+//
+// Several providers (the active one, plus a drain finishing the other one's
+// in-flight payments): every provider's step 1 runs first
+// (sweepRecentPayments), then one runSweep per provider - the active one with
+// primary: true, each drain with primary: false - handed its own step 1
+// (opts.recent), the other providers' (opts.peers) and one Cloudbeds listing
+// for all (opts.listed, from listSweepReservations).
+// Ownership of a hold between those runs:
+// - one with a record or an intent belongs to the run of its mode (any other
+//   run skips it as another mode's);
+// - one with neither (an orphan: Redis lost its record) can't be told apart by
+//   provider, since every provider's live holds carry the plain ref. A drain run
+//   never touches it (no release, no "no record" report). The primary run
+//   releases it only when no provider sees a payment for it that is not over:
+//   neither its own step 1 nor a peer's. Without the peers' view, a paid or
+//   still-payable booking of another provider whose record was lost would be
+//   cancelled before that provider's run got to it;
+// - whatever its record says, the hold side never releases a hold that a peer
+//   sees a paid, open, processing or refunded payment for (step 1 only ever
+//   releases the hold its own provider's payment was made for).
 
 import { resendPendingAlerts } from "./alerts.ts";
 import { redactForLog } from "./cloudbedsWrite.ts";
 import type { ListedReservation } from "./cloudbedsWrite.ts";
-import { PAID_UNCONFIRMED_ESCALATE_MS, alertFulfilFailure, alertPaidStuck, fulfilSession, holdRecord, releaseHold } from "./fulfil.ts";
+import { PAID_UNCONFIRMED_ESCALATE_MS, alertFulfilPaymentFailure, alertPaidPaymentStuck, fulfilPayment, holdRecord, releaseHold } from "./fulfil.ts";
 import { closeHold, closeIntent, keyScope, keys, parseHoldIdentifier, readJson, recordHold } from "./lock.ts";
 import type { HoldIntent, PaidPending } from "./lock.ts";
+import type { GatewayPayment, GatewayText, PaymentGateway } from "./payments/gateway.ts";
 import { isLiveMode } from "./payments/provider.ts";
-import { listRecentSessions, parseSessionMeta, retrieveSession, sessionPaymentState } from "./payments/stripe.ts";
 import type { CheckoutSession, SessionPaymentState } from "./payments/stripe.ts";
-import type { StripeDeps } from "./stripeDeps.ts";
+import { stripeGateway } from "./payments/stripeGateway.ts";
+import type { CoreDeps, StripeDeps } from "./stripeDeps.ts";
 import { nowOf } from "./stripeDeps.ts";
 
 export const SWEEP_LOOKBACK_MS = 48 * 3600_000;
@@ -70,7 +95,8 @@ export const INDEX_SIZE_ALERT = 50;
 /**
  * One line for the Cloudbeds reservation note when the sweeper gives a hold back: what the guest's payment page
  * did (2026-10-20: the reason only lived in server logs, which expire). A session without a PaymentIntent was never
- * submitted; with one, a payment was started.
+ * submitted; with one, a payment was started. The Stripe wording, for its callers: the sweeper itself writes
+ * gw.text.releaseNoteText (STRIPE_GATEWAY_TEXT's is this text).
  */
 export function releaseNoteText(sessions: { session: Pick<CheckoutSession, "payment_intent">; state: SessionPaymentState }[]): string {
   if (sessions.length === 0) {
@@ -85,8 +111,19 @@ export function releaseNoteText(sessions: { session: Pick<CheckoutSession, "paym
     : "Hold released by the sweeper: the Stripe payment page was created but no payment was ever attempted. Nothing was charged.";
 }
 
-async function noteRelease(deps: StripeDeps, reservationId: string, text: string): Promise<void> {
+async function noteRelease(deps: CoreDeps, reservationId: string, text: string): Promise<void> {
   await deps.writer.addNote(reservationId, text).catch((e) => deps.log("release_note_failed", { reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) }));
+}
+
+/** The release note in the words of the provider whose payment page the hold had: a peer's when only a peer saw one. */
+function releaseNote(text: GatewayText, seen: GatewayPayment[], peers: RecentPayments[], reservationId: string): string {
+  if (seen.length === 0) {
+    for (const peer of peers) {
+      const theirs = peer.byReservation.get(reservationId) ?? [];
+      if (theirs.length > 0) return peer.text.releaseNoteText(theirs);
+    }
+  }
+  return text.releaseNoteText(seen);
 }
 
 export interface SweepSummary {
@@ -97,7 +134,7 @@ export interface SweepSummary {
   skippedOpen: number;
   /** Candidates younger than STALE_HOLD_MS (or of unknown age): left for a later run. */
   skippedYoung: number;
-  /** Records written by the other Stripe mode (test vs live) sharing this Redis: never touched. */
+  /** Records written by another mode (test vs live, or another provider's) sharing this Redis: never touched. */
   skippedOtherMode: number;
   /** Unpaid holds still open after this run (index + unresolved intents) - 0 before any provider/key change. */
   openHolds: number;
@@ -122,9 +159,94 @@ interface Candidate {
   indexed?: boolean;
   /** Indexed, but its hold record is gone (expired after 30 days, or lost). */
   recordMissing?: boolean;
+  /** Found only in Cloudbeds' list: neither a record nor an intent of ours names its provider (primary run only). */
+  orphan?: boolean;
 }
 
-export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
+/**
+ * What one provider's step 1 saw (sweepRecentPayments): read by the hold side of that provider's own run, and
+ * by the other providers' runs as a peer.
+ */
+export interface RecentPayments {
+  /** The provider's words (a release note about its payment page is written in them). */
+  text: GatewayText;
+  /** Its recent payments of ours (this mode), by Cloudbeds reservation. */
+  byReservation: Map<string, GatewayPayment[]>;
+  /** Paid payments step 1 already ran fulfil for (successfully or not). */
+  triedPaid: Set<string>;
+  /** Step 1's share of the run's summary. */
+  counts: Pick<SweepSummary, "sessionsChecked" | "fulfilled" | "released" | "errors">;
+}
+
+export interface SweepOptions {
+  /**
+   * false for a drain run (a provider other than the active one, finishing its in-flight payments): it never
+   * touches an orphan hold (no record, no intent) - see "Ownership" above. Default true.
+   */
+  primary?: boolean;
+  /**
+   * Cloudbeds' reservations of the sweep window from earlier in the same request (listSweepReservations, taken
+   * after every step 1): not listed again. A hold an earlier run released since is skipped by its release marker.
+   */
+  listed?: ListedReservation[];
+  /** This run's own step 1, already run by the caller (so the other runs could see it first): not run again. */
+  recent?: RecentPayments;
+  /**
+   * The other configured providers' step 1, run before this hold side. A hold any of them sees a payment for
+   * that is not over (paid, open, processing, refunded) is never released by this run. Every run that shares
+   * Cloudbeds with another provider's run needs them: the primary run releases orphans on what it can see.
+   */
+  peers?: RecentPayments[];
+}
+
+/** Cloudbeds' reservations of the sweep window (step 2c). One listing can serve every run of a request (opts.listed). */
+export function listSweepReservations(deps: Pick<CoreDeps, "writer">, nowMs: number): Promise<ListedReservation[]> {
+  return deps.writer.findHolds(nowMs - SWEEP_LOOKBACK_MS - WINDOW_PAD_MS, nowMs + WINDOW_PAD_MS);
+}
+
+/**
+ * Step 1 for one provider: its payments of ours (this mode) created in the lookback window. Paid -> fulfil
+ * (no-op once done); expired / failed -> release, with a note on the reservation. Throws when the provider
+ * can't list them (the whole run fails, as before the gateway).
+ */
+export async function sweepRecentPayments(deps: CoreDeps, gw: PaymentGateway, nowMs: number = nowOf(deps)): Promise<RecentPayments> {
+  const recent: RecentPayments = { text: gw.text, byReservation: new Map(), triedPaid: new Set(), counts: { sessionsChecked: 0, fulfilled: 0, released: 0, errors: 0 } };
+  const { byReservation, triedPaid, counts } = recent;
+  for (const listed of await gw.sweepRecent(nowMs - SWEEP_LOOKBACK_MS)) {
+    counts.sessionsChecked++;
+    try {
+      const payment = await listed.read();
+      const list = byReservation.get(listed.reservationId) ?? [];
+      list.push(payment);
+      byReservation.set(listed.reservationId, list);
+      if (payment.state === "paid") {
+        if ((await deps.kv.get(keys.fulfilDone(listed.key))) !== null) continue;
+        triedPaid.add(listed.key);
+        const outcome = await fulfilPayment(listed.key, deps, gw);
+        if (outcome.state === "confirmed" && !outcome.alreadyDone) counts.fulfilled++;
+      } else if (payment.state === "expired" || payment.state === "failed") {
+        if ((await deps.kv.get(keys.releaseDone(listed.reservationId))) !== null) continue;
+        // Another payment may exist for the same hold (never in practice: one payment page per hold).
+        const r = await releaseHold(listed.reservationId, deps, `sweeper: ${gw.text.sessionLabel.short} ${payment.state}`);
+        if (r.state === "released") {
+          counts.released++;
+          await noteRelease(deps, listed.reservationId, gw.text.releaseNoteText(list));
+        }
+      }
+    } catch (e) {
+      counts.errors++;
+      if (listed.listedPaid) await alertFulfilPaymentFailure(deps, gw, listed.key, e).catch(() => undefined);
+      else deps.log("sweep_session_error", { sessionId: listed.key, error: redactForLog(e instanceof Error ? e.message : String(e)) });
+    }
+  }
+  return recent;
+}
+
+/** One sweep for the Stripe deployment (gw = Stripe, the primary run): what the route runs today. */
+export function runSweep(deps: StripeDeps, gw?: PaymentGateway, opts?: SweepOptions): Promise<SweepSummary>;
+/** One sweep for the provider `gw` (see "Several providers" above for the options). */
+export function runSweep(deps: CoreDeps, gw: PaymentGateway, opts?: SweepOptions): Promise<SweepSummary>;
+export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGateway(deps as StripeDeps), opts: SweepOptions = {}): Promise<SweepSummary> {
   const now = nowOf(deps);
   const summary: SweepSummary = {
     sessionsChecked: 0,
@@ -143,80 +265,54 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
   };
   const mode = deps.config.paymentMode;
   const scope = keyScope(mode);
-  const wantLive = deps.config.stripe?.livemode ?? false;
   const liveTag = isLiveMode(mode);
+  const primary = opts.primary ?? true;
+  const peers = opts.peers ?? [];
 
-  // 1. Stripe side.
-  const byReservation = new Map<string, { session: CheckoutSession; state: SessionPaymentState }[]>();
-  /** Paid sessions step 1 already ran fulfil for (successfully or not) this run. */
-  const triedPaid = new Set<string>();
-  const sessions = await listRecentSessions(deps.stripe, now - SWEEP_LOOKBACK_MS);
-  for (const listed of sessions) {
-    const meta = parseSessionMeta(listed);
-    if (!meta || listed.livemode !== wantLive) continue;
-    summary.sessionsChecked++;
-    try {
-      // List entries don't expand the PaymentIntent; re-read when the state depends on it.
-      const session = listed.status === "complete" && listed.payment_status === "unpaid" ? await retrieveSession(deps.stripe, listed.id) : listed;
-      const state = sessionPaymentState(session);
-      const list = byReservation.get(meta.reservationId) ?? [];
-      list.push({ session, state });
-      byReservation.set(meta.reservationId, list);
-      if (state === "paid") {
-        if ((await deps.kv.get(keys.fulfilDone(session.id))) !== null) continue;
-        triedPaid.add(session.id);
-        const outcome = await fulfilSession(session.id, deps);
-        if (outcome.state === "confirmed" && !outcome.alreadyDone) summary.fulfilled++;
-      } else if (state === "expired" || state === "failed") {
-        if ((await deps.kv.get(keys.releaseDone(meta.reservationId))) !== null) continue;
-        // Another session may exist for the same hold (never in practice: one session per hold).
-        const r = await releaseHold(meta.reservationId, deps, `sweeper: session ${state}`);
-        if (r.state === "released") {
-          summary.released++;
-          await noteRelease(deps, meta.reservationId, releaseNoteText(list));
-        }
-      }
-    } catch (e) {
-      summary.errors++;
-      if (listed.payment_status === "paid") await alertFulfilFailure(deps, listed.id, e).catch(() => undefined);
-      else deps.log("sweep_session_error", { sessionId: listed.id, error: redactForLog(e instanceof Error ? e.message : String(e)) });
-    }
-  }
+  // 1. Provider side (unless the caller already ran it, so the other providers' runs could see it first).
+  const recent = opts.recent ?? (await sweepRecentPayments(deps, gw, now));
+  const { byReservation } = recent;
+  /** Paid payments step 1 already ran fulfil for (successfully or not) this run. */
+  const triedPaid = new Set(recent.triedPaid);
+  summary.sessionsChecked = recent.counts.sessionsChecked;
+  summary.fulfilled = recent.counts.fulfilled;
+  summary.released = recent.counts.released;
+  summary.errors = recent.counts.errors;
 
-  // 1b. Paid sessions fulfil has not finished (no time limit: beyond the 48 h lookback and Stripe's retries).
-  for (const sessionId of await deps.kv.zrangeByScore(keys.paidIndex(scope), 0, Number.MAX_SAFE_INTEGER, 50)) {
-    if ((await deps.kv.get(keys.fulfilDone(sessionId))) !== null) {
-      await deps.kv.zrem(keys.paidIndex(scope), sessionId);
+  // 1b. Paid payments fulfil has not finished (no time limit: beyond the 48 h lookback and the provider's retries).
+  for (const key of await deps.kv.zrangeByScore(keys.paidIndex(scope), 0, Number.MAX_SAFE_INTEGER, 50)) {
+    if ((await deps.kv.get(keys.fulfilDone(key))) !== null) {
+      await deps.kv.zrem(keys.paidIndex(scope), key);
       continue;
     }
-    const paid = await readJson<PaidPending>(deps.kv, keys.paidPending(sessionId));
+    const paid = await readJson<PaidPending>(deps.kv, keys.paidPending(key));
     if (!paid) {
-      await deps.kv.zrem(keys.paidIndex(scope), sessionId); // record expired (30 days)
+      await deps.kv.zrem(keys.paidIndex(scope), key); // record expired (30 days)
       continue;
     }
-    if (triedPaid.has(sessionId)) {
+    if (triedPaid.has(key)) {
       // Step 1 already tried it this run (and alerted on a failure): only escalate a long-stuck one.
       summary.paidUnconfirmed++;
       if (now - paid.paidAt >= PAID_UNCONFIRMED_ESCALATE_MS) {
-        await alertPaidStuck(deps, paid, `${Math.round((now - paid.paidAt) / 60_000)} minutes`).catch(() => undefined);
+        await alertPaidPaymentStuck(deps, gw, paid, `${Math.round((now - paid.paidAt) / 60_000)} minutes`).catch(() => undefined);
       }
       continue;
     }
-    triedPaid.add(sessionId);
+    triedPaid.add(key);
     try {
-      const outcome = await fulfilSession(sessionId, deps);
+      const outcome = await fulfilPayment(key, deps, gw);
       if (outcome.state === "confirmed" || outcome.state === "needs_attention") {
         if (outcome.state === "confirmed" && !outcome.alreadyDone) summary.fulfilled++;
         continue;
       }
       summary.paidUnconfirmed++;
       if (now - paid.paidAt >= PAID_UNCONFIRMED_ESCALATE_MS) {
-        await alertPaidStuck(deps, paid, `${Math.round((now - paid.paidAt) / 60_000)} minutes (fulfil: ${outcome.state})`).catch(() => undefined);
+        await alertPaidPaymentStuck(deps, gw, paid, `${Math.round((now - paid.paidAt) / 60_000)} minutes (fulfil: ${outcome.state})`).catch(() => undefined);
       }
     } catch (e) {
       summary.errors++;
       summary.paidUnconfirmed++;
-      await alertFulfilFailure(deps, sessionId, e).catch(() => undefined);
+      await alertFulfilPaymentFailure(deps, gw, key, e).catch(() => undefined);
     }
   }
 
@@ -245,7 +341,7 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
   // 2c (read first: 2b matches intents against it). Every reservation Cloudbeds created in the window.
   let listed: ListedReservation[] | null = null;
   try {
-    listed = await deps.writer.findHolds(now - SWEEP_LOOKBACK_MS - WINDOW_PAD_MS, now + WINDOW_PAD_MS);
+    listed = opts.listed ?? (await listSweepReservations(deps, now));
     await deps.kv.del(keys.sweepCloudbedsFailures(keyScope(deps.config.paymentMode))).catch(() => undefined);
   } catch (e) {
     summary.errors++;
@@ -266,6 +362,8 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
 
   // 2b. Intents: attempts whose postReservation answer never arrived (or a crash right after it).
   const intentAge = new Map<string, number>(); // identifier -> createdAt
+  /** Identifiers of other modes' unresolved attempts: their reservations are those modes' runs' to adopt. */
+  const otherModeIntents = new Set<string>();
   for (const ref of await deps.kv.zrangeByScore(keys.intentIndex(), 0, now - STALE_HOLD_MS, 200)) {
     const intent = await readJson<HoldIntent>(deps.kv, keys.intent(ref));
     if (!intent) {
@@ -274,6 +372,7 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
     }
     if (intent.mode !== mode) {
       summary.skippedOtherMode++;
+      otherModeIntents.add(intent.identifier);
       continue;
     }
     if (intent.reservationId) {
@@ -325,19 +424,30 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
       continue;
     }
     const intentCreated = intentAge.get(r.thirdPartyIdentifier ?? "");
+    if (!rec && intentCreated === undefined && otherModeIntents.has(r.thirdPartyIdentifier ?? "")) {
+      // Another mode's attempt whose answer was lost (live holds of every provider carry the same plain ref).
+      summary.skippedOtherMode++;
+      continue;
+    }
+    const orphan = !rec && intentCreated === undefined;
+    if (orphan && !primary) {
+      // Nothing of ours names its provider: only the primary run decides (and reports) it - see "Ownership".
+      deps.log("sweep_orphan_left_to_primary", { reservationId: r.reservationId });
+      continue;
+    }
     const createdMs = rec?.createdAt ?? intentCreated ?? r.createdMs;
     if (createdMs === null || now - createdMs < STALE_HOLD_MS) {
       summary.skippedYoung++;
       if (createdMs === null) deps.log("sweep_hold_unknown_age", { reservationId: r.reservationId });
       continue;
     }
-    if (!rec && intentCreated === undefined && r.status !== "not_confirmed") {
+    if (orphan && r.status !== "not_confirmed") {
       // A CONFIRMED reservation carrying one of our ids that we never recorded: staff may have re-booked a
       // paid guest under the ref, or Redis lost the record. Never cancel it - tell the owner once.
       await reportConfirmedWithoutRecord(deps, scope, r);
       continue;
     }
-    add({ reservationId: r.reservationId, createdMs, ref: parseHoldIdentifier(r.thirdPartyIdentifier)?.ref ?? null });
+    add({ reservationId: r.reservationId, createdMs, ref: parseHoldIdentifier(r.thirdPartyIdentifier)?.ref ?? null, orphan });
   }
 
   for (const c of candidates.values()) {
@@ -359,32 +469,33 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
         await closeHold(deps.kv, reservationId);
         continue;
       }
-      const paidSession = await deps.kv.get(keys.reservationPaid(reservationId));
-      if (paidSession !== null) {
+      const paidKey = await deps.kv.get(keys.reservationPaid(reservationId));
+      if (paidKey !== null) {
+        // An orphan's paid marker may name another provider's payment: the provider that took the money
+        // finishes it (its own step 1 / 1b), and release refuses the hold meanwhile.
+        if (c.orphan && peers.length > 0) continue;
         // Paid: fulfil owns it, and its done marker closes the hold. Until then retry it here, on every run.
-        if ((await deps.kv.get(keys.fulfilDone(paidSession))) !== null) {
+        if ((await deps.kv.get(keys.fulfilDone(paidKey))) !== null) {
           await closeHold(deps.kv, reservationId);
-        } else if (!triedPaid.has(paidSession)) {
-          triedPaid.add(paidSession);
+        } else if (!triedPaid.has(paidKey)) {
+          triedPaid.add(paidKey);
           try {
-            const outcome = await fulfilSession(paidSession, deps);
+            const outcome = await fulfilPayment(paidKey, deps, gw);
             if (outcome.state === "confirmed" && !outcome.alreadyDone) summary.fulfilled++;
           } catch (e) {
             summary.errors++;
-            await alertFulfilFailure(deps, paidSession, e).catch(() => undefined);
+            await alertFulfilPaymentFailure(deps, gw, paidKey, e).catch(() => undefined);
           }
         }
         continue;
       }
-      const seen = byReservation.get(reservationId) ?? [];
+      // A copy: the step 1 view may also be another run's peer.
+      const seen = [...(byReservation.get(reservationId) ?? [])];
       const rec = await holdRecord(deps, reservationId);
-      if (rec?.sessionId && !seen.some((x) => x.session.id === rec.sessionId)) {
-        const session = await retrieveSession(deps.stripe, rec.sessionId);
-        seen.push({ session, state: sessionPaymentState(session) });
-      }
+      if (rec?.sessionId && !seen.some((x) => x.key === rec.sessionId)) seen.push(await gw.get(rec.sessionId));
       const paid = seen.find((x) => x.state === "paid");
       if (paid) {
-        const outcome = await fulfilSession(paid.session.id, deps);
+        const outcome = await fulfilPayment(paid.key, deps, gw);
         if (outcome.state === "confirmed" && !outcome.alreadyDone) summary.fulfilled++;
         continue;
       }
@@ -393,11 +504,19 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
         summary.openHolds++;
         continue;
       }
-      // No payable session (expired/failed, or none was ever created): release.
+      // Another provider sees a payment for it that is not over (paid, open, processing, refunded): its run owns it.
+      const elsewhere = peers.flatMap((p) => p.byReservation.get(reservationId) ?? []).filter((x) => x.state !== "expired" && x.state !== "failed");
+      if (elsewhere.length > 0) {
+        deps.log("sweep_hold_left_to_peer", { reservationId, states: elsewhere.map((x) => x.state) });
+        summary.skippedOpen++;
+        summary.openHolds++;
+        continue;
+      }
+      // No payable payment at any provider (expired/failed, or none was ever created): release.
       const r = await releaseHold(reservationId, deps, "sweeper: stale hold");
       if (r.state === "released") {
         summary.released++;
-        await noteRelease(deps, reservationId, releaseNoteText(seen));
+        await noteRelease(deps, reservationId, releaseNote(gw.text, seen, peers, reservationId));
       }
       if (r.state === "already_released" || r.state === "released" || r.state === "refused_paid" || r.state === "refused_confirmed") {
         await closeHold(deps.kv, reservationId);
@@ -474,7 +593,7 @@ export async function runSweep(deps: StripeDeps): Promise<SweepSummary> {
 }
 
 /** Tells the owner (once per reservation) about a confirmed MSV reservation we hold no record or intent of. */
-async function reportConfirmedWithoutRecord(deps: StripeDeps, scope: string, r: ListedReservation): Promise<void> {
+async function reportConfirmedWithoutRecord(deps: CoreDeps, scope: string, r: ListedReservation): Promise<void> {
   try {
     if (!(await deps.kv.setNx(keys.noRecordReported(scope, r.reservationId), "1", 30 * 24 * 3600))) return;
     deps.log("sweep_confirmed_without_record", { reservationId: r.reservationId, status: r.status });
@@ -492,7 +611,7 @@ async function reportConfirmedWithoutRecord(deps: StripeDeps, scope: string, r: 
 }
 
 /** Turns an orphan found through an intent into a hold record with the intent's (trusted) age. */
-async function adoptOrphan(deps: StripeDeps, intent: HoldIntent, reservationId: string): Promise<void> {
+async function adoptOrphan(deps: CoreDeps, intent: HoldIntent, reservationId: string): Promise<void> {
   if (await holdRecord(deps, reservationId)) return;
   await recordHold(deps.kv, { ref: intent.ref, reservationId, sessionId: null, createdAt: intent.createdAt, mode: intent.mode }).catch((e) =>
     deps.log("sweep_adopt_failed", { ref: intent.ref, reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) }),
@@ -500,7 +619,7 @@ async function adoptOrphan(deps: StripeDeps, intent: HoldIntent, reservationId: 
 }
 
 /** Counts consecutive failed Cloudbeds listings; alerts once a few runs in a row failed. */
-async function noteCloudbedsFailure(deps: StripeDeps, error: string): Promise<void> {
+async function noteCloudbedsFailure(deps: CoreDeps, error: string): Promise<void> {
   try {
     const n = Number(await deps.kv.get(keys.sweepCloudbedsFailures(keyScope(deps.config.paymentMode)))) + 1;
     await deps.kv.set(keys.sweepCloudbedsFailures(keyScope(deps.config.paymentMode)), String(n), 24 * 3600);
