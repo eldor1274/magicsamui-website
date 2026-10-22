@@ -13,7 +13,12 @@
 //   Cloudbeds notes, payment descriptions and owner alerts.
 // - sweepRecent lists the provider's recent payments of ours for the
 //   sweeper's step 1 (sweep.ts), which fulfils or releases them itself.
+// - Every optional member (Beam design steps S2.5 and S2.6) is a hook the
+//   Stripe gateway does not set: the shared code then does exactly what it did
+//   before the hook existed, so each Stripe call, text, KV write and TTL stays
+//   the same.
 
+import type { AlertSeverity } from "../stripeDeps.ts";
 import type { PaymentProvider } from "../types.ts";
 import type { SessionMeta } from "./stripe.ts";
 
@@ -54,6 +59,19 @@ export interface GatewayPayment {
   /** A payment was started on the provider's page (Stripe: the session has a PaymentIntent). */
   attempted: boolean;
   receipt: GatewayReceipt;
+  /**
+   * The provider's payment disagrees with our own record of the booking (amount, currency, ref, merchant), or
+   * can't be settled automatically (Beam: a refunded link with several successful charges). A whole sentence
+   * for the owner: fulfil hands the payment to the owner with it as the needs_attention reason (money review
+   * 2), never "not ours". Never set by Stripe.
+   */
+  mismatch?: string;
+  /**
+   * Why a payment is not settled yet. processing: still being confirmed. unconfirmed: the payment window is
+   * over (state "expired") but a payment was still waiting for the bank's answer after the grace: the hold
+   * is released, but the guest is told not to pay again (money review 8). Never set by Stripe.
+   */
+  pendingReason?: "processing" | "unconfirmed";
 }
 
 /** One payment of ours (this mode) the provider lists for the sweeper's step 1. */
@@ -78,6 +96,15 @@ export interface FeeItem {
   note: string;
 }
 
+/** An owner alert in a gateway's words: deps.alert's arguments. */
+export interface GatewayAlert {
+  subject: string;
+  lines: string[];
+  /** De-duplicates repeats (deps.alert's key). */
+  key: string;
+  severity: AlertSeverity;
+}
+
 /** Every provider-specific word in what fulfil, release, sweep and their alerts write. */
 export interface GatewayText {
   /** The paid note's opening after "PAID ": "via Stripe pi_… (THB 18,900.00)". `amount` is already formatted. */
@@ -91,17 +118,32 @@ export interface GatewayText {
   sessionLabel: { long: string; short: string };
   /** Where the owner refunds, after "refund ": "in Stripe". */
   refundWhere: string;
+  /**
+   * The refund instruction for this payment's method, after "refund " (instead of refundWhere) in the
+   * paid-but-hold-cancelled alert (owner decision 3). Absent (Stripe): refundWhere.
+   */
+  refundHow?(receipt: GatewayReceipt): string;
   /** The env var holding the Cloudbeds payment method for this provider's money. */
   methodEnvVar: string;
   /** Its variant for test money (outside live). */
   testMethodEnvVar: string;
+  /** The fee line's Cloudbeds item for a payment mode (live and test each have their own). */
   feeItem(mode: string): FeeItem;
   /** The fee line's name, as alerts quote it. */
   feeItemName: string;
   /** The Cloudbeds note when the sweeper gives a hold back: what the guest's payment page did. */
-  releaseNoteText(payments: Pick<GatewayPayment, "state" | "attempted">[]): string;
+  releaseNoteText(payments: Pick<GatewayPayment, "state" | "attempted" | "pendingReason">[]): string;
   /** Who retries a paid booking besides the return page and the sweeper: "Stripe webhook retries". */
   webhookRetryHint: string;
+  /** postPayment's type with the MOCK Cloudbeds writer when no method is configured. Absent (Stripe): "mock-stripe". */
+  mockMethod?: string;
+  /** One more line for the "New direct booking" alert (Beam: the method's refund path, owner decision 4). Absent (Stripe): none. */
+  bookedExtra?(receipt: GatewayReceipt): string;
+  /**
+   * The owner's warning once a hold was released while its payment was still unconfirmed (pendingReason
+   * "unconfirmed"): it may succeed later (fulfil.ts afterPaymentReleased). Absent (Stripe): no alert.
+   */
+  pendingReleasedAlert?(payment: GatewayPayment, reservationId: string): GatewayAlert;
 }
 
 export interface PaymentGateway {
@@ -126,4 +168,23 @@ export interface PaymentGateway {
    */
   sweepRecent(sinceMs: number): Promise<RecentPayment[]>;
   text: GatewayText;
+  /**
+   * TTL (seconds) of every marker fulfil writes for this provider's payments: the done marker, the paid
+   * markers and the step markers. Absent (Stripe): lock.ts DONE_TTL_SECONDS (30 days). Beam: 600 days, so a
+   * webhook arriving months later can never run fulfil again on a finished booking.
+   */
+  doneTtlSeconds?: number;
+  /**
+   * A fresh look at the provider inside the release lock, right before the Cloudbeds cancel (releaseHold's
+   * stillReleasable): true only while the payment still can never be paid. false keeps the hold
+   * (refused_open; money review 9). Absent (Stripe): no such look.
+   */
+  releaseGuard?(key: string): Promise<boolean>;
+  /** Parses the thirdPartyIdentifier of this provider's holds. Absent (Stripe): lock.ts parseHoldIdentifier. */
+  parseHoldId?(id: string | null | undefined): { ref: string; live: boolean } | null;
+  /**
+   * An id in the shape this provider issues, as a request or a token names it (the bare id: keyOf adds any
+   * prefix). Absent (Stripe): the Checkout Session id check.
+   */
+  isPaymentId?(id: unknown): id is string;
 }
