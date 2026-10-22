@@ -4,25 +4,22 @@
 // a memory KV and the real alerter, Cloudbeds writer and Beam gateway (payments/beamGateway.ts). Nothing leaves
 // the process.
 //
-// beamCheckout runs the real hold-first core (holdFirstCheckout.ts) with a STAND-IN Beam adapter: the link of
-// the guest's method group with our signed note, created on the fake Beam, its PaymentRecord and its links-open
-// entry (trackOpenLink, which the sweeper reads: S4.2). It is only what the gateway and sweep tests need to have
-// a real Beam hold to fulfil, release, abandon and sweep; design S4.3 builds the real adapter
-// (beamCheckoutAdapter: circuit breaker, retries, the hold note's words) and replaces this one.
+// beamCheckout runs the real Beam checkout (beamCheckout.ts startBeamCheckout: the hold-first core with
+// payments/beamCheckoutAdapter.ts, design S4.3): the link of the guest's method group with our signed note,
+// created on the fake Beam, its PaymentRecord and its links-open entry (which the sweeper reads: S4.2), behind
+// the circuit breaker. beamHeld gives the gateway, sweep and flow tests a real Beam hold to fulfil, release,
+// abandon and sweep.
 
 import { createAlerter } from "./alerts.ts";
 import { getCartInventory, buildOffers } from "./availability.ts";
-import { beamErrorInfo, buildPaymentLinkRequest, createPaymentLink, isBeamHostedPageUrl, BEAM_MAX_CHARGE_SATANG } from "./beam.ts";
-import type { BeamErrorInfo } from "./beam.ts";
-import { POLICY_VERSION } from "./catalogue.ts";
+import { startBeamCheckout } from "./beamCheckout.ts";
+import type { BeamCheckoutContext } from "./beamCheckout.ts";
 import { cloudbedsRestrictions } from "./cloudbedsProvider.ts";
 import { createCloudbedsWriter } from "./cloudbedsWrite.ts";
-import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, MERCHANT_NAME, PAYMENT_LINK_TTL_MINUTES, getBookingConfig } from "./config.ts";
+import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, getBookingConfig } from "./config.ts";
 import type { BeamSettings, BookingConfig, Env } from "./config.ts";
 import { todayInBangkok } from "./dates.ts";
 import type { GuestDetails } from "./guest.ts";
-import { startHoldFirstCheckout } from "./holdFirstCheckout.ts";
-import type { CheckoutAdapter, HoldFirstCheckoutContext } from "./holdFirstCheckout.ts";
 import { createMemoryKv } from "./kv.ts";
 import type { KvStore } from "./kv.ts";
 import { beamKeyOf, keyScope } from "./lock.ts";
@@ -30,15 +27,12 @@ import { createFakeBeam } from "./mock/fakeBeam.ts";
 import type { FakeBeam, FakeBeamOptions } from "./mock/fakeBeam.ts";
 import { FAKE_PAYMENT_METHODS, createFakeCloudbeds } from "./mock/fakeCloudbeds.ts";
 import type { FakeCloudbeds, FakeCloudbedsOptions } from "./mock/fakeCloudbeds.ts";
-import { beamGateway, trackOpenLink } from "./payments/beamGateway.ts";
+import { beamGateway } from "./payments/beamGateway.ts";
 import type { BeamGateway, BeamGatewayDeps } from "./payments/beamGateway.ts";
-import { buildBeamNote, writeRecord } from "./payments/beamRecord.ts";
-import type { BeamNote, PaymentRecord } from "./payments/beamRecord.ts";
 import { computeQuote, feePctFor } from "./quote.ts";
 import type { StripeCheckoutResult } from "./checkoutShared.ts";
 import { testAccessCookieValue } from "./testAccess.ts";
 import { FAR_CHECKIN, FAR_CHECKOUT, GUEST, HONEYMOON, NOW, ORIGIN, ROOM_TYPES, TEST_ACCESS_KEY, TEST_EMAIL, TOKEN_SECRET } from "./testkit.ts";
-import { idempotencyKeyFor } from "./token.ts";
 import type { CartItemInput, CheckoutSuccess, DataSource, PayMethod, Quote, RoomInventory } from "./types.ts";
 
 /** The property's custom Cloudbeds method for Beam money, as getPaymentMethods lists it (the fake refuses any other type). */
@@ -92,8 +86,8 @@ export interface BeamKit {
   /** Everything logged, as one string (PII checks). */
   logText(): string;
   now: { ms: number };
-  /** The hold-first core's context for a checkout at the kit's time. */
-  checkoutContext(): HoldFirstCheckoutContext;
+  /** The Beam checkout's context (the hold-first core's, with the gateway deps) for a checkout at the kit's time. */
+  checkoutContext(): BeamCheckoutContext;
 }
 
 export function makeBeamKit(
@@ -220,71 +214,7 @@ export async function beamQuote(
   return { quote, inventory, dataSource };
 }
 
-/**
- * The stand-in Beam adapter (see the header; S4.3 replaces it): the link of `payMethod`'s group for the quote's
- * amount with our signed note, then its PaymentRecord once the link exists.
- */
-function standInBeamAdapter(kit: BeamKit, payMethod: PayMethod): CheckoutAdapter<BeamErrorInfo> {
-  const { config, beam } = kit;
-  const records = new Map<string, PaymentRecord>();
-  return {
-    provider: "beam",
-    brand: "Beam",
-    maxChargeSatang: BEAM_MAX_CHARGE_SATANG,
-    async createPage(input) {
-      const nowMs = kit.now.ms;
-      const facts: BeamNote = {
-        mode: config.paymentMode,
-        ref: input.ref,
-        reservationId: input.reservationId,
-        roomsSatang: input.quote.roomsSubtotalSatang,
-        feeSatang: input.quote.cardFeeSatang,
-        totalSatang: input.quote.totalSatang,
-        payMethod,
-        checkIn: input.quote.checkIn,
-        checkOut: input.quote.checkOut,
-        termsVersion: POLICY_VERSION,
-        ...input.guestFlags,
-        expiresAt: nowMs + PAYMENT_LINK_TTL_MINUTES * 60_000,
-      };
-      const q = (extra: Record<string, string>) => new URLSearchParams({ ...extra, ref: input.ref, t: input.token }).toString();
-      const body = buildPaymentLinkRequest({
-        ref: input.ref,
-        quote: input.quote,
-        merchantName: MERCHANT_NAME,
-        redirectUrl: `${ORIGIN}${input.basePath}/return?${q({})}`,
-        cancelUrl: `${ORIGIN}${input.basePath}?${q({ resume: "payment", reason: "cancelled" })}`,
-        nowMs,
-        ttlMinutes: PAYMENT_LINK_TTL_MINUTES,
-        group: payMethod,
-        ewallets: beam.ewallets,
-        expectedFeePct: feePctFor(config, payMethod),
-        internalNote: buildBeamNote(facts, config.tokenSecret),
-      });
-      const link = await createPaymentLink(beam, body, idempotencyKeyFor(input.ref, config.paymentMode, input.nonce()), kit.fakeBeam.fetch);
-      const key = beamKeyOf(link.id);
-      records.set(key, { v: 1, linkId: link.id, merchantId: beam.merchantId, createdAt: nowMs, ...facts });
-      return { key, paymentId: link.id, redirectUrl: link.url };
-    },
-    isAllowedUrl: (url) => url !== null && isBeamHostedPageUrl(url, beam.apiBase),
-    cancelPage: (key) => kit.gw.cancel(key),
-    async afterCreate(page) {
-      const record = records.get(page.key);
-      if (!record) throw new Error("stand-in Beam adapter: no record for the page");
-      await writeRecord(kit.deps.kv, record);
-      // As the real adapter does (design S4.3): the sweeper reads every links-open entry on every run (S4.2).
-      await trackOpenLink(kit.deps.kv, config.paymentMode, record.linkId, record.expiresAt);
-    },
-    errorInfo: beamErrorInfo,
-    pageFailedAlert: (info, ref) => ({
-      subject: "Booking stopped: Beam could not create the payment page",
-      lines: [`Booking ${ref}: Beam refused or failed to create the payment link (${info.errorCode ?? "no code"}, HTTP ${info.status ?? "none"}). The hold was cancelled and nothing was charged.`],
-      key: `beam-link-fail:${info.errorCode ?? "unknown"}`,
-    }),
-  };
-}
-
-/** A Beam checkout through the real hold-first core (stand-in adapter) at the server's price for `payMethod`. */
+/** A Beam checkout through the real hold-first core (startBeamCheckout) at the server's price for `payMethod`. */
 export async function beamCheckout(
   kit: BeamKit,
   payMethod: PayMethod = "card_ewallet",
@@ -292,10 +222,10 @@ export async function beamCheckout(
   guest: GuestDetails = GUEST,
 ): Promise<StripeCheckoutResult> {
   const { quote, inventory, dataSource } = await beamQuote(kit, payMethod, items);
-  return startHoldFirstCheckout(
+  return startBeamCheckout(
     { checkIn: FAR_CHECKIN, checkOut: FAR_CHECKOUT, items, guest, quote, inventory, dataSource, today: todayInBangkok(new Date(kit.now.ms)) },
     kit.checkoutContext(),
-    standInBeamAdapter(kit, payMethod),
+    payMethod,
   );
 }
 

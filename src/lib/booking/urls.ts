@@ -81,6 +81,22 @@ export function stripeCancelUrl(origin: string, basePath: string, ref: string, t
   return `${origin}${basePath}?${q.toString()}`;
 }
 
+/**
+ * Beam redirectUrl (hold-first, design S4.3): the own booking page's /return with the ref and the booking
+ * token. Beam adds no id of its own (UNVERIFIED: none is documented), so the return page finds the payment
+ * through the ref's pointer.
+ */
+export function beamReturnUrl(origin: string, basePath: string, ref: string, token: string, theme?: ThemeName): string {
+  const q = withTheme(new URLSearchParams({ ref, t: token }), theme);
+  return `${origin}${basePath}/return?${q.toString()}`;
+}
+
+/** Beam cancelUrl (the Cancel button on Beam's hosted page): back to the payment step, as stripeCancelUrl. */
+export function beamCancelUrl(origin: string, basePath: string, ref: string, token: string, theme?: ThemeName): string {
+  const q = withTheme(new URLSearchParams({ resume: "payment", reason: "cancelled", ref, t: token }), theme);
+  return `${origin}${basePath}?${q.toString()}`;
+}
+
 /** Local stripe-mock checkout page (MOCK only). */
 export const STRIPE_MOCK_PATH = "/booking-preview/stripe-mock";
 
