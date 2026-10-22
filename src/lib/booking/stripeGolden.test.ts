@@ -33,10 +33,10 @@ import { MOCK_STRIPE_WEBHOOK_SECRET, getBookingConfig, getFulfilmentConfig, getS
 import type { Env } from "./config.ts";
 import { addDays } from "./dates.ts";
 import { demoInventory } from "./demoProvider.ts";
-import { PAYMENT_DOUBT_COOLDOWN_MS, fulfilSession } from "./fulfil.ts";
+import { PAYMENT_DOUBT_COOLDOWN_MS, fulfilSession, releaseHold } from "./fulfil.ts";
 import { createMemoryKv } from "./kv.ts";
 import type { KvStore } from "./kv.ts";
-import { keys, recordHold, recordIntent } from "./lock.ts";
+import { keyScope, keys, recordHold, recordIntent } from "./lock.ts";
 import { createFakeCloudbeds } from "./mock/fakeCloudbeds.ts";
 import type { FakeCloudbeds, FakeCloudbedsOptions } from "./mock/fakeCloudbeds.ts";
 import { createFakeStripe, parseStripeForm, stripeSignatureHeader } from "./mock/fakeStripe.ts";
@@ -581,6 +581,215 @@ golden("scenarios", "webhook: bad signatures (alert on the third), ignored event
   await send("a session that is not ours (no metadata)", event("checkout.session.completed", { id: "cs_test_golden0000000000", object: "checkout.session", metadata: {}, client_reference_id: null, payment_status: "paid", status: "complete" }));
   const ours = g.kit.fakeStripe.session(o.sessionId);
   await send("our session, but a live-mode event", event("checkout.session.completed", { ...ours, line_items_input: undefined, payment_intent_metadata: undefined }, true));
+  return finish(g);
+});
+
+/* ------------------- added after the phase-1 review (F1) ------------------- */
+// Live branches the S1.x refactor rewrote that no record above reached (the review's mutation probe changed
+// each of them with every test still passing): Stripe's amount/currency against the metadata, the hold side's
+// re-read of a session the list missed, a release while the page is created, the request options, an orphan's
+// paid marker with no peers, status with another booking's ids, the list's delayed and other-livemode sessions,
+// step 1's error paths. Like every record, these were written with UPDATE_GOLDEN=1 on the pre-refactor code
+// (c45099c: cd6dae8 plus this test file) and the refactored code must reproduce them byte for byte. Where the
+// refactor answers differently on purpose (status of an other-livemode session, S1.5), the new answer is pinned
+// outside the snapshot, in providerDispatch.test.ts.
+
+/** runStatus with any parameters (another booking's session id or link token, a malformed or unknown id). */
+async function statusWith(g: GoldenKit, params: { t: string; l?: string | null; s?: string | null }, label: string): Promise<void> {
+  const res = await runStatus(
+    { t: params.t, p: null, l: params.l ?? null, s: params.s ?? null },
+    { config: g.kit.config, stripe: g.kit.deps, nowMs: g.kit.now.ms, log: g.kit.deps.log },
+  );
+  g.tape.step(label, res);
+}
+
+/** The Stripe list of the last 48 h no longer returns the session (its creation stamp is moved back 49 h). */
+function unlisted(g: GoldenKit, sessionId: string): void {
+  const s = g.kit.fakeStripe.session(sessionId);
+  if (!s) throw new Error("no session");
+  s.created -= 49 * 3600;
+}
+
+type SessionsCreate = StripeDeps["stripe"]["checkout"]["sessions"]["create"];
+
+/**
+ * Wraps checkout.sessions.create on the kit's Stripe client (checkout calls it there): `around` runs with the
+ * params and options checkout passed, and returns the session.
+ */
+function aroundSessionCreate(g: GoldenKit, around: (create: (params: unknown, options: unknown) => Promise<{ id: string }>, params: unknown, options: unknown) => Promise<unknown>): void {
+  const sessions = g.kit.deps.stripe.checkout.sessions;
+  const create = sessions.create.bind(sessions) as unknown as (params: unknown, options: unknown) => Promise<{ id: string }>;
+  sessions.create = ((params: unknown, options: unknown) => around(create, params, options)) as unknown as SessionsCreate;
+}
+
+golden("scenarios", "webhook completed: Stripe's amount or currency differs from the booking total -> needs attention; status refuses it", async () => {
+  const g = goldenKit();
+  const a = await opened(g, HONEYMOON, {}, "checkout 1");
+  const sa = g.kit.fakeStripe.session(a.sessionId);
+  if (!sa) throw new Error("no session");
+  sa.amount_total -= 100; // one baht less than msv_total_satang
+  g.kit.fakeStripe.complete(a.sessionId);
+  await webhook(g, "checkout.session.completed", a.sessionId, "webhook 1 (amount differs)");
+  await status(g, a, { s: true }, "status 1 (session id)");
+  g.tape.step("fulfilSession 1 once more", await fulfilSession(a.sessionId, g.kit.deps));
+  g.kit.now.ms += 60_000;
+  const b = await opened(g, GARDEN, {}, "checkout 2");
+  const sb = g.kit.fakeStripe.session(b.sessionId);
+  if (!sb) throw new Error("no session");
+  sb.currency = "usd";
+  g.kit.fakeStripe.complete(b.sessionId);
+  await webhook(g, "checkout.session.completed", b.sessionId, "webhook 2 (currency differs)");
+  await status(g, b, { l: true }, "status 2 (link token)");
+  return finish(g);
+});
+
+golden("scenarios", "status: another booking's session id or link token, malformed and unknown ids, stripe-test on the production deployment (no purchase)", async () => {
+  const g = goldenKit({ ...STRIPE_TEST_ENV, VERCEL_ENV: "production" });
+  const a = await opened(g, HONEYMOON, {}, "checkout A");
+  g.kit.now.ms += 60_000;
+  const b = await opened(g, GARDEN, {}, "checkout B");
+  g.kit.now.ms += 60_000;
+  const c = await opened(g, HONEYMOON, DECEMBER, "checkout C (the same amount as A)");
+  await statusWith(g, { t: a.t, s: b.sessionId }, "status A with B's session id");
+  await statusWith(g, { t: a.t, s: c.sessionId }, "status A with C's session id (same amount, another ref)");
+  await statusWith(g, { t: a.t, l: b.linkToken }, "status A with B's link token (the pointer is used)");
+  await statusWith(g, { t: a.t, s: "not-a-session", l: a.linkToken }, "status A with a malformed session id and A's link token");
+  await statusWith(g, { t: a.t, s: "cs_test_unknown0000000000000000" }, "status A with a session id Stripe does not know");
+  g.kit.fakeStripe.complete(a.sessionId);
+  await statusWith(g, { t: a.t, s: a.sessionId }, "status A paid (confirmed; a test mode never carries the purchase)");
+  await statusWith(g, { t: b.t, s: a.sessionId }, "status B with A's paid session id");
+  const sb = g.kit.fakeStripe.session(b.sessionId);
+  if (sb) sb.metadata = {};
+  await statusWith(g, { t: b.t, s: b.sessionId }, "status B, its session without our metadata (not ours)");
+  return finish(g);
+});
+
+golden("scenarios", "sweep: stale holds whose session the Stripe list misses (open, paid, expired): the hold side re-reads the recorded session", async () => {
+  const g = goldenKit();
+  const open = await opened(g, HONEYMOON, {}, "checkout 1 (still open)");
+  g.kit.now.ms += 60_000;
+  const paid = await opened(g, GARDEN, {}, "checkout 2 (paid, its webhook never arrives)");
+  g.kit.now.ms += 60_000;
+  const expired = await opened(g, SUNRISE, {}, "checkout 3 (expires without a webhook)");
+  const so = g.kit.fakeStripe.session(open.sessionId);
+  if (so) so.expires_at += 3600;
+  g.kit.fakeStripe.complete(paid.sessionId);
+  for (const o of [open, paid, expired]) unlisted(g, o.sessionId);
+  g.tape.step("setup: the Stripe list misses all three sessions");
+  g.kit.now.ms += STALE_HOLD_MS + 5 * 60_000;
+  await sweep(g, "sweep");
+  await sweep(g, "sweep again");
+  return finish(g);
+});
+
+golden("scenarios", "sweep: the Stripe list holds delayed (complete but unpaid) and other-livemode sessions", async () => {
+  const g = goldenKit();
+  const processing = await opened(g, HONEYMOON, {}, "checkout 1 (delayed payment still processing)");
+  g.kit.now.ms += 60_000;
+  const failed = await opened(g, GARDEN, {}, "checkout 2 (delayed payment failed, no webhook)");
+  g.kit.now.ms += 60_000;
+  const otherPaid = await opened(g, SUNRISE, {}, "checkout 3 (paid; the session reads as live mode)");
+  g.kit.now.ms += 60_000;
+  const otherExpired = await opened(g, HONEYMOON, DECEMBER, "checkout 4 (expired; the session reads as live mode)");
+  g.kit.fakeStripe.completeDelayed(processing.sessionId);
+  g.kit.fakeStripe.completeDelayed(failed.sessionId);
+  g.kit.fakeStripe.asyncFail(failed.sessionId);
+  g.kit.fakeStripe.complete(otherPaid.sessionId);
+  g.kit.fakeStripe.expire(otherExpired.sessionId);
+  for (const o of [otherPaid, otherExpired]) {
+    const s = g.kit.fakeStripe.session(o.sessionId);
+    if (s) s.livemode = true;
+  }
+  g.tape.step("setup: two delayed sessions, two sessions of the other mode");
+  g.kit.now.ms += STALE_HOLD_MS + 5 * 60_000;
+  await sweep(g, "sweep");
+  return finish(g);
+});
+
+golden("scenarios", "sweep: orphans with a paid marker (Redis lost the hold record) on a primary run with no peers", async () => {
+  const g = goldenKit();
+  // 1: Stripe's amount differs -> needs attention (done marker; the hold stays "Confirmation pending").
+  const a = await opened(g, HONEYMOON, {}, "checkout 1");
+  const sa = g.kit.fakeStripe.session(a.sessionId);
+  if (!sa) throw new Error("no session");
+  sa.amount_total -= 100;
+  g.kit.fakeStripe.complete(a.sessionId);
+  await webhook(g, "checkout.session.completed", a.sessionId, "webhook 1 (needs attention)");
+  // 2: Cloudbeds refuses the payment once -> paid marker, not done.
+  g.kit.now.ms += 60_000;
+  const b = await opened(g, GARDEN, {}, "checkout 2");
+  g.kit.fakeStripe.complete(b.sessionId);
+  g.kit.fakeCb.failNext("postPayment", "rejected", "Payment type not found");
+  await webhook(g, "checkout.session.completed", b.sessionId, "webhook 2 (postPayment refused)");
+  // Only the paid markers survive: both hold records, checkout 2's paid record and paid index entry are gone,
+  // and the Stripe list no longer returns checkout 2's session.
+  const kv = g.kit.deps.kv;
+  for (const o of [a, b]) {
+    await kv.del(keys.hold(o.reservationId));
+    await kv.zrem(keys.holdIndex(), o.reservationId);
+  }
+  await kv.del(keys.paidPending(b.sessionId));
+  await kv.zrem(keys.paidIndex(keyScope(g.kit.config.paymentMode)), b.sessionId);
+  unlisted(g, b.sessionId);
+  g.tape.step("setup: Redis lost both hold records and checkout 2's paid record");
+  // Cloudbeds' creation time (no zone, read as UTC) is never older than it could be: 8 h makes them stale.
+  g.kit.now.ms += 8 * 3600_000;
+  await sweep(g, "sweep");
+  return finish(g);
+});
+
+golden("scenarios", "checkout: the hold is released while the payment page is created -> page expired, hold given back, 502", async () => {
+  const g = goldenKit();
+  let release: unknown = null;
+  aroundSessionCreate(g, async (create, params, options) => {
+    const session = await create(params, options);
+    const reservationId = String((params as { metadata?: Record<string, string> }).metadata?.msv_cb_reservation_id);
+    release = await releaseHold(reservationId, g.kit.deps, "sweeper: stale hold");
+    return session;
+  });
+  await quoteAndCheckout(g);
+  g.tape.step("the release that ran while the page was created", release);
+  return finish(g);
+});
+
+golden("scenarios", "checkout: the Stripe request options follow the time left (timeout, retries) and the idempotency key", async () => {
+  const g = goldenKit();
+  const options: unknown[] = [];
+  aroundSessionCreate(g, (create, params, opts) => {
+    options.push(opts ?? null);
+    return create(params, opts);
+  });
+  const T = 1_000_000;
+  const runs: [string, CartItemInput[], number | null][] = [
+    ["30 s left", HONEYMOON, 30_000],
+    ["17 s left (the least a hold starts with)", GARDEN, 17_000],
+    ["no deadline", SUNRISE, null],
+  ];
+  for (const [label, items, left] of runs) {
+    const deps = { ...g.kit.checkoutDeps(), ...(left === null ? {} : { deadlineMs: T + left, clock: () => T }) };
+    const req = request(items);
+    const quoted = await runCheckout({ ...req, expectedTotalSatang: 1, expectedDueNowSatang: 1 }, deps);
+    if (quoted.body.ok || !quoted.body.quote) throw new Error("no quote");
+    const res = await runCheckout({ ...req, expectedTotalSatang: quoted.body.quote.totalSatang, expectedDueNowSatang: quoted.body.quote.dueNowSatang }, deps);
+    g.tape.step(`checkout, ${label}`, { status: res.status, ok: res.body.ok, requestOptions: options.splice(0) });
+    g.kit.now.ms += 60_000;
+  }
+  return finish(g);
+});
+
+golden("scenarios", "sweep: step 1 errors: a listed paid session whose fulfilment fails is alerted, a delayed one whose re-read fails is logged", async () => {
+  const g = goldenKit();
+  const paid = await opened(g, HONEYMOON, {}, "checkout 1 (paid, its webhook never arrives)");
+  g.kit.now.ms += 60_000;
+  const delayed = await opened(g, GARDEN, {}, "checkout 2 (delayed payment still processing, no webhook)");
+  g.kit.fakeStripe.complete(paid.sessionId);
+  g.kit.fakeStripe.completeDelayed(delayed.sessionId);
+  g.kit.fakeCb.failNext("postPayment", "rejected", "Payment type not found");
+  g.kit.fakeStripe.failNext(new RegExp(`^GET /v1/checkout/sessions/${delayed.sessionId}$`), 500, "Simulated Stripe outage");
+  g.tape.step("setup: Cloudbeds refuses the next payment, Stripe fails the next read of checkout 2's session");
+  g.kit.now.ms += STALE_HOLD_MS + 5 * 60_000;
+  await sweep(g, "sweep");
+  await sweep(g, "sweep again (the payment goes through)");
   return finish(g);
 });
 

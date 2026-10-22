@@ -143,19 +143,21 @@ test("enabled analytics push one gtag Arguments entry per event", () => {
   assert.equal(params.value, quote.lines[0].roomSatang / 100);
 });
 
-test("purchase fires once per ref; the tab guard waits for gtag's event_callback", () => {
+test("beam-live needs the server's confirmation: purchase fires once per ref with the Cloudbeds reservationID as transaction_id; the tab guard waits for gtag's event_callback", () => {
   const { win, store } = fakeBrowser();
   const quote = sampleQuote();
   const booking = sampleBooking(quote, "MSV-20261005-T3ST");
   const live = createBookingAnalytics("beam-live", "production");
-  // Outside the demo a purchase needs the server's confirmation; this one carries the ref and amount as its
-  // transaction id and value, so the payload checks below read as before.
-  const confirmed: PurchaseView = { transactionId: booking.ref, valueBaht: booking.dueNowSatang / 100, currency: "THB" };
+  // A behaviour change of S0.3 (Beam design), not a refactor: before it, beam-live sent the purchase on its own,
+  // with the booking ref as transaction_id. Now, as in Stripe, only the server's confirmation (StatusResponse.purchase)
+  // sends it, and transaction_id is the Cloudbeds reservationID it carries. The Beam status path does not return one
+  // yet (config.test.ts guards LIVE_FULFILMENT_READY.beam on it).
+  const confirmed: PurchaseView = { transactionId: "48213377", valueBaht: booking.dueNowSatang / 100, currency: "THB" };
   live.purchase(booking, confirmed);
   live.purchase(booking, confirmed);
   assert.equal(win.dataLayer.length, 1, "queued once");
   const params = Array.from(win.dataLayer[0] as ArrayLike<unknown>)[2] as Record<string, unknown>;
-  assert.equal(params.transaction_id, booking.ref);
+  assert.equal(params.transaction_id, "48213377", "the Cloudbeds reservationID, not the booking ref");
   assert.equal(params.value, booking.dueNowSatang / 100);
   assert.equal(params.tax, booking.cardFeeSatang / 100);
   assert.equal(params.subtotal, (booking.totalSatang - booking.cardFeeSatang) / 100);

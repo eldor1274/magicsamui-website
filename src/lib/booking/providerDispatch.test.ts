@@ -276,3 +276,40 @@ test("runtime: providerDepsFor builds the active deps at once and another provid
   assert.equal(runtime.getFulfilmentProviderDeps(DEMO_ENV, "beam"), null);
   assert.equal(runtime.getFulfilmentProviderDeps({ BOOKING_PAYMENT_PROVIDER: "demo" }, "stripe"), null, "no Stripe credentials: nothing to finish");
 });
+
+// A deliberate difference from cd6dae8 (found by the phase-1 review, not disclosed in the S1.5 commit), pinned here
+// because the golden snapshot only holds what the pre-refactor code did. holdFirstStatus checks the payment
+// through gw.get, whose meta is null for a session of the other Stripe mode (fulfil.ts modeMatches): such a
+// session is now refused as AMOUNT_OR_REFERENCE_MISMATCH, logged as stripe_status_mismatch. cd6dae8's stripeStatus
+// read the metadata without the livemode filter and answered "paid" with the fulfilment stuck at "confirming"
+// (fulfil refused the session silently). It cannot happen live: the mode comes from the key's kind, and a Stripe key
+// cannot retrieve a session of the other mode.
+test("status: a paid session of the other Stripe mode is refused as a mismatch (deliberate since S1.5; cd6dae8 answered paid/confirming)", async () => {
+  const kit = makeKit();
+  const a = await opened(kit);
+  kit.fakeStripe.complete(a.sessionId);
+  const session = kit.fakeStripe.session(a.sessionId)!;
+  session.livemode = true; // a stripe-test deployment, a live-mode session
+  const logsFrom = kit.logs.length;
+  const cbFrom = kit.fakeCb.calls.length;
+  for (const [label, s, l] of [
+    ["session id", a.sessionId, null],
+    ["link token", null, a.l],
+    ["pointer", null, null],
+  ] as const) {
+    const res = await runStatus({ t: a.t, p: null, l, s }, { config: kit.config, stripe: kit.deps, nowMs: NOW, log: kit.deps.log });
+    assert.equal(res.status, 200, label);
+    const body = res.body as StatusResponse;
+    assert.equal(body.status, "failed", label);
+    assert.equal(body.failureCode, "AMOUNT_OR_REFERENCE_MISMATCH", label);
+    assert.deepEqual(body.fulfilment, { state: "not_applicable", reservationId: null }, label);
+    assert.equal(body.purchase, null, label);
+  }
+  assert.deepEqual(
+    kit.logs.slice(logsFrom).map((x) => [x.message, x.data]),
+    Array.from({ length: 3 }, () => ["stripe_status_mismatch", { ref: a.booking.ref, sessionId: a.sessionId }]),
+  );
+  assert.deepEqual(kit.fakeCb.calls.slice(cbFrom), [], "nothing is written to Cloudbeds");
+  assert.equal(kit.fakeCb.reservations.get(a.reservationId)?.status, "not_confirmed", "the hold is neither confirmed nor released");
+  assert.equal(kit.alerts.length, 0);
+});

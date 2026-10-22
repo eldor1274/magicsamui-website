@@ -8,8 +8,10 @@
 // - a hold with an intent of another mode is that mode's run's to adopt, never an orphan;
 // - the primary run releases an orphan only when no peer sees a payment for it that is not over, so a paid or
 //   still-payable booking of the other provider whose record was lost is never cancelled by it;
-// - primary: true with no peers is today's sweep: the same answer, Cloudbeds and Stripe calls, alerts, log
-//   events and KV writes as runSweep(deps), also when the listing or step 1 is handed in.
+// - the options change nothing on their own: primary: true with no peers gives the same answer, Cloudbeds and
+//   Stripe calls, alerts, log events and KV writes as runSweep(deps), also when the listing or step 1 is handed
+//   in. Both sides run the refactored code, so this is an options-equivalence test, not parity with cd6dae8:
+//   only the golden snapshot (stripeGolden.test.ts) pins the sweep to the pre-refactor behaviour.
 // Only Stripe exists so far: the other provider here is "Acme" (the Stripe gateway under another brand and
 // wording), either blind to Stripe's sessions or reading them in its own words.
 
@@ -349,7 +351,7 @@ async function scenario() {
   return { kit, tape };
 }
 
-test("primary=true (no peers) is today's sweep: the same answer and the same calls, alerts, logs and KV writes as runSweep(deps), also with step 1 and the listing handed in", async () => {
+test("options equivalence: primary=true with no peers gives the same answer and the same calls, alerts, logs and KV writes as runSweep(deps), also with step 1 and the listing handed in", async () => {
   const today = await scenario();
   const reference = await runSweep(today.kit.deps);
   assert.equal(reference.fulfilled, 1);
