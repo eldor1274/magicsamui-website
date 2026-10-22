@@ -14,8 +14,8 @@
 // hold back, and so does the crash catch. startStripeCheckout (stripeCheckout.ts) is this core with the
 // Stripe adapter.
 //
-// The shared constants and helpers stay in stripeCheckout.ts, which imports this file back for
-// startStripeCheckout: only functions cross that cycle, and nothing here runs at load time.
+// The shared constants and helpers are in checkoutShared.ts, which this file and stripeCheckout.ts both
+// import: stripeCheckout.ts imports this file for startStripeCheckout, and nothing here imports it back.
 
 import { getCatalogueRoom } from "./catalogue.ts";
 import { CloudbedsWriteError, redactForLog } from "./cloudbedsWrite.ts";
@@ -60,8 +60,8 @@ import {
   lockUnits,
   testModeRefusal,
   unlockAll,
-} from "./stripeCheckout.ts";
-import type { StripeCheckoutContext, StripeCheckoutInput, StripeCheckoutResult } from "./stripeCheckout.ts";
+} from "./checkoutShared.ts";
+import type { StripeCheckoutContext, StripeCheckoutInput, StripeCheckoutResult } from "./checkoutShared.ts";
 import type { CoreDeps } from "./stripeDeps.ts";
 import { STALE_HOLD_MS } from "./sweep.ts";
 import { hasTestAccess } from "./testAccess.ts";
