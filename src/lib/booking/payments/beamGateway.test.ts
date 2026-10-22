@@ -84,7 +84,7 @@ test("the Beam gateway: provider, brand, keys, ids, hold identifiers and the 708
   assert.equal(gw.parseHoldId?.("MSV-20261005-ABCD"), null, "a Stripe hold is never a Beam one");
   assert.equal(gw.doneTtlSeconds, BEAM_RECORD_TTL_SECONDS);
   assert.ok(gw.releaseGuard);
-  await assert.rejects(gw.sweepRecent(NOW - 3_600_000), /S4\.2/, "nothing sweeps Beam before S4.2: a throw, never an empty listing");
+  assert.deepEqual(await gw.sweepRecent(NOW - 3_600_000), [], "S4.2: nothing tracked and no charge on Beam - an empty listing (beamSweep.test.ts covers the rest)");
 });
 
 test("a key that is not a Beam key, and a link Beam does not know, read as missing: abandon answers closed", async () => {

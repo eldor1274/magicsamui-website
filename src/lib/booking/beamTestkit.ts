@@ -5,9 +5,10 @@
 // the process.
 //
 // beamCheckout runs the real hold-first core (holdFirstCheckout.ts) with a STAND-IN Beam adapter: the link of
-// the guest's method group with our signed note, created on the fake Beam, and its PaymentRecord. It is only
-// what the gateway tests need to have a real Beam hold to fulfil, release and abandon; design S4.3 builds the
-// real adapter (beamCheckoutAdapter: circuit breaker, links-open, retries) and replaces this one.
+// the guest's method group with our signed note, created on the fake Beam, its PaymentRecord and its links-open
+// entry (trackOpenLink, which the sweeper reads: S4.2). It is only what the gateway and sweep tests need to have
+// a real Beam hold to fulfil, release, abandon and sweep; design S4.3 builds the real adapter
+// (beamCheckoutAdapter: circuit breaker, retries, the hold note's words) and replaces this one.
 
 import { createAlerter } from "./alerts.ts";
 import { getCartInventory, buildOffers } from "./availability.ts";
@@ -29,7 +30,7 @@ import { createFakeBeam } from "./mock/fakeBeam.ts";
 import type { FakeBeam, FakeBeamOptions } from "./mock/fakeBeam.ts";
 import { FAKE_PAYMENT_METHODS, createFakeCloudbeds } from "./mock/fakeCloudbeds.ts";
 import type { FakeCloudbeds, FakeCloudbedsOptions } from "./mock/fakeCloudbeds.ts";
-import { beamGateway } from "./payments/beamGateway.ts";
+import { beamGateway, trackOpenLink } from "./payments/beamGateway.ts";
 import type { BeamGateway, BeamGatewayDeps } from "./payments/beamGateway.ts";
 import { buildBeamNote, writeRecord } from "./payments/beamRecord.ts";
 import type { BeamNote, PaymentRecord } from "./payments/beamRecord.ts";
@@ -271,6 +272,8 @@ function standInBeamAdapter(kit: BeamKit, payMethod: PayMethod): CheckoutAdapter
       const record = records.get(page.key);
       if (!record) throw new Error("stand-in Beam adapter: no record for the page");
       await writeRecord(kit.deps.kv, record);
+      // As the real adapter does (design S4.3): the sweeper reads every links-open entry on every run (S4.2).
+      await trackOpenLink(kit.deps.kv, config.paymentMode, record.linkId, record.expiresAt);
     },
     errorInfo: beamErrorInfo,
     pageFailedAlert: (info, ref) => ({

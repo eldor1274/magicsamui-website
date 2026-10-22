@@ -27,7 +27,7 @@ export const BEAM_DISPUTE_WINDOW_DAYS = 120;
 export const BEAM_RECORD_TTL_SECONDS = (BOOKING_WINDOW_MONTHS * 31 + BEAM_DISPUTE_WINDOW_DAYS + 30) * 24 * 3600;
 
 /** The set-once "told the owner" markers of the Beam payment flow (keys.beamReported). */
-export type BeamReportKind = "dup-charge" | "record-missing" | "unknown-payment" | "foreign-link" | "refund-ambiguous";
+export type BeamReportKind = "dup-charge" | "record-missing" | "unknown-payment" | "foreign-link" | "refund-ambiguous" | "scan-refused";
 
 /**
  * Key scope of a payment mode: "live" for stripe-live, else the mode itself
@@ -111,7 +111,8 @@ export const keys = {
   beamLinksWatch: (scope: string) => `msv:${scope}:beam:links:watch`,
   /**
    * Set-once "told the owner" marker: a duplicate charge, a missing record, an unknown MSV payment, a foreign
-   * link (cached as not ours), a refunded link with several successful charges (S4.1).
+   * link (cached as not ours: the sweeper's 8-day cache, S4.2), a refunded link with several successful charges
+   * (S4.1), Beam refusing the sweeper's unfiltered charge scan (S4.2).
    */
   beamReported: (scope: string, kind: BeamReportKind, id: string) => `msv:${scope}:beam:reported:${kind}:${id}`,
   /** A Beam transaction (PAYMENT, REFUND, VOID, CHARGEBACK) already handled by the webhook. */
@@ -122,6 +123,8 @@ export const keys = {
   beamRateLimited: (scope: string) => `msv:${scope}:beam:ratelimited`,
   /** When disabling this link first failed (ms): a disable that keeps failing alerts. */
   beamDisableFail: (scope: string, linkId: string) => `msv:${scope}:beam:disablefail:${linkId}`,
+  /** Sorted set of the links the sweeper could not read (score = the first failed reading, ms): one that keeps failing alerts (S4.2). */
+  beamReadFailures: (scope: string) => `msv:${scope}:beam:readfail`,
   /** Consecutive failed payment-page creations (the circuit breaker's count). */
   beamPageFail: (scope: string) => `msv:${scope}:beam:pagefail`,
   /** Set while the circuit breaker pauses Beam checkout. */

@@ -160,7 +160,7 @@ test("every Stripe key name, TTL and hold suffix is byte-identical; the Beam key
     names.filter((n) => n.startsWith("beam")),
     [
       "beamPayment", "beamCharge", "beamPrimary", "beamLinksOpen", "beamLinksWatch", "beamReported", "beamTxn", "beamBadSignatures",
-      "beamRateLimited", "beamDisableFail", "beamPageFail", "beamPaused", "beamDeepScan",
+      "beamRateLimited", "beamDisableFail", "beamReadFailures", "beamPageFail", "beamPaused", "beamDeepScan",
     ],
   );
   assert.equal(LOCK_TTL_SECONDS, 120);
@@ -173,6 +173,7 @@ test("every Beam key carries 'beam:' right after 'msv:' or the mode scope, and n
   assert.equal(keys.beamCharge(CHARGE_ID), "msv:beam:charge:ch_3Ns8XkLmQ2");
   assert.equal(keys.beamLinksOpen("beam-live"), "msv:beam-live:beam:links:open");
   assert.equal(keys.beamLinksWatch("beam-live"), "msv:beam-live:beam:links:watch");
+  assert.equal(keys.beamReadFailures("beam-live"), "msv:beam-live:beam:readfail");
   const stripeKeys = new Set(
     [SESSION_ID, LINK_ID, CHARGE_ID, beamKeyOf(LINK_ID)].flatMap((id) => [
       keys.fulfilLock(id), keys.fulfilDone(id), keys.paidPending(id), keys.abandoned(id), keys.hold(id), keys.releaseDone(id),
@@ -185,11 +186,12 @@ test("every Beam key carries 'beam:' right after 'msv:' or the mode scope, and n
       keys.beamPrimary(LINK_ID),
       keys.beamLinksOpen(scope),
       keys.beamLinksWatch(scope),
-      ...(["dup-charge", "record-missing", "unknown-payment", "foreign-link", "refund-ambiguous"] as const).map((kind) => keys.beamReported(scope, kind, LINK_ID)),
+      ...(["dup-charge", "record-missing", "unknown-payment", "foreign-link", "refund-ambiguous", "scan-refused"] as const).map((kind) => keys.beamReported(scope, kind, LINK_ID)),
       keys.beamTxn(scope, CHARGE_ID),
       keys.beamBadSignatures(scope),
       keys.beamRateLimited(scope),
       keys.beamDisableFail(scope, LINK_ID),
+      keys.beamReadFailures(scope),
       keys.beamPageFail(scope),
       keys.beamPaused(scope),
       keys.beamDeepScan(scope),
