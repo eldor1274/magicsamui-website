@@ -1401,3 +1401,23 @@ test("the Beam run reports what its tracking read (links) in runs[], and at the 
     assert.equal("links" in answer.body, primary === "beam", `${primary}: the top level is the primary run's summary`);
   }
 });
+
+test("one clock per run: each run's hold side and heartbeat keep the time taken before its step 1, as a lone run (round 6)", async () => {
+  const a = await scenario();
+  const t0 = a.w.now.ms;
+  // Beam's first call (in its step 1, after Stripe's step 1) moves the business clock by 30 seconds.
+  const fake = a.w.beam.fakeBeam.fetch;
+  let moved = false;
+  a.w.beamFetch.current = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (!moved) {
+      moved = true;
+      a.w.now.ms += 30_000;
+    }
+    return fake(input, init);
+  }) as typeof fetch;
+  const answer = await sweepBoth(a.w, "stripe");
+  assert.equal(answer.status, 200, JSON.stringify(answer.body));
+  assert.equal(a.w.now.ms, t0 + 30_000);
+  assert.equal(await a.w.stripeKv.get(keys.lastSweep(STRIPE_SCOPE)), String(t0), "the Stripe run's time: before its step 1");
+  assert.equal(await a.w.beamKv.get(keys.lastSweep(BEAM_SCOPE)), String(t0), "the Beam run's time: before its step 1 (before its first Beam call)");
+});
