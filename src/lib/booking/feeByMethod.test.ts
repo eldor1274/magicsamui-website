@@ -24,7 +24,7 @@ import { PAY_METHOD_UNREADABLE, parseCheckoutRequest } from "./validate.ts";
 const KEYS = { BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k" };
 /** beam-playground with no Cloudbeds variables (demo rates, the mock writer locally). */
 const BEAM_PG: Env = { BOOKING_PAYMENT_PROVIDER: "beam", BEAM_API_BASE: BEAM_PLAYGROUND_BASE, ...KEYS, BOOKING_TOKEN_SECRET: TOKEN_SECRET };
-/** beam-live with every condition today's code checks (the code switch is overridden where it is used). */
+/** beam-live with every beamLiveBlockers condition (the code switch is overridden where it is used). */
 const BEAM_LIVE: Env = {
   ...BEAM_PG,
   BEAM_API_BASE: BEAM_LIVE_BASE,
@@ -35,6 +35,10 @@ const BEAM_LIVE: Env = {
   UPSTASH_REDIS_REST_TOKEN: "token-testkit",
   BOOKING_ALLOW_LIVE_PAYMENTS: "true",
   VERCEL_ENV: "production",
+  // Since design S3.4 (beamLiveBlockers): the webhook HMAC key, a sweep secret and the Cloudbeds confirmation email.
+  BEAM_WEBHOOK_HMAC_KEY: Buffer.from("test-only-beam-hmac-key-01234567").toString("base64"),
+  BOOKING_SWEEP_SECRET: "sweep-secret-testkit-0123456789",
+  CLOUDBEDS_SEND_STATUS_EMAIL: "true",
 };
 const MOCK_ENV: Env = { BOOKING_PAYMENT_PROVIDER: "stripe", BOOKING_STRIPE_MOCK: "true" };
 const METHODS: PayMethod[] = ["card_ewallet", "promptpay"];

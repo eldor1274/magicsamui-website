@@ -8,7 +8,7 @@ import Footer from "@/components/Footer";
 import WhatsAppFab from "@/components/WhatsAppFab";
 import { site } from "@/data/site";
 import { GOOGLE_ADS_ID } from "@/lib/analytics";
-import { directCopySwapped, finishesLiveStripePayments, getPublicBookingConfig, resolveBookingEngine } from "@/lib/booking/config";
+import { directCopySwapped, finishesLivePayments, getPublicBookingConfig, resolveBookingEngine } from "@/lib/booking/config";
 import "./globals.css";
 
 const sans = Inter({
@@ -58,12 +58,12 @@ export default function RootLayout({
 }>) {
   const gaId = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID;
   const tagIds = [gaId, GOOGLE_ADS_ID].filter(Boolean);
-  // The booking preview is tracked only while it takes REAL payments (stripe-live on production: Stage C
-  // and the soft launch run there). Demo / test / MOCK payments never reach GA4 or Google Ads.
+  // The booking preview is tracked only while it takes REAL payments (stripe-live or beam-live on production:
+  // Stage C and the soft launch run there). Demo / test / MOCK payments never reach GA4 or Google Ads.
   const previewTracked = getPublicBookingConfig().live;
-  // The soft-launch return page also while live Stripe payments are only being FINISHED (emergency stop,
-  // provider drain): paid bookings are still confirmed there, and their purchase must still be recorded.
-  const previewReturnTracked = previewTracked || finishesLiveStripePayments();
+  // The soft-launch return page also while live Stripe or Beam payments are only being FINISHED (emergency
+  // stop, provider drain): paid bookings are still confirmed there, and their purchase must still be recorded.
+  const previewReturnTracked = previewTracked || finishesLivePayments();
 
   return (
     <html lang="en" className={`${sans.variable} ${serif.variable} h-full`}>

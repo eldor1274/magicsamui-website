@@ -405,6 +405,12 @@ test("beam-live refuses simulated inventory at checkout (defence in depth)", asy
       CLOUDBEDS_PROPERTY_ID: "235064",
       UPSTASH_REDIS_REST_URL: "https://example-redis.upstash.io",
       UPSTASH_REDIS_REST_TOKEN: "token-x",
+      // The rest of beamLiveBlockers (design S3.4): the explicit provider, the webhook HMAC key, a sweep secret and
+      // the Cloudbeds confirmation email.
+      BOOKING_PAYMENT_PROVIDER: "beam",
+      BEAM_WEBHOOK_HMAC_KEY: Buffer.from("test-only-beam-hmac-key-01234567").toString("base64"),
+      BOOKING_SWEEP_SECRET: "sweep-secret-0123456789abcdef",
+      CLOUDBEDS_SEND_STATUS_EMAIL: "true",
     },
     { liveFulfilmentReady: true },
   );

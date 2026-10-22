@@ -10,7 +10,9 @@
 // - Stripe test vs live comes from the key prefix (sk_/rk_ + test_/live_).
 //   A live key is only ever used when EVERY condition in stripeLiveBlockers()
 //   holds; anything missing throws live_payments_locked (nothing charged).
-// - beam-live stays locked in code (Beam has no fulfilment).
+// - beam-live likewise needs every condition in beamLiveBlockers() (design
+//   S3.4), one of which is the code switch LIVE_FULFILMENT_READY.beam: it stays
+//   false, so beam-live stays locked in code (Beam has no fulfilment yet).
 // - stripe-test with a Cloudbeds write key writes REAL reservations, so the
 //   checkout refuses holds unless the arrival is 12+ months out and the guest
 //   email is BOOKING_TEST_GUEST_EMAIL (see stripeCheckout.ts).
@@ -101,6 +103,8 @@ export const TEST_MODE_MIN_ARRIVAL_MONTHS = 12;
 export const MIN_TEST_ACCESS_KEY_LENGTH = 16;
 /** Minimum length of the sweeper secret (BOOKING_SWEEP_SECRET / CRON_SECRET). */
 export const MIN_SWEEP_SECRET_LENGTH = 16;
+/** Minimum DECODED length of BEAM_WEBHOOK_HMAC_KEY (base64) for beam-live (beamLiveBlockers). */
+export const MIN_BEAM_WEBHOOK_HMAC_KEY_BYTES = 16;
 /** guestZip sent when the guest leaves the postcode empty (WI-0: confirm Cloudbeds accepts it). */
 export const DEFAULT_GUEST_ZIP_PLACEHOLDER = "00000";
 /** postReservation paymentMethod enum (Cloudbeds v1.3). */
@@ -112,7 +116,7 @@ export type ReservationPaymentMethod = (typeof RESERVATION_PAYMENT_METHODS)[numb
  * session into a confirmed Cloudbeds reservation?
  * - stripe: yes (hold-first + webhook/return-page fulfil + sweeper).
  * - beam: no (its webhook only logs), so beam-live stays refused whatever the
- *   environment says.
+ *   environment says (beamLiveBlockers names it; design S7.1 flips it).
  */
 export const LIVE_FULFILMENT_READY: Record<"beam" | "stripe", boolean> = { beam: false, stripe: true };
 
@@ -256,6 +260,14 @@ export interface ModeOptions {
   liveFulfilmentReady?: boolean;
 }
 
+export interface BeamLiveBlockerOptions extends ModeOptions {
+  /**
+   * The conditions for FINISHING live Beam payments (getFulfilmentConfig, getBeamDrainConfig): the checkout-only
+   * ones (BOOKING_ALLOW_LIVE_PAYMENTS=true, CLOUDBEDS_SEND_STATUS_EMAIL=true) are skipped.
+   */
+  fulfilment?: boolean;
+}
+
 function trimmed(v: string | undefined): string {
   return (v ?? "").trim();
 }
@@ -369,24 +381,85 @@ export function stripeLiveBlockers(env: Env, options: ModeOptions = {}): string[
   return missing;
 }
 
-function resolveBeamMode(env: Env, options: ModeOptions): PaymentMode {
-  const base = trimmed(env.BEAM_API_BASE).replace(/\/+$/, "");
+/** BEAM_API_BASE as compared with the known bases (trimmed, without trailing slashes). */
+function beamBaseOf(env: Env): string {
+  return trimmed(env.BEAM_API_BASE).replace(/\/+$/, "");
+}
+
+/**
+ * Decoded length in bytes of a base64 BEAM_WEBHOOK_HMAC_KEY (Lighthouse's key: the standard alphabet, padding
+ * optional); 0 when it is unset or not base64 (a raw-string key, stray characters, an impossible length). The key's
+ * value is never logged or returned.
+ */
+export function beamWebhookHmacKeyBytes(raw: string | undefined): number {
+  const m = /^([A-Za-z0-9+/]*)(={0,2})$/.exec(trimmed(raw));
+  if (!m) return 0;
+  const [, body, padding] = m;
+  if (body.length % 4 === 1 || (padding !== "" && (body.length + padding.length) % 4 !== 0)) return 0;
+  return Math.floor((body.length * 3) / 4);
+}
+
+/** The code switch's entry in beamLiveBlockers' list. */
+const BEAM_CODE_SWITCH_BLOCKER = "LIVE_FULFILMENT_READY.beam (code)";
+
+/**
+ * Everything that must hold before the LIVE Beam API may be used (design S3.4); the (non-secret) names of the
+ * missing conditions, empty = beam-live allowed. The same live conditions as stripeLiveBlockers, for Beam: the
+ * provider, the live base, the keys, a webhook HMAC key (base64, 16+ bytes decoded), the production deployment,
+ * real Cloudbeds writes, Redis, a strong token secret, live Cloudbeds data, a sweep secret and the code switch.
+ * Checkout only (skipped with `fulfilment`, so paid and started bookings are still finished): the emergency stop
+ * BOOKING_ALLOW_LIVE_PAYMENTS=true, and CLOUDBEDS_SEND_STATUS_EMAIL=true, because Beam sends no receipt and the
+ * Cloudbeds confirmation email is the guest's written confirmation (owner decision 6). The Cloudbeds payment method
+ * (CLOUDBEDS_BEAM_PAYMENT_METHOD) is deliberately NOT a condition (resolveCloudbedsPaymentMethod).
+ */
+export function beamLiveBlockers(env: Env, options: BeamLiveBlockerOptions = {}): string[] {
+  const checkout = !options.fulfilment;
+  const missing: string[] = [];
+  if (trimmed(env.BOOKING_PAYMENT_PROVIDER).toLowerCase() !== "beam") missing.push("BOOKING_PAYMENT_PROVIDER=beam");
+  if (beamBaseOf(env) !== BEAM_LIVE_BASE) missing.push(`BEAM_API_BASE (${BEAM_LIVE_BASE})`);
+  if (trimmed(env.BEAM_MERCHANT_ID) === "") missing.push("BEAM_MERCHANT_ID");
+  if (trimmed(env.BEAM_API_KEY) === "") missing.push("BEAM_API_KEY");
+  if (beamWebhookHmacKeyBytes(env.BEAM_WEBHOOK_HMAC_KEY) < MIN_BEAM_WEBHOOK_HMAC_KEY_BYTES) {
+    missing.push(`BEAM_WEBHOOK_HMAC_KEY (base64, ${MIN_BEAM_WEBHOOK_HMAC_KEY_BYTES}+ bytes decoded)`);
+  }
+  if (checkout && env.BOOKING_ALLOW_LIVE_PAYMENTS !== "true") missing.push("BOOKING_ALLOW_LIVE_PAYMENTS=true");
+  if (env.VERCEL_ENV !== "production") missing.push("VERCEL_ENV=production");
+  if (trimmed(env.CLOUDBEDS_API_KEY_BOOKING) === "") missing.push("CLOUDBEDS_API_KEY_BOOKING");
+  if (!/^\d{1,12}$/.test(trimmed(env.CLOUDBEDS_PROPERTY_ID))) missing.push("CLOUDBEDS_PROPERTY_ID");
+  if (resolveRedis(env) === null) missing.push("Upstash Redis (UPSTASH_REDIS_REST_URL/TOKEN or KV_REST_API_URL/TOKEN)");
+  if (!isStrongTokenSecret(trimmed(env.BOOKING_TOKEN_SECRET))) missing.push("BOOKING_TOKEN_SECRET (32+ random characters)");
+  if (resolveDataSource(env) !== "cloudbeds") missing.push("live Cloudbeds data (Cloudbeds key set, BOOKING_DATA_SOURCE not 'demo')");
+  if (checkout && env.CLOUDBEDS_SEND_STATUS_EMAIL !== "true") missing.push("CLOUDBEDS_SEND_STATUS_EMAIL=true (the guest's written confirmation)");
+  // The sweeper confirms paid bookings whose webhook was lost and releases expired holds: it must be callable.
+  if (sweepSecretOf(env) === null) missing.push("BOOKING_SWEEP_SECRET or CRON_SECRET (16+ characters)");
+  if (!(options.liveFulfilmentReady ?? LIVE_FULFILMENT_READY.beam)) missing.push(BEAM_CODE_SWITCH_BLOCKER);
+  return missing;
+}
+
+/** `fulfilment`: the beam-live conditions for finishing payments (getFulfilmentConfig's Beam branch). */
+function resolveBeamMode(env: Env, options: ModeOptions, fulfilment = false): PaymentMode {
+  const base = beamBaseOf(env);
   const hasKeys = trimmed(env.BEAM_MERCHANT_ID) !== "" && trimmed(env.BEAM_API_KEY) !== "";
 
   if (base === BEAM_LIVE_BASE) {
-    const allowed = hasKeys && env.BOOKING_ALLOW_LIVE_PAYMENTS === "true" && env.VERCEL_ENV === "production";
-    if (!allowed) {
-      throw new BookingConfigError(
-        "live_payments_locked",
-        "BEAM_API_BASE points at the live Beam API but live payments are not fully enabled " +
-          "(needs BEAM_MERCHANT_ID, BEAM_API_KEY, BOOKING_ALLOW_LIVE_PAYMENTS=true and VERCEL_ENV=production).",
-      );
-    }
-    if (!(options.liveFulfilmentReady ?? LIVE_FULFILMENT_READY.beam)) {
+    const missing = beamLiveBlockers(env, { ...options, fulfilment });
+    if (missing.includes(BEAM_CODE_SWITCH_BLOCKER)) {
+      // While the code switch is off nothing in the environment can unlock beam-live, so the error names only the
+      // switch (missing: []); the message lists the rest. The routes log `missing`, and the golden route record
+      // 'provider beam live (locked in code)' pins that log line until S7.1.
+      const rest = missing.filter((m) => m !== BEAM_CODE_SWITCH_BLOCKER);
       throw new BookingConfigError(
         "live_payments_locked",
         "Live Beam payments are switched off in code (LIVE_FULFILMENT_READY.beam=false): Beam has no fulfilment, " +
-          "so a real payment could not be turned into a reservation. Use BOOKING_PAYMENT_PROVIDER=stripe.",
+          "so a real payment could not be turned into a reservation. Use BOOKING_PAYMENT_PROVIDER=stripe." +
+          (rest.length > 0 ? ` Also missing: ${rest.join("; ")}.` : ""),
+      );
+    }
+    if (missing.length > 0) {
+      throw new BookingConfigError(
+        "live_payments_locked",
+        `BEAM_API_BASE points at the live Beam API but live Beam payments are locked. Missing: ${missing.join("; ")}.`,
+        missing,
       );
     }
     return "beam-live";
@@ -443,9 +516,14 @@ function resolveStripeMode(env: Env, options: ModeOptions): PaymentMode {
  * configured without every live-mode condition, or the config is invalid.
  */
 export function resolvePaymentMode(env: Env, options: ModeOptions = {}): PaymentMode {
+  return paymentModeFor(env, options, false);
+}
+
+/** resolvePaymentMode; `fulfilment` = beam-live's conditions for finishing payments (getFulfilmentConfig only). */
+function paymentModeFor(env: Env, options: ModeOptions, fulfilment: boolean): PaymentMode {
   const provider = resolveProvider(env);
   if (provider === "demo") return "demo";
-  if (provider === "beam") return resolveBeamMode(env, options);
+  if (provider === "beam") return resolveBeamMode(env, options, fulfilment);
   return resolveStripeMode(env, options);
 }
 
@@ -456,14 +534,16 @@ export type BookingEngine = "own" | "cloudbeds";
 /**
  * What /booking renders (BOOKING_ENGINE = own | cloudbeds, default cloudbeds).
  * On the production deployment "own" only takes effect when live payments
- * are fully unlocked (stripe-live): the public /booking page must never show a
- * demo, test-mode or locked engine. Otherwise it stays on Cloudbeds.
+ * are fully unlocked for checkout (stripe-live, or beam-live: design S3.4):
+ * the public /booking page must never show a demo, test-mode or locked
+ * engine. Otherwise it stays on Cloudbeds. `options`: tests only (the code
+ * switch, as resolvePaymentMode's).
  */
-export function resolveBookingEngine(env: Env = process.env): BookingEngine {
+export function resolveBookingEngine(env: Env = process.env, options: ModeOptions = {}): BookingEngine {
   if (trimmed(env.BOOKING_ENGINE).toLowerCase() !== "own") return "cloudbeds";
   if (env.VERCEL_ENV !== "production") return "own";
   try {
-    return isLiveMode(resolvePaymentMode(env)) && providerOf(resolvePaymentMode(env)) === "stripe" ? "own" : "cloudbeds";
+    return isLiveMode(resolvePaymentMode(env, options)) ? "own" : "cloudbeds";
   } catch {
     return "cloudbeds";
   }
@@ -795,8 +875,16 @@ function allowedMethodTypes(env: Env): string[] | null {
 
 /** Full server config. Throws BookingConfigError on unsafe configuration. */
 export function getBookingConfig(env: Env = process.env, options: ModeOptions = {}): BookingConfig {
+  return buildBookingConfig(env, options, false);
+}
+
+/**
+ * getBookingConfig; `fulfilment` resolves beam-live with its conditions for finishing payments (the checkout-only
+ * ones skipped: beamLiveBlockers). Only getFulfilmentConfig's Beam branch passes true. Every other step is the same.
+ */
+function buildBookingConfig(env: Env, options: ModeOptions, fulfilment: boolean): BookingConfig {
   const provider = resolveProvider(env);
-  const paymentMode = resolvePaymentMode(env, options);
+  const paymentMode = paymentModeFor(env, options, fulfilment);
   const dataSource = resolveDataSource(env);
   const production = trimmed(env.VERCEL_ENV) === "production";
 
@@ -963,7 +1051,7 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
     reservationPaymentMethod: RESERVATION_PAYMENT_METHODS.includes(reservationMethod) ? reservationMethod : "credit",
     sendCloudbedsStatusEmail: env.CLOUDBEDS_SEND_STATUS_EMAIL === "true",
     guestZipPlaceholder: /^[A-Za-z0-9 -]{1,12}$/.test(zip) ? zip : DEFAULT_GUEST_ZIP_PLACEHOLDER,
-    bookingEngine: resolveBookingEngine(env),
+    bookingEngine: resolveBookingEngine(env, options),
     sweepSecret: sweepSecretOf(env),
     alertEmail: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(alertEmail) ? alertEmail : site.email,
     production,
@@ -978,6 +1066,11 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
  * locking a live Stripe config is that flag, this returns the live config
  * anyway; every other live condition (keys, webhook secret, Redis, ...) still
  * applies. Checkout must keep using getBookingConfig.
+ * Beam (design S3.4): a live Beam config locked only by checkout-only
+ * conditions (the emergency stop, CLOUDBEDS_SEND_STATUS_EMAIL not true) is
+ * returned as the beam-live config; every other beamLiveBlockers condition,
+ * the code switch included, still applies. The Stripe branch runs first and
+ * is unchanged; the Beam one needs BOOKING_PAYMENT_PROVIDER=beam.
  */
 export function getFulfilmentConfig(env: Env = process.env, options: ModeOptions = {}): BookingConfig {
   try {
@@ -987,6 +1080,10 @@ export function getFulfilmentConfig(env: Env = process.env, options: ModeOptions
     if (e instanceof BookingConfigError && e.code === "live_payments_locked" && liveKey && env.BOOKING_ALLOW_LIVE_PAYMENTS !== "true") {
       const unlocked = { ...env, BOOKING_ALLOW_LIVE_PAYMENTS: "true" };
       if (stripeLiveBlockers(unlocked, options).length === 0) return getBookingConfig(unlocked, options);
+    }
+    if (e instanceof BookingConfigError && e.code === "live_payments_locked" && beamLiveBlockers(env, { ...options, fulfilment: true }).length === 0) {
+      // Nothing is overridden in the env: the fulfilment config keeps the real CLOUDBEDS_SEND_STATUS_EMAIL.
+      return buildBookingConfig(env, options, true);
     }
     throw e;
   }
@@ -1016,6 +1113,35 @@ export function getStripeDrainConfig(env: Env = process.env, options: ModeOption
 }
 
 /**
+ * Beam DRAIN config (design S3.4), the mirror of getStripeDrainConfig: Beam
+ * payments already started must still be confirmed or released after
+ * BOOKING_PAYMENT_PROVIDER is switched away from beam (to stripe or demo).
+ * When the provider is not beam but a Beam base (live or playground), both
+ * keys and BEAM_WEBHOOK_HMAC_KEY are set, this returns the Beam fulfilment
+ * config as if the provider were beam (and BOOKING_ENGINE=cloudbeds) - never
+ * for checkout. An invalid provider value still drains. null when the
+ * provider is beam (the normal config covers it), Beam is not configured, or
+ * that config is not valid: it never throws (money review 11). While
+ * LIVE_FULFILMENT_READY.beam is false a beam-live drain is null.
+ */
+export function getBeamDrainConfig(env: Env = process.env, options: ModeOptions = {}): BookingConfig | null {
+  try {
+    try {
+      if (resolveProvider(env) === "beam") return null;
+    } catch {
+      // An invalid provider value: still try to drain Beam.
+    }
+    const base = beamBaseOf(env);
+    if (base !== BEAM_LIVE_BASE && base !== BEAM_PLAYGROUND_BASE) return null;
+    if ([env.BEAM_MERCHANT_ID, env.BEAM_API_KEY, env.BEAM_WEBHOOK_HMAC_KEY].some((v) => trimmed(v) === "")) return null;
+    const config = getFulfilmentConfig({ ...env, BOOKING_PAYMENT_PROVIDER: "beam", BOOKING_ENGINE: "cloudbeds" }, options);
+    return config.beam ? config : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * True while this deployment FINISHES live Stripe payments (the fulfilment
  * config, or the drain config after a provider switch, is stripe-live) - also
  * during an emergency stop, when new checkouts are locked. The soft-launch
@@ -1029,6 +1155,25 @@ export function finishesLiveStripePayments(env: Env = process.env): boolean {
     // locked or not Stripe: see the drain config
   }
   return getStripeDrainConfig(env)?.paymentMode === "stripe-live";
+}
+
+/**
+ * True while this deployment FINISHES live payments of either provider:
+ * finishesLiveStripePayments, or beam-live through the fulfilment config or
+ * the Beam drain (design S3.4). The layout measures the soft-launch return
+ * page by it. Only the live Beam base can be beam-live, so for any other base
+ * no Beam config is built here (a Stripe page render logs nothing new). Never
+ * throws. `options`: tests only (the code switch, for the Beam part).
+ */
+export function finishesLivePayments(env: Env = process.env, options: ModeOptions = {}): boolean {
+  if (finishesLiveStripePayments(env)) return true;
+  if (beamBaseOf(env) !== BEAM_LIVE_BASE) return false;
+  try {
+    if (getFulfilmentConfig(env, options).paymentMode === "beam-live") return true;
+  } catch {
+    // locked or not Beam: see the Beam drain
+  }
+  return getBeamDrainConfig(env, options)?.paymentMode === "beam-live";
 }
 
 /**

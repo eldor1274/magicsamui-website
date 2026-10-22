@@ -26,6 +26,16 @@ const BEAM_WRITES = {
   UPSTASH_REDIS_REST_URL: "https://example-redis.upstash.io",
   UPSTASH_REDIS_REST_TOKEN: "token-x",
 };
+/**
+ * The rest of what beam-live needs since design S3.4 (beamLiveBlockers): the explicit provider (the legacy
+ * BEAM_API_BASE rule never reaches beam-live), the webhook HMAC key, a sweep secret and the Cloudbeds confirmation email.
+ */
+const BEAM_LIVE_EXTRA = {
+  BOOKING_PAYMENT_PROVIDER: "beam",
+  BEAM_WEBHOOK_HMAC_KEY: Buffer.from("test-only-beam-hmac-key-01234567").toString("base64"),
+  BOOKING_SWEEP_SECRET: "sweep-secret-0123456789abcdef",
+  CLOUDBEDS_SEND_STATUS_EMAIL: "true",
+};
 
 test("demo is the default payment mode", () => {
   assert.equal(resolvePaymentMode({}), "demo");
@@ -63,7 +73,7 @@ test("live mode is locked unless every condition holds", () => {
       JSON.stringify(env),
     );
   }
-  const full = { ...base, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };
+  const full = { ...base, ...SECRET, ...BEAM_WRITES, ...BEAM_LIVE_EXTRA, CLOUDBEDS_API_KEY: "cbat_x", BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };
   assert.equal(resolvePaymentMode(full, { liveFulfilmentReady: true }), "beam-live");
 });
 
@@ -84,7 +94,7 @@ test("beam live mode is hard-stopped in code (no Beam fulfilment)", () => {
  */
 async function beamLivePaidAnswer(): Promise<StatusResponse> {
   const now = Date.parse("2026-10-21T03:00:00Z");
-  const env = { ...KEYS, ...SECRET, ...BEAM_WRITES, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production", CLOUDBEDS_API_KEY: "cbat_x" };
+  const env = { ...KEYS, ...SECRET, ...BEAM_WRITES, ...BEAM_LIVE_EXTRA, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production", CLOUDBEDS_API_KEY: "cbat_x" };
   const config = getBookingConfig(env, { liveFulfilmentReady: true });
   const booking: BookingSummary = {
     ref: "MSV-20261021-GQ7K",
@@ -144,7 +154,7 @@ test(
 );
 
 test("live mode needs live Cloudbeds data", () => {
-  const full = { ...KEYS, ...SECRET, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };
+  const full = { ...KEYS, ...SECRET, ...BEAM_LIVE_EXTRA, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };
   const ready = { liveFulfilmentReady: true };
   for (const env of [full, { ...full, CLOUDBEDS_API_KEY: "cbat_x", BOOKING_DATA_SOURCE: "demo" }]) {
     assert.throws(

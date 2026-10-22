@@ -9,6 +9,10 @@
 // Step S3.3: Beam money's Cloudbeds payment method (CLOUDBEDS_BEAM_PAYMENT_METHOD, the custom 'Beam(website)' method;
 // CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD outside live) - the Stripe matrix of moneyPath.test.ts copied for Beam. The Stripe
 // cases there are unchanged.
+//
+// Step S3.4: beamLiveBlockers (the live-lock matrix), the Beam branch of getFulfilmentConfig (checkout-only conditions),
+// getBeamDrainConfig (drains in both directions), finishesLivePayments and resolveBookingEngine for beam-live.
+// LIVE_FULFILMENT_READY.beam stays false: the beam-live cases override it (READY), as tests only may.
 
 import { test } from "node:test";
 import type { TestContext } from "node:test";
@@ -26,14 +30,23 @@ import {
   BEAM_SCAN_LOOKBACK_HOURS,
   BookingConfigError,
   DEFAULT_AUTO_DISCOUNT_PLANS,
+  LIVE_FULFILMENT_READY,
+  MIN_BEAM_WEBHOOK_HMAC_KEY_BYTES,
   PAYMENT_LINK_TTL_MINUTES,
+  beamLiveBlockers,
+  beamWebhookHmacKeyBytes,
+  finishesLivePayments,
+  finishesLiveStripePayments,
+  getBeamDrainConfig,
   getBookingConfig,
   getFulfilmentConfig,
   getInventoryConfig,
   getPublicBookingConfig,
   getStripeDrainConfig,
+  resolveBookingEngine,
   resolveCloudbedsPaymentMethod,
   resolvePaymentMode,
+  resolveProvider,
   toPublicConfig,
 } from "./config.ts";
 import type { BeamSettings, Env } from "./config.ts";
@@ -60,8 +73,14 @@ const WRITES: Env = {
   UPSTASH_REDIS_REST_TOKEN: "token-testkit",
 };
 const BEAM_PG_WRITES: Env = { ...BEAM_PG, ...WRITES, BOOKING_TEST_GUEST_EMAIL: TEST_EMAIL, BOOKING_TEST_ACCESS_KEY: TEST_ACCESS_KEY };
-/** beam-live with every condition today's code checks (the code switch is overridden where it is used). */
-const BEAM_LIVE: Env = { ...BEAM_PG, ...WRITES, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };
+/** What beamLiveBlockers requires beyond the writes (S3.4): the webhook HMAC key, a sweep secret and, for checkout, the Cloudbeds email. */
+const LIVE_EXTRA: Env = {
+  BEAM_WEBHOOK_HMAC_KEY: Buffer.from("test-only-beam-hmac-key-01234567").toString("base64"),
+  BOOKING_SWEEP_SECRET: "sweep-secret-testkit-0123456789",
+  CLOUDBEDS_SEND_STATUS_EMAIL: "true",
+};
+/** beam-live with every beamLiveBlockers condition (the code switch is overridden where it is used). */
+const BEAM_LIVE: Env = { ...BEAM_PG, ...WRITES, ...LIVE_EXTRA, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };
 const READY = { liveFulfilmentReady: true };
 const MOCK_ENV: Env = { BOOKING_PAYMENT_PROVIDER: "stripe", BOOKING_STRIPE_MOCK: "true" };
 const BEAM_SETTING_VARS: Env = {
@@ -639,4 +658,391 @@ test("Beam payment method problems never lock the config: fulfilment, release an
   assert.equal(res.body.ok ? "" : res.body.message, "stopped by the test");
   assert.deepEqual(reached, ["beforeHold"]);
   assert.deepEqual(ok.alerts.filter((a) => a.subject === METHOD_ALERT), []);
+});
+
+/* ------------- beam-live blockers, fulfilment unlock, drains and the booking engine (S3.4) ------------- */
+
+const SWITCH_BLOCKER = "LIVE_FULFILMENT_READY.beam (code)";
+const HMAC_BLOCKER = "BEAM_WEBHOOK_HMAC_KEY (base64, 16+ bytes decoded)";
+const ALLOW_BLOCKER = "BOOKING_ALLOW_LIVE_PAYMENTS=true";
+const EMAIL_BLOCKER = "CLOUDBEDS_SEND_STATUS_EMAIL=true (the guest's written confirmation)";
+const SWEEP_BLOCKER = "BOOKING_SWEEP_SECRET or CRON_SECRET (16+ characters)";
+const ALL_BLOCKERS = [
+  "BOOKING_PAYMENT_PROVIDER=beam",
+  "BEAM_API_BASE (https://api.beamcheckout.com)",
+  "BEAM_MERCHANT_ID",
+  "BEAM_API_KEY",
+  HMAC_BLOCKER,
+  ALLOW_BLOCKER,
+  "VERCEL_ENV=production",
+  "CLOUDBEDS_API_KEY_BOOKING",
+  "CLOUDBEDS_PROPERTY_ID",
+  "Upstash Redis (UPSTASH_REDIS_REST_URL/TOKEN or KV_REST_API_URL/TOKEN)",
+  "BOOKING_TOKEN_SECRET (32+ random characters)",
+  "live Cloudbeds data (Cloudbeds key set, BOOKING_DATA_SOURCE not 'demo')",
+  EMAIL_BLOCKER,
+  SWEEP_BLOCKER,
+  SWITCH_BLOCKER,
+];
+/** beamLiveBlockers' conditions for finishing payments (the checkout-only ones skipped). */
+const FULFIL = { ...READY, fulfilment: true };
+/** A base64 key of `bytes` bytes. */
+const b64 = (bytes: number) => Buffer.alloc(bytes, 0xfb).toString("base64");
+/** The Beam live variables a Stripe deployment carries for a Beam drain (base, keys, HMAC key). */
+const BEAM_LIVE_VARS: Env = { BEAM_API_BASE: BEAM_LIVE_BASE, ...KEYS, BEAM_WEBHOOK_HMAC_KEY: LIVE_EXTRA.BEAM_WEBHOOK_HMAC_KEY };
+
+/** The message a call threw (a BookingConfigError). */
+function messageOf(fn: () => unknown): string {
+  try {
+    fn();
+  } catch (e) {
+    assert.ok(e instanceof BookingConfigError, String(e));
+    return e.message;
+  }
+  throw new Error("did not throw");
+}
+
+test("beamLiveBlockers names every beam-live condition, in order; fulfilment skips the emergency stop and the Cloudbeds email; the fixture lacks only the code switch", () => {
+  assert.deepEqual(beamLiveBlockers({}), ALL_BLOCKERS);
+  assert.deepEqual(
+    beamLiveBlockers({}, { fulfilment: true }),
+    ALL_BLOCKERS.filter((m) => m !== ALLOW_BLOCKER && m !== EMAIL_BLOCKER),
+  );
+  assert.deepEqual(beamLiveBlockers(BEAM_LIVE), [SWITCH_BLOCKER], "LIVE_FULFILMENT_READY.beam stays false");
+  assert.deepEqual(beamLiveBlockers(BEAM_LIVE, READY), []);
+  assert.deepEqual(beamLiveBlockers(BEAM_LIVE, FULFIL), []);
+  // The same alternatives Stripe accepts: a trailing slash, Vercel's CRON_SECRET, the Vercel names of Redis.
+  assert.deepEqual(beamLiveBlockers({ ...BEAM_LIVE, BEAM_API_BASE: ` ${BEAM_LIVE_BASE}/ ` }, READY), []);
+  assert.deepEqual(beamLiveBlockers({ ...BEAM_LIVE, BOOKING_SWEEP_SECRET: undefined, CRON_SECRET: "cron-secret-0123456789" }, READY), []);
+  const kvNames = { ...BEAM_LIVE, UPSTASH_REDIS_REST_URL: undefined, UPSTASH_REDIS_REST_TOKEN: undefined, KV_REST_API_URL: "https://x.upstash.io", KV_REST_API_TOKEN: "t" };
+  assert.deepEqual(beamLiveBlockers(kvNames, READY), []);
+  assert.deepEqual(beamLiveBlockers({ ...BEAM_LIVE, BOOKING_PAYMENT_PROVIDER: " BEAM " }, READY), [], "the provider is read as resolveProvider reads it");
+  // The playground base is not the live one (that env is beam-playground, not a locked beam-live).
+  assert.deepEqual(beamLiveBlockers({ ...BEAM_LIVE, BEAM_API_BASE: BEAM_PLAYGROUND_BASE }, READY), ["BEAM_API_BASE (https://api.beamcheckout.com)"]);
+  assert.equal(getBookingConfig({ ...BEAM_LIVE, BEAM_API_BASE: BEAM_PLAYGROUND_BASE }).paymentMode, "beam-playground");
+  // The Stripe live deployment with the Beam live variables, switched to beam: the Cloudbeds email (checkout) and the code switch.
+  assert.deepEqual(beamLiveBlockers({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" }), [EMAIL_BLOCKER, SWITCH_BLOCKER]);
+  assert.deepEqual(beamLiveBlockers({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" }, { fulfilment: true }), [SWITCH_BLOCKER]);
+  // The Cloudbeds payment method is not a condition (S3.3): checkout refuses with an alert instead.
+  assert.ok(!ALL_BLOCKERS.some((m) => m.includes("PAYMENT_METHOD")));
+  assert.deepEqual(beamLiveBlockers({ ...BEAM_LIVE, CLOUDBEDS_BEAM_PAYMENT_METHOD: "credit" }, READY), []);
+});
+
+test("the beam-live lock matrix: each blocker alone locks checkout and names only itself; the emergency stop and the Cloudbeds email lock checkout but not fulfilment", () => {
+  const cases: [string, Env, string, boolean][] = [
+    ["no provider variable (the legacy rule)", { BOOKING_PAYMENT_PROVIDER: undefined }, "BOOKING_PAYMENT_PROVIDER=beam", false],
+    ["no merchant id", { BEAM_MERCHANT_ID: undefined }, "BEAM_MERCHANT_ID", false],
+    ["a blank API key", { BEAM_API_KEY: "  " }, "BEAM_API_KEY", false],
+    ["no HMAC key", { BEAM_WEBHOOK_HMAC_KEY: undefined }, HMAC_BLOCKER, false],
+    ["an HMAC key of 15 bytes", { BEAM_WEBHOOK_HMAC_KEY: b64(MIN_BEAM_WEBHOOK_HMAC_KEY_BYTES - 1) }, HMAC_BLOCKER, false],
+    ["a raw-string HMAC key (not decoded first)", { BEAM_WEBHOOK_HMAC_KEY: "golden-beam-hmac-key-0123456789!" }, HMAC_BLOCKER, false],
+    ["a URL-safe HMAC key", { BEAM_WEBHOOK_HMAC_KEY: b64(32).replace(/\+/g, "-").replace(/\//g, "_") }, HMAC_BLOCKER, false],
+    ["the emergency stop", { BOOKING_ALLOW_LIVE_PAYMENTS: "false" }, ALLOW_BLOCKER, true],
+    ["BOOKING_ALLOW_LIVE_PAYMENTS=TRUE (exactly 'true', as for Stripe)", { BOOKING_ALLOW_LIVE_PAYMENTS: "TRUE" }, ALLOW_BLOCKER, true],
+    ["a preview deployment", { VERCEL_ENV: "preview" }, "VERCEL_ENV=production", false],
+    ["no booking key", { CLOUDBEDS_API_KEY_BOOKING: undefined }, "CLOUDBEDS_API_KEY_BOOKING", false],
+    ["a property id that is not numeric", { CLOUDBEDS_PROPERTY_ID: "abc" }, "CLOUDBEDS_PROPERTY_ID", false],
+    ["no Redis", { UPSTASH_REDIS_REST_URL: undefined, UPSTASH_REDIS_REST_TOKEN: undefined }, "Upstash Redis (UPSTASH_REDIS_REST_URL/TOKEN or KV_REST_API_URL/TOKEN)", false],
+    ["a weak token secret", { BOOKING_TOKEN_SECRET: "s".repeat(40) }, "BOOKING_TOKEN_SECRET (32+ random characters)", false],
+    ["simulated prices", { BOOKING_DATA_SOURCE: "demo" }, "live Cloudbeds data (Cloudbeds key set, BOOKING_DATA_SOURCE not 'demo')", false],
+    ["no Cloudbeds email", { CLOUDBEDS_SEND_STATUS_EMAIL: undefined }, EMAIL_BLOCKER, true],
+    ["CLOUDBEDS_SEND_STATUS_EMAIL=false", { CLOUDBEDS_SEND_STATUS_EMAIL: "false" }, EMAIL_BLOCKER, true],
+    ["no sweep secret", { BOOKING_SWEEP_SECRET: undefined }, SWEEP_BLOCKER, false],
+    ["a short sweep secret", { BOOKING_SWEEP_SECRET: "short" }, SWEEP_BLOCKER, false],
+  ];
+  assert.equal(getBookingConfig(BEAM_LIVE, READY).paymentMode, "beam-live", "the full fixture is beam-live");
+  for (const [label, patch, blocker, checkoutOnly] of cases) {
+    const env = { ...BEAM_LIVE, ...patch };
+    const locked = { code: "live_payments_locked", missing: [blocker] };
+    assert.deepEqual(beamLiveBlockers(env, READY), [blocker], label);
+    assert.deepEqual(thrown(() => resolvePaymentMode(env, READY)), locked, label);
+    assert.deepEqual(thrown(() => getBookingConfig(env, READY)), locked, label);
+    assert.match(messageOf(() => getBookingConfig(env, READY)), new RegExp(`live Beam payments are locked\\. Missing: ${blocker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.$`), label);
+    const pub = getPublicBookingConfig(env);
+    assert.equal(pub.paymentStatus, "locked", label);
+    assert.equal(pub.live, false, label);
+    if (checkoutOnly) {
+      assert.deepEqual(beamLiveBlockers(env, FULFIL), [], label);
+      assert.equal(getFulfilmentConfig(env, READY).paymentMode, "beam-live", `${label}: paid and started bookings are still finished`);
+    } else {
+      assert.deepEqual(beamLiveBlockers(env, FULFIL), [blocker], label);
+      assert.deepEqual(thrown(() => getFulfilmentConfig(env, READY)), locked, `${label}: fulfilment too`);
+    }
+    // The code switch as it is (false): locked in code, checkout and fulfilment alike.
+    assert.deepEqual(thrown(() => getBookingConfig(env)), { code: "live_payments_locked", missing: [] }, label);
+    assert.equal(thrown(() => getFulfilmentConfig(env))?.code, "live_payments_locked", label);
+  }
+});
+
+test("the code switch: while LIVE_FULFILMENT_READY.beam is false beam-live is locked in code for checkout and fulfilment; the error names only the switch (missing: [], the routes' log line) and its message the rest", () => {
+  assert.equal(LIVE_FULFILMENT_READY.beam, false);
+  const stopped: Env = { ...BEAM_LIVE, BOOKING_ALLOW_LIVE_PAYMENTS: "false" };
+  const noEmail: Env = { ...BEAM_LIVE, CLOUDBEDS_SEND_STATUS_EMAIL: undefined };
+  for (const env of [BEAM_LIVE, stopped, noEmail]) {
+    const label = JSON.stringify({ allow: env.BOOKING_ALLOW_LIVE_PAYMENTS, email: env.CLOUDBEDS_SEND_STATUS_EMAIL ?? null });
+    assert.deepEqual(thrown(() => resolvePaymentMode(env)), { code: "live_payments_locked", missing: [] }, label);
+    assert.deepEqual(thrown(() => getBookingConfig(env)), { code: "live_payments_locked", missing: [] }, label);
+    assert.deepEqual(thrown(() => getFulfilmentConfig(env)), { code: "live_payments_locked", missing: [] }, label);
+    assert.equal(getPublicBookingConfig(env).paymentStatus, "locked", label);
+    assert.equal(resolveBookingEngine({ ...env, BOOKING_ENGINE: "own" }), "cloudbeds", label);
+    assert.equal(finishesLivePayments(env), false, label);
+    assert.equal(getBeamDrainConfig({ ...env, BOOKING_PAYMENT_PROVIDER: "stripe" }), null, label);
+  }
+  assert.equal(
+    messageOf(() => getBookingConfig(BEAM_LIVE)),
+    "Live Beam payments are switched off in code (LIVE_FULFILMENT_READY.beam=false): Beam has no fulfilment, so a real payment could not be " +
+      "turned into a reservation. Use BOOKING_PAYMENT_PROVIDER=stripe.",
+  );
+  const rest = messageOf(() => getBookingConfig({ ...BEAM_LIVE, BEAM_WEBHOOK_HMAC_KEY: undefined, CLOUDBEDS_SEND_STATUS_EMAIL: undefined }));
+  assert.ok(rest.endsWith(` Also missing: ${HMAC_BLOCKER}; ${EMAIL_BLOCKER}.`), rest);
+  // Names only, never a value.
+  const all = messageOf(() => getBookingConfig({ ...BEAM_LIVE, BEAM_WEBHOOK_HMAC_KEY: "c2hvcnQ=", BOOKING_SWEEP_SECRET: "short-secret" }));
+  for (const value of ["c2hvcnQ=", "short-secret", SECRET.BOOKING_TOKEN_SECRET, WRITES.UPSTASH_REDIS_REST_TOKEN ?? "", WRITES.CLOUDBEDS_API_KEY_BOOKING ?? ""]) {
+    assert.ok(!all.includes(value), value);
+  }
+  // The golden route env 'provider beam live (locked in code), Stripe live credentials kept': the same lock for the
+  // status and abandon routes (getFulfilmentConfig), missing [] (their log line, pinned by the golden record).
+  const golden = { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" };
+  assert.deepEqual(thrown(() => getFulfilmentConfig(golden)), { code: "live_payments_locked", missing: [] });
+  assert.equal(getStripeDrainConfig(golden)?.paymentMode, "stripe-live", "the Stripe drain finishes the Stripe bookings, as before");
+});
+
+test("the webhook HMAC key: base64 (the standard alphabet, padding optional), at least 16 bytes once decoded", () => {
+  const VECTOR_KEY = "KOFELguf5L1ltuDlkDHGUkPPnQhrgYYijTR4Fqh7APc="; // Beam's published test vector (beam.test.ts)
+  for (const [raw, bytes] of [
+    [undefined, 0],
+    ["", 0],
+    ["   ", 0],
+    [VECTOR_KEY, 32],
+    [VECTOR_KEY.replace(/=+$/, ""), 32],
+    [` ${VECTOR_KEY}\n`, 32],
+    [b64(16), 16],
+    [b64(16).replace(/=+$/, ""), 16],
+    [b64(15), 15],
+    [b64(64), 64],
+    ["c2hvcnQ=", 5],
+    ["short", 0],
+    ["golden-beam-hmac-key-0123456789!", 0],
+    [b64(32).replace(/\+/g, "-").replace(/\//g, "_"), 0],
+    ["abc=", 2],
+    ["ab=", 0],
+    ["a===", 0],
+    ["ab cd", 0],
+  ] as [string | undefined, number][]) {
+    assert.equal(beamWebhookHmacKeyBytes(raw), bytes, JSON.stringify(raw));
+    // A key it accepts decodes to that many bytes, as verifyBeamSignature (beam.ts) decodes it.
+    if (bytes > 0) assert.equal(Buffer.from((raw ?? "").trim(), "base64").length, bytes, JSON.stringify(raw));
+  }
+  assert.equal(MIN_BEAM_WEBHOOK_HMAC_KEY_BYTES, 16);
+  assert.deepEqual(beamLiveBlockers({ ...BEAM_LIVE, BEAM_WEBHOOK_HMAC_KEY: b64(16) }, READY), []);
+  assert.deepEqual(beamLiveBlockers({ ...BEAM_LIVE, BEAM_WEBHOOK_HMAC_KEY: VECTOR_KEY }, READY), []);
+  assert.deepEqual(beamLiveBlockers({ ...BEAM_LIVE, BEAM_WEBHOOK_HMAC_KEY: b64(15) }, READY), [HMAC_BLOCKER]);
+  // The config keeps the key as it was set (the webhook route decodes it); the blocker only checks it.
+  assert.equal(getBookingConfig(BEAM_LIVE, READY).beamWebhookHmacKey, LIVE_EXTRA.BEAM_WEBHOOK_HMAC_KEY);
+});
+
+test("getFulfilmentConfig: beam-live locked only by the emergency stop or the Cloudbeds email is finished with the checkout's config (the real email flag); the Stripe branch is unchanged and runs first", () => {
+  const full = getBookingConfig(BEAM_LIVE, READY);
+  const stopped = { ...BEAM_LIVE, BOOKING_ALLOW_LIVE_PAYMENTS: "false" };
+  const noEmail = { ...BEAM_LIVE, CLOUDBEDS_SEND_STATUS_EMAIL: undefined };
+  const both = { ...stopped, CLOUDBEDS_SEND_STATUS_EMAIL: "false" };
+  assert.deepEqual(thrown(() => getBookingConfig(stopped, READY)), { code: "live_payments_locked", missing: [ALLOW_BLOCKER] });
+  assert.deepEqual(getFulfilmentConfig(stopped, READY), full, "the emergency stop blocks new charges only");
+  assert.deepEqual(thrown(() => getBookingConfig(noEmail, READY)), { code: "live_payments_locked", missing: [EMAIL_BLOCKER] });
+  // Nothing is overridden: a deployment that stopped sending the Cloudbeds email does not start sending it by itself.
+  assert.deepEqual(getFulfilmentConfig(noEmail, READY), { ...full, sendCloudbedsStatusEmail: false });
+  assert.deepEqual(thrown(() => getBookingConfig(both, READY)), { code: "live_payments_locked", missing: [ALLOW_BLOCKER, EMAIL_BLOCKER] });
+  assert.deepEqual(getFulfilmentConfig(both, READY), { ...full, sendCloudbedsStatusEmail: false });
+  for (const env of [stopped, noEmail, both]) {
+    const pub = getPublicBookingConfig(env);
+    assert.equal(pub.paymentStatus, "locked", "the page takes no new payment");
+    assert.equal(resolveBookingEngine({ ...env, BOOKING_ENGINE: "own" }, READY), "cloudbeds", "/booking goes back to the classic engine");
+    assert.equal(getFulfilmentConfig({ ...env, BOOKING_ENGINE: "own" }, READY).bookingEngine, "cloudbeds");
+  }
+  // A Stripe live key kept next to beam-live: the Stripe branch cannot unlock it (the provider is beam), the Beam one does.
+  const withStripe = { ...STRIPE_LIVE_ENV, ...stopped };
+  assert.equal(getFulfilmentConfig(withStripe, READY).paymentMode, "beam-live");
+  assert.equal(getFulfilmentConfig(withStripe, READY).stripe, null);
+  // Stripe's own emergency stop: exactly as before, whatever the Beam variables or the switch.
+  const stripeStopped = { ...STRIPE_LIVE_ENV, BOOKING_ALLOW_LIVE_PAYMENTS: "false" };
+  for (const env of [stripeStopped, { ...stripeStopped, ...BEAM_LIVE_VARS }, { ...stripeStopped, ...BEAM_LIVE_VARS, CLOUDBEDS_SEND_STATUS_EMAIL: "true" }]) {
+    assert.equal(getFulfilmentConfig(env).paymentMode, "stripe-live");
+    assert.deepEqual(getFulfilmentConfig(env, READY), getFulfilmentConfig(env));
+    assert.equal(getFulfilmentConfig(env).beam, null);
+  }
+  // The demo and the playground are what getBookingConfig says.
+  assert.deepEqual(getFulfilmentConfig(BEAM_PG_WRITES), getBookingConfig(BEAM_PG_WRITES));
+  assert.deepEqual(getFulfilmentConfig({}), getBookingConfig({}));
+});
+
+test("getBeamDrainConfig: provider stripe (or demo, or an invalid value) with the Beam variables drains Beam once the switch is overridden; provider beam with Stripe variables keeps the unchanged Stripe drain", () => {
+  const stripePrimary = { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS };
+  assert.equal(getBookingConfig(stripePrimary).paymentMode, "stripe-live", "the active config is Stripe's");
+  assert.equal(getBeamDrainConfig(stripePrimary), null, "while LIVE_FULFILMENT_READY.beam is false a beam-live drain is null");
+  const drain = getBeamDrainConfig(stripePrimary, READY);
+  assert.equal(drain?.paymentMode, "beam-live");
+  assert.equal(drain?.provider, "beam");
+  assert.equal(drain?.stripe, null);
+  assert.equal(drain?.beam?.apiBase, BEAM_LIVE_BASE);
+  assert.equal(drain?.bookingEngine, "cloudbeds");
+  assert.deepEqual(drain, getFulfilmentConfig({ ...stripePrimary, BOOKING_PAYMENT_PROVIDER: "beam", BOOKING_ENGINE: "cloudbeds" }, READY));
+  // The fulfilment conditions: no Cloudbeds email needed (STRIPE_LIVE_ENV sets none), and the emergency stop never blocks it.
+  assert.equal(drain?.sendCloudbedsStatusEmail, false);
+  assert.equal(getBeamDrainConfig({ ...stripePrimary, BOOKING_ALLOW_LIVE_PAYMENTS: "false" }, READY)?.paymentMode, "beam-live");
+  // A drain never renders an engine, even where the same variables would unlock beam-live checkout with BOOKING_ENGINE=own.
+  const ownEverything = { ...stripePrimary, BOOKING_ENGINE: "own", CLOUDBEDS_SEND_STATUS_EMAIL: "true" };
+  assert.equal(resolveBookingEngine({ ...ownEverything, BOOKING_PAYMENT_PROVIDER: "beam" }, READY), "own");
+  assert.equal(getBeamDrainConfig(ownEverything, READY)?.bookingEngine, "cloudbeds");
+  for (const provider of ["demo", "paypal"]) {
+    assert.equal(getBeamDrainConfig({ ...stripePrimary, BOOKING_PAYMENT_PROVIDER: provider }, READY)?.paymentMode, "beam-live", provider);
+  }
+  // A Stripe-test deployment on production with the Beam live variables: the drain alone finishes live Beam payments.
+  const stripeTestPrimary = { ...STRIPE_TEST_ENV, ...BEAM_LIVE_VARS, VERCEL_ENV: "production", BOOKING_SWEEP_SECRET: LIVE_EXTRA.BOOKING_SWEEP_SECRET };
+  assert.equal(getBeamDrainConfig(stripeTestPrimary, READY)?.paymentMode, "beam-live");
+  // Every other fulfilment condition still applies: null, never a throw.
+  for (const patch of [
+    { VERCEL_ENV: "preview" },
+    { BOOKING_SWEEP_SECRET: undefined },
+    { BEAM_WEBHOOK_HMAC_KEY: "c2hvcnQ=" },
+    { UPSTASH_REDIS_REST_URL: undefined },
+    { CLOUDBEDS_API_KEY_BOOKING: undefined },
+    { BOOKING_DATA_SOURCE: "demo" },
+  ] as Env[]) {
+    assert.equal(getBeamDrainConfig({ ...stripePrimary, ...patch }, READY), null, JSON.stringify(patch));
+  }
+  // The Beam base, both keys and the HMAC key must be set (a known base), or there is nothing to drain.
+  for (const patch of [
+    { BEAM_API_BASE: undefined },
+    { BEAM_MERCHANT_ID: undefined },
+    { BEAM_API_KEY: " " },
+    { BEAM_WEBHOOK_HMAC_KEY: undefined },
+    { BEAM_API_BASE: "https://beam.invalid" },
+    { BEAM_API_BASE: "https://api.beamcheckout.com.evil.io" },
+  ] as Env[]) {
+    assert.equal(getBeamDrainConfig({ ...stripePrimary, ...patch }, READY), null, JSON.stringify(patch));
+  }
+  // provider beam (the active config covers Beam) with Stripe variables: no Beam drain, the Stripe drain as before.
+  for (const beamPrimary of [{ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" }, { ...STRIPE_LIVE_ENV, ...BEAM_PG_WRITES, BEAM_WEBHOOK_HMAC_KEY: b64(32) }]) {
+    assert.equal(getBeamDrainConfig(beamPrimary, READY), null);
+    assert.equal(getStripeDrainConfig(beamPrimary)?.paymentMode, "stripe-live");
+    assert.deepEqual(getStripeDrainConfig(beamPrimary, READY), getStripeDrainConfig(beamPrimary));
+  }
+  // A Stripe deployment without Beam variables has no Beam drain.
+  for (const env of [STRIPE_LIVE_ENV, STRIPE_TEST_ENV, MOCK_ENV, { ...STRIPE_LIVE_ENV, BOOKING_ALLOW_LIVE_PAYMENTS: "false" }, {}]) {
+    assert.equal(getBeamDrainConfig(env, READY), null);
+  }
+});
+
+test("getBeamDrainConfig: a beam-playground drain works on a preview; invalid Beam variables give no drain and it never throws (money review 11)", () => {
+  const preview = { ...STRIPE_TEST_ENV, BEAM_API_BASE: BEAM_PLAYGROUND_BASE, ...KEYS, BEAM_WEBHOOK_HMAC_KEY: b64(32), VERCEL_ENV: "preview" };
+  assert.equal(getBookingConfig(preview).paymentMode, "stripe-test");
+  const pg = getBeamDrainConfig(preview);
+  assert.equal(pg?.paymentMode, "beam-playground", "no code switch for the playground");
+  assert.equal(pg?.provider, "beam");
+  assert.equal(pg?.cloudbedsWrite?.mode, "live");
+  assert.deepEqual(pg?.testGuard, getBookingConfig(STRIPE_TEST_ENV).testGuard, "Stage B's guard");
+  assert.equal(pg?.beam?.hostedHost, "playground-pay.beamcheckout.com");
+  assert.deepEqual(getBeamDrainConfig(preview, READY), pg);
+  // Locally too, with the demo provider.
+  assert.equal(getBeamDrainConfig({ ...BEAM_PG_WRITES, BEAM_WEBHOOK_HMAC_KEY: b64(32), BOOKING_PAYMENT_PROVIDER: "demo" })?.paymentMode, "beam-playground");
+  // The base, both keys and the HMAC key must be set for the playground as well.
+  for (const name of ["BEAM_API_BASE", "BEAM_MERCHANT_ID", "BEAM_API_KEY", "BEAM_WEBHOOK_HMAC_KEY"]) {
+    assert.equal(getBeamDrainConfig({ ...preview, [name]: undefined }), null, name);
+    assert.equal(getBeamDrainConfig({ ...preview, [name]: "  " }), null, `${name} blank`);
+  }
+  // Invalid or unusable: null, no throw.
+  const invalid: [string, Env][] = [
+    ["an unknown base, a short HMAC key", { ...STRIPE_LIVE_ENV, BEAM_API_BASE: "https://beam.invalid", BEAM_MERCHANT_ID: "x", BEAM_API_KEY: "y", BEAM_WEBHOOK_HMAC_KEY: "short" }],
+    ["the mock writer on a preview (no booking key)", { ...preview, CLOUDBEDS_API_KEY_BOOKING: undefined }],
+    ["a weak token secret", { ...preview, BOOKING_TOKEN_SECRET: "short" }],
+    ["a property id that is not numeric", { ...preview, CLOUDBEDS_PROPERTY_ID: "abc" }],
+    ["simulated prices with real writes", { ...preview, BOOKING_DATA_SOURCE: "demo" }],
+    ["no Redis with real writes", { ...preview, UPSTASH_REDIS_REST_URL: undefined }],
+    ["no token secret at all", { BOOKING_PAYMENT_PROVIDER: "stripe", BEAM_API_BASE: BEAM_PLAYGROUND_BASE, ...KEYS, BEAM_WEBHOOK_HMAC_KEY: b64(32) }],
+    ["the legacy rule (no provider variable: the active config is Beam)", { ...BEAM_PG_WRITES, BOOKING_PAYMENT_PROVIDER: undefined, BEAM_WEBHOOK_HMAC_KEY: b64(32) }],
+  ];
+  for (const [label, env] of invalid) {
+    assert.doesNotThrow(() => getBeamDrainConfig(env), label);
+    assert.equal(getBeamDrainConfig(env), null, label);
+    assert.equal(getBeamDrainConfig(env, READY), null, label);
+  }
+});
+
+test("finishesLivePayments: finishesLiveStripePayments, or beam-live through the fulfilment config or the Beam drain; the layout measures the return page by it", () => {
+  const stopped = { ...BEAM_LIVE, BOOKING_ALLOW_LIVE_PAYMENTS: "false" };
+  const noEmail = { ...BEAM_LIVE, CLOUDBEDS_SEND_STATUS_EMAIL: undefined };
+  // Every Stripe and demo answer is finishesLiveStripePayments' (the S3.4 config snapshot covers 750 more environments).
+  for (const env of [
+    STRIPE_LIVE_ENV,
+    { ...STRIPE_LIVE_ENV, BOOKING_ALLOW_LIVE_PAYMENTS: "false" },
+    { ...STRIPE_LIVE_ENV, BOOKING_PAYMENT_PROVIDER: "demo" },
+    { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS },
+    { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" },
+    STRIPE_TEST_ENV,
+    MOCK_ENV,
+    {},
+    BEAM_PG_WRITES,
+    BEAM_LIVE,
+    stopped,
+  ] as Env[]) {
+    assert.equal(finishesLivePayments(env), finishesLiveStripePayments(env), JSON.stringify(env).slice(0, 120));
+  }
+  assert.equal(finishesLivePayments(BEAM_LIVE), false, "nothing live is finished on Beam while the code switch is off");
+  // With the switch overridden: beam-live through fulfilment (also during the emergency stop, without the email) or the drain.
+  for (const env of [BEAM_LIVE, stopped, noEmail]) assert.equal(finishesLivePayments(env, READY), true);
+  const stripeTestPrimary = { ...STRIPE_TEST_ENV, ...BEAM_LIVE_VARS, VERCEL_ENV: "production", BOOKING_SWEEP_SECRET: LIVE_EXTRA.BOOKING_SWEEP_SECRET };
+  assert.equal(finishesLiveStripePayments(stripeTestPrimary), false);
+  assert.equal(finishesLivePayments(stripeTestPrimary, READY), true, "the Beam drain");
+  assert.equal(finishesLivePayments({ ...BEAM_LIVE, VERCEL_ENV: "preview" }, READY), false);
+  assert.equal(finishesLivePayments(BEAM_PG_WRITES, READY), false, "playground money is not live");
+  // layout.tsx uses it; finishesLiveStripePayments stays exported.
+  const layout = readFileSync(new URL("../../app/layout.tsx", import.meta.url), "utf8");
+  assert.ok(layout.includes("const previewReturnTracked = previewTracked || finishesLivePayments();"));
+  assert.ok(!layout.includes("finishesLiveStripePayments"));
+  assert.equal(typeof finishesLiveStripePayments, "function");
+});
+
+test("resolveBookingEngine: 'own' on production once beam-live checkout is fully unlocked, as for stripe-live; every Stripe answer is unchanged", () => {
+  const own = { ...BEAM_LIVE, BOOKING_ENGINE: "own" };
+  assert.equal(resolveBookingEngine(own), "cloudbeds", "locked in code");
+  assert.equal(resolveBookingEngine(own, READY), "own");
+  assert.equal(getBookingConfig(own, READY).bookingEngine, "own");
+  for (const patch of [{ BOOKING_ALLOW_LIVE_PAYMENTS: "false" }, { CLOUDBEDS_SEND_STATUS_EMAIL: undefined }, { BEAM_WEBHOOK_HMAC_KEY: undefined }, { BOOKING_SWEEP_SECRET: undefined }, { BEAM_API_BASE: BEAM_PLAYGROUND_BASE }] as Env[]) {
+    assert.equal(resolveBookingEngine({ ...own, ...patch }, READY), "cloudbeds", JSON.stringify(patch));
+  }
+  assert.equal(resolveBookingEngine({ ...own, VERCEL_ENV: "preview" }), "own", "previews: as before");
+  assert.equal(resolveBookingEngine({ ...BEAM_LIVE }, READY), "cloudbeds", "BOOKING_ENGINE unset: Cloudbeds");
+  // Stripe, unchanged (stripeConfig.test.ts has the cases), also with the switch overridden.
+  for (const env of [
+    STRIPE_LIVE_ENV,
+    STRIPE_TEST_ENV,
+    MOCK_ENV,
+    { ...STRIPE_LIVE_ENV, BOOKING_ALLOW_LIVE_PAYMENTS: "false" },
+    { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, CLOUDBEDS_SEND_STATUS_EMAIL: "true" },
+    { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" },
+    {},
+  ] as Env[]) {
+    const e = { ...env, BOOKING_ENGINE: "own", VERCEL_ENV: "production" };
+    assert.equal(resolveBookingEngine(e, READY), resolveBookingEngine(e), JSON.stringify(env).slice(0, 120));
+  }
+  assert.equal(resolveBookingEngine({ ...STRIPE_LIVE_ENV, BOOKING_ENGINE: "own" }), "own");
+  assert.equal(resolveBookingEngine({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam", BOOKING_ENGINE: "own" }), "cloudbeds");
+});
+
+test("the legacy no-provider rule is unchanged (BEAM_API_BASE alone picks Beam); beam-live needs BOOKING_PAYMENT_PROVIDER=beam, as stripe-live needs =stripe", () => {
+  assert.equal(resolveProvider({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE }), "beam");
+  assert.equal(resolvePaymentMode({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, ...KEYS }), "beam-playground");
+  assert.equal(resolvePaymentMode({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE }), "demo");
+  assert.equal(getBookingConfig({ ...BEAM_PG_WRITES, BOOKING_PAYMENT_PROVIDER: undefined }).paymentMode, "beam-playground");
+  const legacy = { ...BEAM_LIVE, BOOKING_PAYMENT_PROVIDER: undefined };
+  assert.equal(resolveProvider(legacy), "beam");
+  assert.deepEqual(thrown(() => resolvePaymentMode(legacy)), { code: "live_payments_locked", missing: [] }, "locked, as before");
+  assert.deepEqual(thrown(() => resolvePaymentMode(legacy, READY)), { code: "live_payments_locked", missing: ["BOOKING_PAYMENT_PROVIDER=beam"] });
+  assert.deepEqual(thrown(() => getFulfilmentConfig({ ...legacy, BOOKING_ALLOW_LIVE_PAYMENTS: "false" }, READY)), {
+    code: "live_payments_locked",
+    missing: ["BOOKING_PAYMENT_PROVIDER=beam", ALLOW_BLOCKER],
+  });
+  assert.equal(getBeamDrainConfig(legacy, READY), null, "the legacy rule is Beam itself, not a drain");
+  assert.equal(getPublicBookingConfig(legacy).provider, "beam");
+  assert.equal(getPublicBookingConfig(legacy).paymentStatus, "locked");
 });
