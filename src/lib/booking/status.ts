@@ -9,7 +9,7 @@
 // reservation is confirmed yet.
 
 import { getPaymentLink, listPaymentLinkCharges, mapLinkStatus } from "./beam.ts";
-import type { BeamCharge } from "./beam.ts";
+import type { BeamCallOptions, BeamCharge } from "./beam.ts";
 import { redactForLog } from "./cloudbedsWrite.ts";
 import type { BookingConfig } from "./config.ts";
 import { alertFulfilPaymentFailure, bookingPointer, fulfilPayment, releasePayment } from "./fulfil.ts";
@@ -48,9 +48,19 @@ export interface StatusDeps {
   stripe?: StripeDeps;
   /** Stripe shorthand, used only without providerDeps: the Stripe drain (runtime.ts getStripeFulfilmentDeps). */
   stripeDrain?: () => StripeDeps | null;
+  /** Wall clock of the Beam preview's read budget (default Date.now; tests move it). */
+  clock?: () => number;
 }
 
 const NOT_APPLICABLE: FulfilmentView = { state: "not_applicable", reservationId: null };
+
+/**
+ * The Beam preview's (beam-* link, no hold) budget for all its Beam reads of one status request together:
+ * the link, then maybe its charges, each read with its one retry inside what is left. Well inside the status
+ * route's maxDuration of 30 s, so a slow Beam gets the guest the 502 "couldn't check" answer, never a
+ * platform timeout.
+ */
+export const BEAM_PREVIEW_STATUS_BUDGET_MS = 12_000;
 
 /**
  * deps.providerDeps, else one made of the Stripe shorthand: `stripe` while the
@@ -207,6 +217,11 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
     return { status: 503, body: { ok: false, error: "payment_unavailable", message: "Payment status is unavailable." } };
   }
 
+  // One budget for every Beam read of this request (BEAM_PREVIEW_STATUS_BUDGET_MS).
+  const clock = deps.clock ?? Date.now;
+  const started = clock();
+  const readOpts = (): BeamCallOptions => ({ budgetMs: Math.max(0, BEAM_PREVIEW_STATUS_BUDGET_MS - (clock() - started)), now: clock });
+
   try {
     let paymentLinkId: string | null = null;
     if (params.l) {
@@ -215,7 +230,7 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
     }
 
     if (paymentLinkId) {
-      const link = await getPaymentLink(config.beam, paymentLinkId, deps.fetchImpl);
+      const link = await getPaymentLink(config.beam, paymentLinkId, deps.fetchImpl, readOpts());
       const refMatches = !link.order?.referenceId || link.order.referenceId === booking.ref;
       if (!refMatches || link.order?.netAmount !== booking.dueNowSatang || link.order?.currency !== "THB") {
         deps.log?.("beam_status_mismatch", { ref: booking.ref, paymentLinkId });
@@ -227,7 +242,7 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
         // redirects here after a successful payment, so first make sure no
         // charge on this exact link (sourceId = paymentLinkId) succeeded, e.g.
         // a PromptPay QR or a slow 3-D Secure step that finished at the deadline.
-        const charges = await listPaymentLinkCharges(config.beam, { sourceId: paymentLinkId }, deps.fetchImpl);
+        const charges = await listPaymentLinkCharges(config.beam, { sourceId: paymentLinkId }, deps.fetchImpl, readOpts());
         if (charges.some((c) => paysBooking(c, booking))) {
           deps.log?.("beam_status_paid_after_link_closed", { ref: booking.ref, paymentLinkId, linkStatus: link.status });
           return ok(booking, "paid", null, nowMs);
@@ -244,7 +259,7 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
     // Only the payment link's own status can say EXPIRED. Until the browser
     // supplies the link id the guest sees "pending" and, after the polling
     // budget, "please don't pay again - message us".
-    const charges = await listPaymentLinkCharges(config.beam, { referenceId: booking.ref }, deps.fetchImpl);
+    const charges = await listPaymentLinkCharges(config.beam, { referenceId: booking.ref }, deps.fetchImpl, readOpts());
     const paid = charges.some((c) => paysBooking(c, booking) && c.referenceId === booking.ref);
     return ok(booking, paid ? "paid" : "pending", null, nowMs);
   } catch (e) {

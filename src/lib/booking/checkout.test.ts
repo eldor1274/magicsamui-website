@@ -7,7 +7,7 @@ import { addDays } from "./dates.ts";
 import { runDemoPay } from "./demoPay.ts";
 import { demoInventory } from "./demoProvider.ts";
 import { computeQuote } from "./quote.ts";
-import { runStatus } from "./status.ts";
+import { BEAM_PREVIEW_STATUS_BUDGET_MS, runStatus } from "./status.ts";
 import { verifyBookingToken } from "./token.ts";
 import type { CartItemInput, CheckoutRequest, RoomOffer } from "./types.ts";
 import { parseCheckoutRequest, parseSearch } from "./validate.ts";
@@ -253,6 +253,87 @@ test("status: no terminal 'expired' without Beam's own link status; a paid charg
       : new Response(JSON.stringify({ data: [{ chargeId: "ch_2", status: "FAILED", amount: due, currency: "THB" }] }), { status: 200 })) as unknown as typeof fetch;
   const expired = await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: closed });
   assert.equal(expired.body.ok && expired.body.status, "expired");
+});
+
+test("Beam preview status: its Beam reads share one 12 s budget, so a slow Beam answers 502 well inside the route's 30 s", async () => {
+  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m1", BEAM_API_KEY: "k1", BOOKING_TOKEN_SECRET: TEST_SECRET });
+  const req = requestFor("sunrise-suite");
+  let sent: { redirectUrl: string } | null = null;
+  const create = (async (_url: string, init: RequestInit) => {
+    sent = JSON.parse(String(init.body)) as { redirectUrl: string };
+    return new Response(JSON.stringify({ id: "pl_7", url: "https://playground-pay.beamcheckout.com/m1/pl_7" }), { status: 201 });
+  }) as unknown as typeof fetch;
+  const res = await runCheckout(req, { config: pg, origin: ORIGIN, nowMs: NOW, fetchImpl: create });
+  if (!res.body.ok || !sent) throw new Error("checkout failed");
+  const t = new URL((sent as { redirectUrl: string }).redirectUrl).searchParams.get("t");
+  const { ref, linkToken } = res.body;
+  const due = req.expectedDueNowSatang;
+  const afterExpiry = NOW + 30 * 60_000 + 1000;
+  const expiredLink = () =>
+    new Response(JSON.stringify({ paymentLinkId: "pl_7", status: "EXPIRED", order: { netAmount: due, currency: "THB", referenceId: ref } }), { status: 200 });
+  assert.equal(BEAM_PREVIEW_STATUS_BUDGET_MS, 12_000);
+
+  // The link read answers after 11.5 s: the charge read gets the 0.5 s left, one attempt and no retry, and
+  // the guest gets the 502 "couldn't check" answer at about 12 s (it was up to 30 s: two 15 s reads).
+  let clock = 0;
+  const calls: string[] = [];
+  const slowLink = (async (url: string) => {
+    calls.push(url);
+    if (url.includes("/payment-links/")) {
+      clock += 11_500;
+      return expiredLink();
+    }
+    clock += 400;
+    return new Response("{}", { status: 503 });
+  }) as unknown as typeof fetch;
+  const late = await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: slowLink, clock: () => clock });
+  assert.equal(late.status, 502);
+  assert.equal(calls.length, 2, "the charge read is not retried: no room left in the budget");
+  assert.ok(clock <= BEAM_PREVIEW_STATUS_BUDGET_MS, `answered at ${clock} ms`);
+
+  // A link read that uses the whole budget: the charge read is never started.
+  clock = 0;
+  calls.length = 0;
+  const slowest = (async (url: string) => {
+    calls.push(url);
+    clock += BEAM_PREVIEW_STATUS_BUDGET_MS;
+    return expiredLink();
+  }) as unknown as typeof fetch;
+  assert.equal((await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: slowest, clock: () => clock })).status, 502);
+  assert.equal(calls.length, 1);
+
+  // Inside the budget the reads still retry: a 503 after 6 s is retried, and the charge read gets what is left.
+  clock = 0;
+  calls.length = 0;
+  let linkReads = 0;
+  const flaky = (async (url: string) => {
+    calls.push(url);
+    if (url.includes("/payment-links/")) {
+      clock += 3_000;
+      if (++linkReads === 1) {
+        clock += 3_000;
+        return new Response("{}", { status: 503 });
+      }
+      return expiredLink();
+    }
+    clock += 1_000;
+    return new Response(JSON.stringify({ data: [{ chargeId: "ch_7", status: "SUCCEEDED", amount: due, currency: "THB", source: "PAYMENT_LINK", sourceId: "pl_7" }] }), {
+      status: 200,
+    });
+  }) as unknown as typeof fetch;
+  const paid = await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: flaky, clock: () => clock });
+  assert.equal(paid.body.ok && paid.body.status, "paid");
+  assert.equal(calls.length, 3);
+  assert.equal(clock, 10_000);
+
+  // The fallback without the link id (one charge read) runs on the same budget.
+  clock = 0;
+  const byRef = (async () => {
+    clock += BEAM_PREVIEW_STATUS_BUDGET_MS - 500;
+    return new Response("{}", { status: 503 });
+  }) as unknown as typeof fetch;
+  assert.equal((await runStatus({ t, p: null, l: null }, { config: pg, nowMs: afterExpiry, fetchImpl: byRef, clock: () => clock })).status, 502);
+  assert.equal(clock, BEAM_PREVIEW_STATUS_BUDGET_MS - 500, "one attempt: no room for the retry");
 });
 
 test("Beam outage -> 502 upstream_error, nothing charged", async () => {
