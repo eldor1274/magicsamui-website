@@ -5,8 +5,8 @@
 // MOCK - nothing leaves this process. Used by the unit tests (and later by the
 // optional local beam-mock mode). Endpoints, as documented (OpenAPI 1.25.0):
 //   POST  /api/v1/payment-links              create; x-beam-idempotency-key honoured; 201 {id, url}
-//   GET   /api/v1/payment-links/:id          read; ACTIVE -> EXPIRED automatically at expiresAt
-//   PATCH /api/v1/payment-links/:id/disable  only while ACTIVE (202), else 409 OPERATION_NOT_ALLOWED_ERROR
+//   GET   /api/v1/payment-links/:id          read; ACTIVE -> EXPIRED automatically at expiresAt (+ expiryLagMs)
+//   PATCH /api/v1/payment-links/:id/disable  only while ACTIVE (202), else 403 OPERATION_NOT_ALLOWED_ERROR
 //   GET   /api/v1/charges                    by sourceId, by referenceId or unfiltered; newest first; limit/offset
 //   GET   /api/v1/refunds/:id                read
 // Every call needs Basic base64(merchantId:apiKey) on the fake's own base
@@ -21,10 +21,18 @@
 // misleading X-Beam-Event header (Beam signs only the body).
 //
 // Where Beam's behaviour is UNVERIFIED the fake picks one answer and says so:
-// - disabling a link that is not ACTIVE answers 409 OPERATION_NOT_ALLOWED_ERROR
+// - disabling a link that is not ACTIVE answers 403 OPERATION_NOT_ALLOWED_ERROR,
+//   the spec's code for an operation the resource's state forbids
 //   (options.disableNotActive changes it);
+// - an ACTIVE link turns EXPIRED exactly at its expiresAt (options.expiryLagMs
+//   keeps it ACTIVE that much longer, as a lagging Beam would; Infinity: never
+//   on its own);
 // - a charge that succeeds after its link EXPIRED or was DISABLED leaves the
 //   link EXPIRED / DISABLED (it does not turn PAID);
+// - any SUCCEEDED refund moves the link to REFUNDED (VOIDED for a void), also
+//   a partial (50%) card refund and a refund of just one of several SUCCEEDED
+//   charges (options.refundLinkStatus 'all_charges_fully_refunded' moves it
+//   only once every SUCCEEDED charge of the link is refunded in full);
 // - failed answers are NOT replayed for a reused idempotency key unless
 //   replayErrorsForKey() is on (gap review 15);
 // - the unfiltered charge list is supported unless unfilteredListUnsupported();
@@ -49,6 +57,13 @@ import type {
 
 export type FakeBeamBase = "playground" | "live";
 
+export type FakeBeamRefundLinkStatus = "any_refund" | "all_charges_fully_refunded";
+
+/** Card details as Beam SENDS them, last four digits included (the client's parser drops them). */
+export interface FakeBeamCardDetails extends BeamCardDetails {
+  last4?: string;
+}
+
 export interface FakeBeamOptions {
   now?: () => number;
   merchantId?: string;
@@ -59,8 +74,20 @@ export interface FakeBeamOptions {
   base?: FakeBeamBase;
   /** Charges copy the link's order.referenceId (default true; Beam's examples do, the docs don't promise it). */
   copyReferenceIdToCharges?: boolean;
-  /** The answer to disabling a link that is not ACTIVE (UNVERIFIED with Beam). Default 409 OPERATION_NOT_ALLOWED_ERROR. */
+  /** The answer to disabling a link that is not ACTIVE (UNVERIFIED with Beam). Default 403 OPERATION_NOT_ALLOWED_ERROR. */
   disableNotActive?: { status: number; errorCode: string };
+  /**
+   * How long past its expiresAt an ACTIVE link stays ACTIVE before the fake expires it on its own (UNVERIFIED
+   * with Beam). Default 0; Infinity: only expire() closes it. Lets a test run "ACTIVE past expiresAt + skew ->
+   * needsDisable -> PATCH disable -> re-read" on one clock.
+   */
+  expiryLagMs?: number;
+  /**
+   * When a SUCCEEDED refund moves its link to REFUNDED (VOIDED for a void), UNVERIFIED with Beam (our open
+   * questions): 'any_refund' (default) on every refund, partial or of one charge among several;
+   * 'all_charges_fully_refunded' only once every SUCCEEDED charge of the link is refunded in full.
+   */
+  refundLinkStatus?: FakeBeamRefundLinkStatus;
   /** Builds a new link's hosted-page URL (default https://{the base's pay host}/{merchantId}/{id}): a seam for a wrong host. */
   hostedPageUrl?: (link: { id: string; merchantId: string }) => string;
 }
@@ -103,7 +130,7 @@ export interface FakeBeamCharge {
   source: "PAYMENT_LINK";
   sourceId: string;
   paymentMethodType: string;
-  card: BeamCardDetails | null;
+  card: FakeBeamCardDetails | null;
   /** "" unless FAILED. */
   failureCode: string;
   createdMs: number;
@@ -181,7 +208,7 @@ export interface FakeChargeOptions {
   amount?: number;
   currency?: string;
   /** Card details for CARD / CARD_INSTALLMENTS (default VISA 1111, TH). */
-  card?: BeamCardDetails;
+  card?: FakeBeamCardDetails;
 }
 
 export interface FailNextOptions {
@@ -201,7 +228,7 @@ const BANGKOK_OFFSET_MS = 7 * 3_600_000;
 /** Beam's default page size is undocumented; the client always sends limit=100. */
 const DEFAULT_LIMIT = 20;
 const CHARGE_SOURCES = ["PAYMENT_LINK", "STORE_LINK", "QR_PROMPT_PAY_LINK", "API", "BOLT"];
-const DEFAULT_CARD: BeamCardDetails = { brand: "VISA", last4: "1111", countryAlpha2: "TH" };
+const DEFAULT_CARD: FakeBeamCardDetails = { brand: "VISA", last4: "1111", countryAlpha2: "TH" };
 /** Methods Beam can refund through its API; partial refunds only on CARD. */
 const REFUNDABLE_METHODS = new Set(["CARD", "CARD_INSTALLMENTS", "QR_PROMPT_PAY", "ALIPAY", "WECHAT_PAY"]);
 
@@ -322,7 +349,15 @@ export function createFakeBeam(options: FakeBeamOptions = {}) {
   const apiKey = options.apiKey ?? "fake-beam-api-key";
   const hmacKeyB64 = options.hmacKeyB64 ?? randomBytes(32).toString("base64");
   const copyReferenceId = options.copyReferenceIdToCharges !== false;
-  const disableNotActive = options.disableNotActive ?? { status: 409, errorCode: "OPERATION_NOT_ALLOWED_ERROR" };
+  const disableNotActive = options.disableNotActive ?? { status: 403, errorCode: "OPERATION_NOT_ALLOWED_ERROR" };
+  const expiryLagMs = options.expiryLagMs ?? 0;
+  if (typeof expiryLagMs !== "number" || Number.isNaN(expiryLagMs) || expiryLagMs < 0) {
+    throw new RangeError("fake beam: expiryLagMs must be a number >= 0 (Infinity: never expire on its own)");
+  }
+  const refundLinkStatus: FakeBeamRefundLinkStatus = options.refundLinkStatus ?? "any_refund";
+  if (refundLinkStatus !== "any_refund" && refundLinkStatus !== "all_charges_fully_refunded") {
+    throw new RangeError(`fake beam: unknown refundLinkStatus ${String(refundLinkStatus)}`);
+  }
   const hostedPageUrl =
     options.hostedPageUrl ?? ((l: { id: string; merchantId: string }) => `https://${HOSTED_HOSTS[env]}/${l.merchantId}/${l.id}`);
 
@@ -342,11 +377,11 @@ export function createFakeBeam(options: FakeBeamOptions = {}) {
 
   /* ---------------- state helpers ---------------- */
 
-  /** Beam moves an ACTIVE link to EXPIRED once expiresAt has passed. */
+  /** Beam moves an ACTIVE link to EXPIRED once expiresAt (plus the configured lag) has passed. */
   function tick(l: FakeBeamLink): void {
-    if (l.status === "ACTIVE" && l.expiresAtMs !== null && now() >= l.expiresAtMs) {
+    if (l.status === "ACTIVE" && l.expiresAtMs !== null && now() >= l.expiresAtMs + expiryLagMs) {
       l.status = "EXPIRED";
-      l.closedMs = l.expiresAtMs;
+      l.closedMs = l.expiresAtMs + expiryLagMs;
     }
   }
 
@@ -474,9 +509,25 @@ export function createFakeBeam(options: FakeBeamOptions = {}) {
     if (status === "SUCCEEDED") {
       const c = mustCharge(r.chargeId);
       addTransaction(r.refundId, r.asVoid ? "VOID" : "REFUND", c, r.amount);
-      mustLink(c.sourceId).status = r.asVoid ? "VOIDED" : "REFUNDED";
+      const l = mustLink(c.sourceId);
+      if (refundLinkStatus === "any_refund" || allChargesFullyRefunded(l.paymentLinkId)) {
+        l.status = r.asVoid ? "VOIDED" : "REFUNDED";
+      }
     }
     return r;
+  }
+
+  /** Every SUCCEEDED charge of the link is refunded in full by SUCCEEDED refunds. */
+  function allChargesFullyRefunded(linkId: string): boolean {
+    return linkCharges(linkId)
+      .filter((c) => c.status === "SUCCEEDED")
+      .every((c) => refundedSatang(c.chargeId) >= c.amount);
+  }
+
+  function refundedSatang(chargeId: string): number {
+    let sum = 0;
+    for (const r of refunds.values()) if (r.chargeId === chargeId && r.status === "SUCCEEDED") sum += r.amount;
+    return sum;
   }
 
   /* ---------------- views (as Beam's GET and webhook bodies) ---------------- */
@@ -1003,7 +1054,8 @@ export function createFakeBeam(options: FakeBeamOptions = {}) {
      * A refund of a SUCCEEDED charge (as from Lighthouse). The amount defaults
      * to what is still refundable; partial refunds only on CARD, and only the
      * methods Beam can refund. SUCCEEDED (the default) moves the link to
-     * REFUNDED (VOIDED with asVoid); the charge stays SUCCEEDED. Returns the refundId.
+     * REFUNDED (VOIDED with asVoid) as options.refundLinkStatus says; the
+     * charge stays SUCCEEDED. Returns the refundId.
      */
     refund(
       chargeId: string,
@@ -1045,7 +1097,10 @@ export function createFakeBeam(options: FakeBeamOptions = {}) {
       if (status !== "PENDING") settleRefund(r.refundId, status, opts.failureCode);
       return r.refundId;
     },
-    /** A PENDING refund settles. SUCCEEDED adds a REFUND (or VOID) transaction and moves the link to REFUNDED (or VOIDED). */
+    /**
+     * A PENDING refund settles. SUCCEEDED adds a REFUND (or VOID) transaction and moves the link to REFUNDED
+     * (or VOIDED) as options.refundLinkStatus says.
+     */
     settleRefund,
     /** A CHARGEBACK transaction on a SUCCEEDED charge (the charge and link are untouched). Returns the transactionId. */
     chargeback(chargeId: string, amount?: number): string {

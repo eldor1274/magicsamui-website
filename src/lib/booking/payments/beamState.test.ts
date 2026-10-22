@@ -508,6 +508,7 @@ function fakeSetup() {
         group,
         ewallets: true,
         internalNote: "msv1|m=beam-playground|r=MSV-20261022-7F3K|s=abcdefghijklmnopqrstuvwxyz0",
+        expectedFeePct: group === "promptpay" ? 0 : 3,
       });
       return (await createPaymentLink(fake.creds, body, `msv-state-test-${++key}`, fake.fetch)).id;
     },

@@ -80,6 +80,7 @@ function linkBody(nowMs: number, group: BeamMethodGroup = "card_ewallet", ref = 
     group,
     ewallets: true,
     internalNote: NOTE,
+    expectedFeePct: group === "promptpay" ? 0 : 3,
   });
 }
 
@@ -287,7 +288,39 @@ test("a link expires on its own at expiresAt; it can no longer be paid", async (
   assert.equal(parseBeamTime((await getPaymentLink(fake.creds, early, fake.fetch, FAST)).expiresAt), T0 + 35 * 60_000);
 });
 
-test("disable works only while ACTIVE: 202 -> 'disabled', otherwise 409 OPERATION_NOT_ALLOWED_ERROR -> 'not_open'; unknown -> 404", async () => {
+test("expiryLagMs: a lagging Beam keeps the link ACTIVE (and payable) past expiresAt; our disable then closes it on the same clock", async () => {
+  const { fake, advance } = setup({ expiryLagMs: 10 * 60_000 });
+  const id = await newLink(fake, T0);
+  advance(30 * 60_000 + 2 * 60_000);
+  const late = await getPaymentLink(fake.creds, id, fake.fetch, FAST);
+  assert.equal(late.status, "ACTIVE", "past expiresAt + 2 minutes, still ACTIVE");
+  assert.equal(parseBeamTime(late.expiresAt), T0 + 30 * 60_000, "expiresAt itself is unchanged");
+  assert.equal(await disablePaymentLink(fake.creds, id, "msv-bd-lag", fake.fetch), "disabled");
+  assert.equal((await getPaymentLink(fake.creds, id, fake.fetch, FAST)).status, "DISABLED");
+
+  // Left alone, it expires at expiresAt + lag, and closes at that moment.
+  const alone = await newLink(fake, T0 + 32 * 60_000);
+  advance(30 * 60_000 + 10 * 60_000 - 1);
+  assert.equal(fake.link(alone).status, "ACTIVE");
+  assert.equal(fake.pay(alone).status, "SUCCEEDED", "still payable inside the lag");
+  const unpaid = await newLink(fake, T0 + 72 * 60_000 - 1);
+  advance(30 * 60_000 + 10 * 60_000);
+  assert.equal((await getPaymentLink(fake.creds, unpaid, fake.fetch, FAST)).status, "EXPIRED");
+  assert.equal(fake.link(unpaid).closedMs, T0 + 72 * 60_000 - 1 + 40 * 60_000);
+
+  // Infinity: never on its own; expire() still closes it.
+  const never = setup({ expiryLagMs: Number.POSITIVE_INFINITY });
+  const n = await newLink(never.fake, T0);
+  never.advance(365 * 24 * 3_600_000);
+  assert.equal((await getPaymentLink(never.fake.creds, n, never.fake.fetch, FAST)).status, "ACTIVE");
+  assert.equal(never.fake.expire(n).status, "EXPIRED");
+
+  // The default is no lag (the link expires exactly at expiresAt), and a negative lag is refused.
+  assert.throws(() => createFakeBeam({ expiryLagMs: -1 }), RangeError);
+  assert.throws(() => createFakeBeam({ expiryLagMs: Number.NaN }), RangeError);
+});
+
+test("disable works only while ACTIVE: 202 -> 'disabled', otherwise 403 OPERATION_NOT_ALLOWED_ERROR -> 'not_open'; unknown -> 404", async () => {
   const { fake, advance } = setup();
   const id = await newLink(fake, T0);
   assert.equal(await disablePaymentLink(fake.creds, id, "msv-bd-1", fake.fetch), "disabled");
@@ -298,7 +331,7 @@ test("disable works only while ACTIVE: 202 -> 'disabled', otherwise 409 OPERATIO
   assert.equal(patch?.status, 202);
 
   assert.equal(await disablePaymentLink(fake.creds, id, "msv-bd-2", fake.fetch), "not_open");
-  assert.equal(fake.calls.at(-1)?.status, 409);
+  assert.equal(fake.calls.at(-1)?.status, 403);
   const again = await raw(fake, "PATCH", `/api/v1/payment-links/${id}/disable`, { key: "msv-bd-3" });
   assert.equal(errorCodeOf(again.json), "OPERATION_NOT_ALLOWED_ERROR");
 
@@ -315,12 +348,23 @@ test("disable works only while ACTIVE: 202 -> 'disabled', otherwise 409 OPERATIO
   await assert.rejects(disablePaymentLink(fake.creds, "AAAAAAAAAA", "msv-bd-6", fake.fetch), isBeamNotFound);
   await assert.rejects(getPaymentLink(fake.creds, "AAAAAAAAAA", fake.fetch, FAST), isBeamNotFound);
 
-  // The answer for a closed link is UNVERIFIED with Beam: it can be set; any other 4xx is still 'not_open'.
-  const other = setup({ disableNotActive: { status: 422, errorCode: "REQUEST_CONFLICT_ERROR" } });
-  const l2 = await newLink(other.fake, T0);
-  other.fake.disable(l2);
-  assert.equal(await disablePaymentLink(other.fake.creds, l2, "msv-bd-7", other.fake.fetch), "not_open");
-  assert.equal(other.fake.calls.at(-1)?.status, 422);
+  // The answer for a closed link is UNVERIFIED with Beam: it can be set. A refusal on the link's state is
+  // still 'not_open'; a configuration fault under that status throws, so the caller alerts.
+  for (const [answer, outcome] of [
+    [{ status: 409, errorCode: "REQUEST_CONFLICT_ERROR" }, "not_open"],
+    [{ status: 422, errorCode: "REQUEST_CONFLICT_ERROR" }, "not_open"],
+    [{ status: 422, errorCode: "CHARGE_PENDING" }, "not_open"],
+    [{ status: 403, errorCode: "NO_PERMISSION_ERROR" }, "throws"],
+    [{ status: 400, errorCode: "API_VALIDATION_ERROR" }, "throws"],
+  ] as const) {
+    const other = setup({ disableNotActive: answer });
+    const l2 = await newLink(other.fake, T0);
+    other.fake.disable(l2);
+    const call = disablePaymentLink(other.fake.creds, l2, "msv-bd-7", other.fake.fetch);
+    if (outcome === "not_open") assert.equal(await call, "not_open", answer.errorCode);
+    else await assert.rejects(call, rejectsWith(answer.status, answer.errorCode));
+    assert.equal(other.fake.calls.at(-1)?.status, answer.status);
+  }
 });
 
 test("charges: by sourceId, by referenceId or unfiltered, newest first, with limit, offset and totalCount", async () => {
@@ -539,6 +583,44 @@ test("refund: the link turns REFUNDED, the charge stays SUCCEEDED and getRefund 
   assert.equal(fake.link(wallet).status, "VOIDED");
 });
 
+test("refundLinkStatus: 'any_refund' (default) moves the link on any refund; 'all_charges_fully_refunded' only once every charge is refunded in full", async () => {
+  // The default: a 50% card refund, or a refund of one of two SUCCEEDED charges, already reads REFUNDED.
+  const any = setup();
+  const half = await newLink(any.fake, T0);
+  any.fake.refund(any.fake.pay(half, "CARD").chargeId, 1_236_000);
+  assert.equal((await getPaymentLink(any.fake.creds, half, any.fake.fetch, FAST)).status, "REFUNDED");
+  const dup = await newLink(any.fake, T0);
+  any.fake.pay(dup, "CARD");
+  const extra = any.fake.secondCharge(dup, "ALIPAY");
+  any.fake.refund(extra.chargeId);
+  assert.equal(any.fake.link(dup).status, "REFUNDED", "only the duplicate was refunded, yet the link reads REFUNDED");
+
+  // The other reading of Beam: the link keeps PAID while any SUCCEEDED charge still holds money.
+  const all = setup({ refundLinkStatus: "all_charges_fully_refunded" });
+  const card = await newLink(all.fake, T0);
+  const cc = all.fake.pay(card, "CARD");
+  all.fake.refund(cc.chargeId, 1_236_000);
+  assert.equal((await getPaymentLink(all.fake.creds, card, all.fake.fetch, FAST)).status, "PAID", "a 50% refund");
+  all.fake.refund(cc.chargeId);
+  assert.equal(all.fake.link(card).status, "REFUNDED", "the rest");
+
+  const two = await newLink(all.fake, T0);
+  const first = all.fake.pay(two, "CARD");
+  const second = all.fake.secondCharge(two, "ALIPAY");
+  all.fake.refund(second.chargeId);
+  assert.equal(all.fake.link(two).status, "PAID", "one of two charges refunded");
+  const pendingRefund = all.fake.refund(first.chargeId, undefined, { status: "PENDING" });
+  assert.equal(all.fake.link(two).status, "PAID", "a PENDING refund moves nothing");
+  all.fake.settleRefund(pendingRefund, "SUCCEEDED");
+  assert.equal(all.fake.link(two).status, "REFUNDED", "both refunded in full");
+
+  const voided = await newLink(all.fake, T0);
+  all.fake.refund(all.fake.pay(voided, "CARD").chargeId, undefined, { asVoid: true });
+  assert.equal(all.fake.link(voided).status, "VOIDED");
+
+  assert.throws(() => createFakeBeam({ refundLinkStatus: "sometimes" as FakeBeamOptions["refundLinkStatus"] }), RangeError);
+});
+
 test("signedEvent: X-Beam-Signature verifies over the raw body, fails with a wrong key, and the event header can mislead", async () => {
   const { fake } = setup();
   const id = await newLink(fake, T0);
@@ -615,7 +697,7 @@ test("replayErrorsForKey: a cached 5xx is replayed for the same idempotency key 
   await assert.rejects(disablePaymentLink(fake.creds, id, "msv-bd-k1", fake.fetch), rejectsWith(503, null), "replayed from the cache");
   assert.equal(fake.link(id).status, "ACTIVE", "the replayed answer did nothing");
   assert.equal(await disablePaymentLink(fake.creds, id, "msv-bd-k2", fake.fetch), "disabled");
-  // A cached 409 is replayed too.
+  // A cached 403 is replayed too.
   assert.equal(await disablePaymentLink(fake.creds, id, "msv-bd-k3", fake.fetch), "not_open");
   assert.equal(await disablePaymentLink(fake.creds, id, "msv-bd-k3", fake.fetch), "not_open");
 
@@ -717,9 +799,11 @@ test("Bangkok timestamps round-trip through the client's offset-aware parser; th
   const rawCharge = (rawList.json.data as J[])[0];
   assert.ok(rawCharge.customer);
   assert.match(String(rawCharge.createdAt), /\+07:00$/);
+  assert.equal((rawCharge.paymentMethod as { card: J }).card.last4, "4444", "Beam sends the last four digits");
   const [charge] = await listPaymentLinkCharges(fake.creds, { sourceId: id }, fake.fetch, FAST);
   assert.equal("customer" in charge, false);
-  assert.deepEqual(charge.paymentMethod, { paymentMethodType: "CARD", card: { brand: "MASTERCARD", last4: "4444", countryAlpha2: "GB" } });
+  assert.deepEqual(charge.paymentMethod, { paymentMethodType: "CARD", card: { brand: "MASTERCARD", countryAlpha2: "GB" } });
+  assert.equal(JSON.stringify(charge).includes("4444"), false, "the client drops them");
   assert.equal(parseBeamTime(charge.createdAt), T0);
   assert.equal(parseBeamTime(charge.updatedAt), T0);
 });

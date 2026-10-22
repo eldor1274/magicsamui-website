@@ -238,9 +238,11 @@ const twoRooms: Quote = {
 };
 const twoRoomsPromptPay: Quote = { ...twoRooms, cardFeePct: 0, cardFeeSatang: 0, totalSatang: 2_400_000, dueNowSatang: 2_400_000 };
 const NOTE = "msv1|m=beam-playground|r=MSV-20261005-7F3K|s=abcdefghijklmnopqrstuvwxyz0";
+/** The fee each group must carry under the owner's decision 1 (feePctFor in S3.2): cards and e-wallets 3%, PromptPay none. */
+const GROUP_FEE_PCT: Record<BeamMethodGroup, number> = { card_ewallet: 3, promptpay: 0 };
 
 function groupInput(q: Quote, group: BeamMethodGroup, ewallets = true, log?: (m: string, d?: Record<string, unknown>) => void) {
-  return { ...linkInput(q), group, ewallets, internalNote: NOTE, log };
+  return { ...linkInput(q), group, ewallets, internalNote: NOTE, log, expectedFeePct: GROUP_FEE_PCT[group] };
 }
 
 test("legacy body (no group) is byte-identical to the preview's body before S2.1", () => {
@@ -288,6 +290,46 @@ test("group link: the note is never clipped and the amount is capped at BEAM_MAX
   const huge = { ...twoRooms, dueNowSatang: BEAM_MAX_CHARGE_SATANG + 1, totalSatang: BEAM_MAX_CHARGE_SATANG + 1 };
   assert.throws(() => buildPaymentLinkRequest(groupInput(huge, "card_ewallet")), RangeError);
   assert.throws(() => buildPaymentLinkRequest(groupInput({ ...twoRooms, dueNowSatang: 99 }, "promptpay")), RangeError);
+});
+
+test("group link: the quote's fee must be the fee of the link's method group (owner decision 1), else RangeError", () => {
+  // A PromptPay link built from the card quote would charge the 3% fee on the fee-free method...
+  assert.throws(
+    () => buildPaymentLinkRequest(groupInput(twoRooms, "promptpay")),
+    (e: unknown) => e instanceof RangeError && e.message === "Beam promptpay link: the quote's fee is 3% (72000 satang), not the 0% (0 satang) this method group must carry",
+  );
+  // ...and a card_ewallet link built from the fee-free quote would lose the owner's 3%.
+  assert.throws(
+    () => buildPaymentLinkRequest(groupInput(twoRoomsPromptPay, "card_ewallet")),
+    (e: unknown) => e instanceof RangeError && e.message === "Beam card_ewallet link: the quote's fee is 0% (0 satang), not the 3% (72000 satang) this method group must carry",
+  );
+  // A fee amount that is not the group's % of the fee base, or a total that carries a fee the fee fields hide.
+  assert.throws(() => buildPaymentLinkRequest(groupInput({ ...twoRoomsPromptPay, cardFeeSatang: 72_000 }, "promptpay")), RangeError);
+  assert.throws(() => buildPaymentLinkRequest(groupInput({ ...twoRoomsPromptPay, totalSatang: 2_472_000, dueNowSatang: 2_472_000 }, "promptpay")), RangeError);
+  assert.throws(() => buildPaymentLinkRequest(groupInput({ ...twoRooms, cardFeeSatang: 0, totalSatang: 2_400_000, dueNowSatang: 2_400_000 }, "card_ewallet")), RangeError);
+  assert.throws(() => buildPaymentLinkRequest(groupInput({ ...twoRooms, cardFeeSatang: 71_999, totalSatang: 2_471_999, dueNowSatang: 2_471_999 }, "card_ewallet")), RangeError);
+
+  // The owner's override BEAM_PROMPTPAY_FEE_PCT=3 (S3.2): the expected fee follows it, so a 3% PromptPay link
+  // is built with its fee line, and the fee-free quote is then the wrong one.
+  const overridden = buildPaymentLinkRequest({ ...groupInput(twoRooms, "promptpay"), expectedFeePct: 3 });
+  assert.deepEqual(overridden.linkSettings, { qrPromptPay: { isEnabled: true } });
+  assert.equal(overridden.order.netAmount, 2_472_000);
+  assert.deepEqual(overridden.order.orderItems.at(-1), { itemName: "Payment processing fee (3%)", price: 72_000, quantity: 1 });
+  assert.throws(() => buildPaymentLinkRequest({ ...groupInput(twoRoomsPromptPay, "promptpay"), expectedFeePct: 3 }), RangeError);
+  // A card fee configured at 0% (BOOKING_CARD_FEE_PCT=0): the fee-free quote is then right for card_ewallet.
+  assert.equal(buildPaymentLinkRequest({ ...groupInput(twoRoomsPromptPay, "card_ewallet"), expectedFeePct: 0 }).order.netAmount, 2_400_000);
+  // A fractional % follows quote.ts's own rounding (percentOf).
+  const pct25: Quote = { ...twoRooms, cardFeePct: 2.5, cardFeeSatang: 60_000, totalSatang: 2_460_000, dueNowSatang: 2_460_000 };
+  assert.equal(buildPaymentLinkRequest({ ...groupInput(pct25, "card_ewallet"), expectedFeePct: 2.5 }).order.netAmount, 2_460_000);
+  // A deposit charges part of a consistent total.
+  const deposit: Quote = { ...twoRooms, depositPct: 30, dueNowSatang: 741_600, balanceSatang: 1_730_400 };
+  assert.equal(buildPaymentLinkRequest(groupInput(deposit, "card_ewallet")).order.netAmount, 741_600);
+
+  for (const bad of [Number.NaN, -1, 101, Number.POSITIVE_INFINITY, "3", undefined]) {
+    assert.throws(() => buildPaymentLinkRequest({ ...groupInput(twoRooms, "card_ewallet"), expectedFeePct: bad as number }), RangeError, String(bad));
+  }
+  // The preview's legacy body (no group) is not affected.
+  assert.equal(buildPaymentLinkRequest(linkInput()).order.netAmount, 1_464_750);
 });
 
 test("order items: one per room line plus the fee line, adding up to netAmount exactly", () => {
@@ -382,7 +424,7 @@ test("hosted page host follows the API base; any other base is refused before a 
   assert.equal(none.calls.length, 0);
 });
 
-test("disablePaymentLink: PATCH with the idempotency key; 202 disabled, other 4xx not_open, 404/401/429/5xx throw", async () => {
+test("disablePaymentLink: PATCH with the idempotency key; 202 disabled, a refusal on the link's state not_open, faults and 404/401/429/5xx throw", async () => {
   const ok = scripted(new Response(JSON.stringify({ code: 202, message: "accepted" }), { status: 202 }));
   assert.equal(await disablePaymentLink(PG_CREDS, "pl_1", "msv-bd-pl_1-n1", ok.fetchImpl), "disabled");
   assert.equal(ok.calls[0].url, "https://playground.api.beamcheckout.com/api/v1/payment-links/pl_1/disable");
@@ -391,17 +433,45 @@ test("disablePaymentLink: PATCH with the idempotency key; 202 disabled, other 4x
   assert.equal(headers["x-beam-idempotency-key"], "msv-bd-pl_1-n1");
   assert.equal(headers.authorization, basicAuthHeader("m1", "k1"));
 
-  const notOpen: [number, string][] = [
-    [409, "OPERATION_NOT_ALLOWED_ERROR"],
-    [400, "API_VALIDATION_ERROR"],
+  // Beam refuses because of the link's state: OPERATION_NOT_ALLOWED_ERROR / REQUEST_CONFLICT_ERROR on any
+  // 4xx, or a 409/422 whose code is not a configuration fault (none, CHARGE_PENDING, a new code).
+  const notOpen: [number, string | null][] = [
     [403, "OPERATION_NOT_ALLOWED_ERROR"],
-    [412, "IDEMPOTENCY_KEY_ERROR"],
+    [409, "REQUEST_CONFLICT_ERROR"],
+    [409, "OPERATION_NOT_ALLOWED_ERROR"],
+    [422, "REQUEST_CONFLICT_ERROR"],
+    [400, "OPERATION_NOT_ALLOWED_ERROR"],
+    [409, null],
     [422, "SOME_NEW_CODE"],
+    [422, "CHARGE_PENDING"],
   ];
   for (const [status, code] of notOpen) {
-    const f = scripted(beamError(status, code));
-    assert.equal(await disablePaymentLink(PG_CREDS, "pl_1", "k", f.fetchImpl), "not_open", `HTTP ${status}`);
+    const f = scripted(code === null ? json({ code: status, message: "conflict" }, status) : beamError(status, code));
+    assert.equal(await disablePaymentLink(PG_CREDS, "pl_1", "k", f.fetchImpl), "not_open", `HTTP ${status} ${code}`);
     assert.equal(f.calls.length, 1);
+  }
+
+  // A configuration fault is never read as "already closed": it throws, so the caller alerts.
+  const faults: [number, string | null][] = [
+    [400, "API_VALIDATION_ERROR"],
+    [400, "INVALID_JSON_ERROR"],
+    [400, null],
+    [403, "NO_PERMISSION_ERROR"],
+    [403, null],
+    [412, "IDEMPOTENCY_KEY_ERROR"],
+    [422, "MERCHANT_STATUS_INVALID_ERROR"],
+    [409, "IDEMPOTENCY_KEY_ERROR"],
+    [410, "SOME_NEW_CODE"],
+    [302, null],
+  ];
+  for (const [status, code] of faults) {
+    const f = scripted(code === null ? new Response("<html>nope</html>", { status }) : beamError(status, code));
+    await assert.rejects(
+      disablePaymentLink(PG_CREDS, "pl_1", "k", f.fetchImpl),
+      (e: unknown) => e instanceof BeamApiError && e.status === status && e.errorCode === code,
+      `HTTP ${status} ${code}`,
+    );
+    assert.equal(f.calls.length, 1, "never retried");
   }
 
   const missing = scripted(beamError(404, "NOT_FOUND_ERROR"));
@@ -472,6 +542,45 @@ test("charge scan: unfiltered PAYMENT_LINK pages of 100, stopping at the first c
     noTime.charges.map((c) => c.chargeId),
     ["n1"],
   );
+});
+
+test("charge scan: a charge shifted onto the next page keeps its freshest copy, at its first position (a SUCCEEDED copy wins)", async () => {
+  const sinceMs = Date.parse("2026-10-05T00:00:00Z");
+  const at = (id: string, status: string, updatedAt: string | undefined, failureCode = "") => ({
+    ...charge(id, "2026-10-05T10:00:00+07:00"),
+    status,
+    failureCode,
+    ...(updatedAt === undefined ? {} : { updatedAt }),
+  });
+  const filler = Array.from({ length: 99 }, (_, i) => at(`x${i}`, "FAILED", "2026-10-05T10:01:00+07:00"));
+  const scan = async (first: Record<string, unknown>, later: Record<string, unknown>) => {
+    const f = scripted(json({ data: [...filler, first] }), json({ data: [later, at("y1", "FAILED", undefined)] }));
+    const result = await listLinkChargesSince(PG_CREDS, { sinceMs }, f.fetchImpl);
+    assert.equal(result.complete, true);
+    assert.deepEqual(
+      result.charges.map((c) => c.chargeId),
+      [...filler.map((c) => c.chargeId), "x99", "y1"],
+      "each charge once, at the position it was first read",
+    );
+    return result.charges[99];
+  };
+
+  // PENDING on page 1, SUCCEEDED by the time page 2 is read: the success is kept (it used to be dropped).
+  let kept = await scan(at("x99", "PENDING", "2026-10-05T10:00:00+07:00"), at("x99", "SUCCEEDED", "2026-10-05T10:02:00+07:00"));
+  assert.equal(kept.status, "SUCCEEDED");
+  assert.equal(kept.updatedAt, "2026-10-05T10:02:00+07:00");
+  // A SUCCEEDED copy is never replaced by a copy in another state, whatever its time says.
+  kept = await scan(at("x99", "SUCCEEDED", "2026-10-05T10:02:00+07:00"), at("x99", "PENDING", "2026-10-05T10:09:00+07:00"));
+  assert.equal(kept.status, "SUCCEEDED");
+  // Two copies in the same state: the later updatedAt wins; on a tie or without readable times, the later read.
+  kept = await scan(at("x99", "FAILED", "2026-10-05T10:05:00+07:00", "first"), at("x99", "FAILED", "2026-10-05T10:01:00+07:00", "later"));
+  assert.equal(kept.failureCode, "first");
+  kept = await scan(at("x99", "FAILED", "2026-10-05T10:01:00+07:00", "first"), at("x99", "FAILED", "2026-10-05T03:05:00Z", "later"));
+  assert.equal(kept.failureCode, "later", "offset-aware: 03:05Z is after 10:01+07:00");
+  kept = await scan(at("x99", "FAILED", "2026-10-05T10:01:00+07:00", "first"), at("x99", "FAILED", "2026-10-05T10:01:00+07:00", "later"));
+  assert.equal(kept.failureCode, "later");
+  kept = await scan(at("x99", "PENDING", undefined, "first"), at("x99", "PENDING", "2026-10-05T10:01:00", "later"));
+  assert.equal(kept.failureCode, "later");
 });
 
 test("charge scan stops at maxPages and at the budget with complete=false; a later page's failure keeps what was read", async () => {
@@ -606,6 +715,65 @@ test("createPaymentLink: onRateLimited on 429, and no same-key retry once the bu
   assert.equal(n, 1);
 });
 
+test("createPaymentLink: the 429/5xx/network retry waits 100-400 ms of jitter first, same key and body, only while the budget fits it", async () => {
+  const created = { id: "a", url: "https://playground-pay.beamcheckout.com/m1/a" };
+  const body = buildPaymentLinkRequest(linkInput());
+  for (const first of [beamError(429, "TOO_MANY_REQUESTS_ERROR"), beamError(503, "X"), new TypeError("fetch failed")]) {
+    const s = seams(0.5);
+    let limited = 0;
+    const f = scripted(first, json(created, 201));
+    assert.deepEqual(await createPaymentLink(PG_CREDS, body, "same-key", f.fetchImpl, { ...s.opts, onRateLimited: () => limited++ }), created);
+    assert.equal(s.sleeps.length, 1, "one wait, before the retry");
+    assert.ok(s.sleeps[0] >= 100 && s.sleeps[0] <= 400, `jitter ${s.sleeps[0]}`);
+    assert.deepEqual(
+      f.calls.map((c) => (c.init.headers as Record<string, string>)["x-beam-idempotency-key"]),
+      ["same-key", "same-key"],
+    );
+    assert.equal(f.calls[1].init.body, f.calls[0].init.body, "the same body");
+    assert.equal(limited, first instanceof Response && first.status === 429 ? 1 : 0);
+  }
+  const low = seams(0);
+  await createPaymentLink(PG_CREDS, body, "k", scripted(beamError(502, "X"), json(created, 201)).fetchImpl, low.opts);
+  assert.deepEqual(low.sleeps, [100]);
+  const high = seams(0.999999);
+  await createPaymentLink(PG_CREDS, body, "k", scripted(beamError(502, "X"), json(created, 201)).fetchImpl, high.opts);
+  assert.deepEqual(high.sleeps, [400]);
+
+  // A 4xx is neither retried nor waited for.
+  const no = seams();
+  const bad = scripted(beamError(400, "API_VALIDATION_ERROR"));
+  await assert.rejects(createPaymentLink(PG_CREDS, body, "k", bad.fetchImpl, no.opts), BeamApiError);
+  assert.deepEqual(no.sleeps, []);
+  assert.equal(bad.calls.length, 1);
+
+  // The budget must still hold the jitter plus a 1,000 ms attempt: the first attempt used 3,500 of 5,000 ms,
+  // so a 400 ms wait leaves 1,100 (retry) ...
+  let clock = 0;
+  const answers = [beamError(503, "X"), json(created, 201)];
+  const timed = (async () => {
+    clock += 3_500;
+    return answers.shift();
+  }) as unknown as typeof fetch;
+  const fits = seams(0.999999);
+  assert.deepEqual(await createPaymentLink(PG_CREDS, body, "k-fit", timed, { ...fits.opts, budgetMs: 5_000, now: () => clock }), created);
+  assert.deepEqual(fits.sleeps, [400]);
+  // ... while after 3,700 ms it would leave 900: no wait and no retry.
+  clock = 0;
+  let n = 0;
+  const slower = (async () => {
+    n++;
+    clock += 3_700;
+    return beamError(429, "TOO_MANY_REQUESTS_ERROR");
+  }) as unknown as typeof fetch;
+  const tight = seams(0.999999);
+  await assert.rejects(
+    createPaymentLink(PG_CREDS, body, "k-tight", slower, { ...tight.opts, budgetMs: 5_000, now: () => clock }),
+    (e: unknown) => e instanceof BeamApiError && e.status === 429,
+  );
+  assert.equal(n, 1);
+  assert.deepEqual(tight.sleeps, []);
+});
+
 test("an unknown errorCode is kept as an open string; beamErrorInfo carries no PII", async () => {
   const f = scripted(beamError(422, "CHARGE_PENDING", "a charge is still pending"));
   const err = await getPaymentLink(PG_CREDS, "pl_1", f.fetchImpl, seams().opts).then(
@@ -650,7 +818,7 @@ test("timestamps are parsed only with Z or an offset (+07:00 from GET answers)",
   }
 });
 
-test("charges are reduced to the fields we use: no customer block, card brand/last4/country only", async () => {
+test("charges are reduced to the fields we use: no customer block, no card last4, card brand/country only", async () => {
   const webhookCharge = JSON.parse(VECTOR_BODY) as Record<string, unknown>;
   const f = scripted(json({ data: [webhookCharge, "junk", null], totalCount: 1 }));
   const charges = await listPaymentLinkCharges(PG_CREDS, { sourceId: "57Iot6c11o" }, f.fetchImpl);
@@ -669,10 +837,16 @@ test("charges are reduced to the fields we use: no customer block, card brand/la
       transactionTime: "2025-07-23T10:16:12Z",
       createdAt: "2025-07-23T10:15:56.102401Z",
       updatedAt: "2025-07-23T10:16:17.418991Z",
-      paymentMethod: { paymentMethodType: "CARD", card: { brand: "VISA", last4: "1111" } },
+      paymentMethod: { paymentMethodType: "CARD", card: { brand: "VISA" } },
     },
   ]);
   assert.ok(!JSON.stringify(charges).includes("0958051075"));
+  assert.ok(!JSON.stringify(charges).includes("last4"), "the card's last four digits never leave the client");
+  assert.ok(!JSON.stringify(charges).includes("1111"));
+  assert.deepEqual(parseBeamCharge({ chargeId: "ch_1", paymentMethod: { paymentMethodType: "CARD", card: { brand: "JCB", last4: "0005", countryAlpha2: "JP" } } })?.paymentMethod, {
+    paymentMethodType: "CARD",
+    card: { brand: "JCB", countryAlpha2: "JP" },
+  });
   assert.deepEqual(parseBeamCharge(webhookCharge), charges[0]);
   assert.equal(parseBeamCharge([]), null);
 

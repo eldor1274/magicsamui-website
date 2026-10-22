@@ -14,14 +14,15 @@
 //   CARD_AUTHORIZATION_PENDING are missing from the spec's enum.
 // - Timestamps are parsed only when they carry Z or an offset (GET answers
 //   carry +07:00; a bare local time would be read in the server's zone).
-// - Reads (GET) retry once on 429, 5xx and network errors after 100-400 ms of
-//   jitter, inside the caller's time budget. Writes keep their own rules.
-// - Charges are reduced to the fields below: the customer block never leaves
-//   this module, and card.last4 is never logged or stored by the callers.
+// - Reads (GET) and the create retry once on 429, 5xx and network errors after
+//   100-400 ms of jitter, inside the caller's time budget (the create with the
+//   same idempotency key). The disable is never retried.
+// - Charges are reduced to the fields below: the customer block and the card's
+//   last four digits never leave this module (only brand and country are kept).
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { formatDisplayDate } from "./dates.ts";
-import { MIN_CHARGE_SATANG } from "./quote.ts";
+import { MIN_CHARGE_SATANG, percentOf } from "./quote.ts";
 import type { BeamCredentials } from "./config.ts";
 import type { PaymentStatus, Quote } from "./types.ts";
 
@@ -111,10 +112,9 @@ export interface BeamPaymentLink {
 
 export type BeamChargeStatus = "PENDING" | "SUCCEEDED" | "FAILED";
 
+/** The card details we keep. Beam also sends the last four digits; parseBeamCharge drops them, so they can never be logged or stored. */
 export interface BeamCardDetails {
   brand?: string;
-  /** The card's last four digits: never logged or stored. */
-  last4?: string;
   countryAlpha2?: string;
 }
 
@@ -219,10 +219,11 @@ const HOSTED_HOST_BY_API_BASE = new Map<string, string>([
 /** Options of one Beam call. Every member is optional; the test seams default to the real clock. */
 export interface BeamCallOptions {
   /**
-   * Wall-clock budget of the call in ms, retries included. Reads default to
-   * DEFAULT_READ_BUDGET_MS; createPaymentLink and disablePaymentLink keep a
-   * plain 10 s per attempt when it is unset. For listLinkChargesSince it is
-   * the budget of the whole scan.
+   * Wall-clock budget of the call in ms, retries and their jitter included.
+   * Reads default to DEFAULT_READ_BUDGET_MS; createPaymentLink and
+   * disablePaymentLink keep a plain 10 s per attempt when it is unset. For
+   * listLinkChargesSince it is the budget of the whole scan. A caller inside a
+   * route passes what is left of the route's deadline.
    */
   budgetMs?: number;
   /** Runs on every HTTP 429 answer (the runtime counts and alerts them). It can never break the call. */
@@ -297,7 +298,10 @@ export function parseBeamTime(value: unknown): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-/** Reduces a Charge object (API answer or webhook body) to the fields we use; null when it is not an object. */
+/**
+ * Reduces a Charge object (API answer or webhook body) to the fields we use; null when it is not an object.
+ * The customer block and card.last4 are dropped here.
+ */
 export function parseBeamCharge(raw: unknown): BeamCharge | null {
   if (!isObject(raw)) return null;
   const charge: BeamCharge = {
@@ -316,7 +320,7 @@ export function parseBeamCharge(raw: unknown): BeamCharge | null {
     const method: BeamPaymentMethod = { paymentMethodType: str(pm.paymentMethodType) ?? "" };
     if (isObject(pm.card)) {
       const card: BeamCardDetails = {};
-      for (const key of ["brand", "last4", "countryAlpha2"] as const) {
+      for (const key of ["brand", "countryAlpha2"] as const) {
         const v = str(pm.card[key]);
         if (v !== undefined) card[key] = v;
       }
@@ -376,6 +380,13 @@ export interface GroupPaymentLinkInput extends PaymentLinkBaseInput {
   group: BeamMethodGroup;
   /** card_ewallet: also offer the e-wallets (the BEAM_EWALLETS switch). Ignored for promptpay. */
   ewallets: boolean;
+  /**
+   * The fee % this method group must carry: the caller's feePctFor(config, group) (S3.2), i.e. the card fee
+   * for card_ewallet and BEAM_PROMPTPAY_FEE_PCT (0 unless the owner overrides it) for promptpay. The quote's
+   * fee must be exactly this % of its fee base, else RangeError: a PromptPay link carrying the card fee, or a
+   * card_ewallet link built from the fee-free quote, never reaches Beam (owner decision 1).
+   */
+  expectedFeePct: number;
   /** The signed, PII-free note (S2.4): sent verbatim, at most 500 characters, never clipped. */
   internalNote: string;
   log?: (message: string, data?: Record<string, unknown>) => void;
@@ -445,6 +456,7 @@ export function buildPaymentLinkRequest(input: PaymentLinkInput): BeamCreatePaym
     // Never clipped: a clipped signed note would no longer verify.
     throw new RangeError("Beam internalNote must be a string of at most 500 characters");
   }
+  checkGroupFee(input);
   const linkSettings = beamLinkSettings(input.group, input.ewallets);
   return {
     order: {
@@ -462,6 +474,25 @@ export function buildPaymentLinkRequest(input: PaymentLinkInput): BeamCreatePaym
     cancelUrl: input.cancelUrl,
     expiresAt,
   };
+}
+
+/**
+ * The last check before a money request: the quote's fee must be the fee of the link's method group,
+ * expectedFeePct of the quote's fee base, and the total must be the fee base plus that fee (so dueNowSatang
+ * cannot carry a fee the fee fields do not show).
+ */
+function checkGroupFee(input: GroupPaymentLinkInput): void {
+  const { quote, group, expectedFeePct } = input;
+  if (typeof expectedFeePct !== "number" || !Number.isFinite(expectedFeePct) || expectedFeePct < 0 || expectedFeePct > 100) {
+    throw new RangeError("Beam expectedFeePct must be a number from 0 to 100");
+  }
+  const fee = quote.cardFeeSatang;
+  const expectedFee = percentOf(quote.feeBaseSatang, expectedFeePct);
+  if (quote.cardFeePct !== expectedFeePct || fee !== expectedFee || quote.totalSatang !== quote.feeBaseSatang + fee) {
+    throw new RangeError(
+      `Beam ${group} link: the quote's fee is ${quote.cardFeePct}% (${fee} satang), not the ${expectedFeePct}% (${expectedFee} satang) this method group must carry`,
+    );
+  }
 }
 
 /**
@@ -582,10 +613,12 @@ async function beamGet(creds: BeamCredentials, path: string, fetchImpl: typeof f
 
 /**
  * POST /api/v1/payment-links. Retries once (same idempotency key, same body)
- * on network errors, 429 and 5xx. Returns {id, url}; the url must be an https
- * page on the base's own hosted host before it is ever used as a redirect
- * (otherwise BeamApiError UNEXPECTED_HOST). With opts.budgetMs each attempt's
- * timeout fits the budget and the retry runs only when it still fits.
+ * on network errors, 429 and 5xx, after 100-400 ms of jitter (Beam asks for
+ * backoff with jitter, above all on 429). Returns {id, url}; the url must be
+ * an https page on the base's own hosted host before it is ever used as a
+ * redirect (otherwise BeamApiError UNEXPECTED_HOST). With opts.budgetMs each
+ * attempt's timeout fits the budget, and the retry runs only when at least
+ * MIN_ATTEMPT_MS of the budget is still left after the jitter.
  */
 export async function createPaymentLink(
   creds: BeamCredentials,
@@ -638,6 +671,9 @@ export async function createPaymentLink(
     } catch (err) {
       lastError = err;
       if (!isRetryable(err) || attempt === 1) break;
+      const delay = jitterMs(opts.random ?? Math.random);
+      if (opts.budgetMs !== undefined && opts.budgetMs - (now() - started) - delay < MIN_ATTEMPT_MS) break;
+      await (opts.sleep ?? realSleep)(delay);
     }
   }
   throw failure(lastError);
@@ -661,12 +697,34 @@ export async function getPaymentLink(
 
 export type BeamDisableResult = "disabled" | "not_open";
 
+/** Error codes that refuse a disable because of the link's own state: it is no longer ACTIVE. */
+const DISABLE_NOT_OPEN_CODES = new Set(["OPERATION_NOT_ALLOWED_ERROR", "REQUEST_CONFLICT_ERROR"]);
+
+/** Error codes that say OUR request, key or account is wrong: a disable answered with one throws (the caller alerts). */
+const DISABLE_FAULT_CODES = new Set([
+  "INVALID_JSON_ERROR",
+  "INVALID_XML_ERROR",
+  "API_VALIDATION_ERROR",
+  "INVALID_CREDENTIALS_ERROR",
+  "NO_PERMISSION_ERROR",
+  "NOT_FOUND_ERROR",
+  "IDEMPOTENCY_KEY_ERROR",
+  "MERCHANT_STATUS_INVALID_ERROR",
+  "TOO_MANY_REQUESTS_ERROR",
+]);
+
 /**
  * PATCH /api/v1/payment-links/{id}/disable with the caller's idempotency key
- * (a fresh one per attempt). 2xx (202) -> 'disabled'. 404 throws (isBeamNotFound);
- * 401, 429, 5xx and network errors throw. Any other 4xx -> 'not_open': Beam's
- * answer for a link that is no longer ACTIVE is UNVERIFIED, so callers always
- * re-read the link afterwards. No retry here (a retry is a new attempt with a new key).
+ * (a fresh one per attempt). 2xx (202) -> 'disabled'. 'not_open' only when
+ * Beam refuses because of the link's state: errorCode OPERATION_NOT_ALLOWED_ERROR
+ * or REQUEST_CONFLICT_ERROR on any 4xx other than 401/404/429, or a 409/422
+ * whose code is not one of DISABLE_FAULT_CODES (no code, CHARGE_PENDING, a new
+ * code). Everything else throws, so a configuration fault (400 validation or
+ * JSON errors, 403 NO_PERMISSION_ERROR, 412 IDEMPOTENCY_KEY_ERROR, 422
+ * MERCHANT_STATUS_INVALID_ERROR) never reads as "already closed"; 404
+ * (isBeamNotFound), 401, 429, 5xx and network errors throw too. Beam's answer
+ * for a link that is no longer ACTIVE is UNVERIFIED, so callers always re-read
+ * the link afterwards. No retry here (a retry is a new attempt with a new key).
  */
 export async function disablePaymentLink(
   creds: BeamCredentials,
@@ -694,11 +752,12 @@ export async function disablePaymentLink(
     await res.body?.cancel().catch(() => undefined);
     return "disabled";
   }
-  if (res.status === 401 || res.status === 404 || res.status === 429 || res.status >= 500 || res.status < 400) {
-    throw await readError(res);
+  const err = await readError(res);
+  if (res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 404 && res.status !== 429) {
+    if (err.errorCode !== null && DISABLE_NOT_OPEN_CODES.has(err.errorCode)) return "not_open";
+    if ((res.status === 409 || res.status === 422) && (err.errorCode === null || !DISABLE_FAULT_CODES.has(err.errorCode))) return "not_open";
   }
-  await res.body?.cancel().catch(() => undefined);
-  return "not_open";
+  throw err;
 }
 
 /** How to find a payment link's charges: by link id (the documented join key) or by our booking ref. */
@@ -750,12 +809,29 @@ export async function listPaymentLinkCharges(
 }
 
 export interface ChargeScan {
-  /** Every PAYMENT_LINK charge created at or after sinceMs that was read, newest first, each chargeId once. */
+  /**
+   * Every PAYMENT_LINK charge created at or after sinceMs that was read, newest first, each chargeId once:
+   * at the position it was first read, holding its freshest copy (see isFresherCopy).
+   */
   charges: BeamCharge[];
   /** True when the scan reached a charge older than sinceMs or the end of the list. */
   complete: boolean;
   /** Set when a later page failed (the charges before it are kept). */
   error?: BeamErrorInfo;
+}
+
+/**
+ * Whether a later-read copy of a charge replaces the copy already kept: a SUCCEEDED copy beats a copy in
+ * any other state (and is never replaced by one); between two copies in the same state the later
+ * updatedAt wins, and the later read wins when the times tie or cannot be read.
+ */
+function isFresherCopy(kept: BeamCharge, later: BeamCharge): boolean {
+  const keptSucceeded = kept.status === "SUCCEEDED";
+  const laterSucceeded = later.status === "SUCCEEDED";
+  if (keptSucceeded !== laterSucceeded) return laterSucceeded;
+  const keptMs = parseBeamTime(kept.updatedAt);
+  const laterMs = parseBeamTime(later.updatedAt);
+  return keptMs === null || laterMs === null || laterMs >= keptMs;
 }
 
 /**
@@ -766,6 +842,10 @@ export interface ChargeScan {
  * the budget ran out first. The first page's failure throws (e.g. Beam refusing
  * the unfiltered list); a later page's failure returns what was read, with
  * complete=false and error. opts.budgetMs is the budget of the whole scan.
+ * New charges at the top shift the offsets, so a charge can come back on the
+ * next page, changed in between (PENDING -> SUCCEEDED): it is listed once, at
+ * its first position, with its freshest copy (isFresherCopy), so a success
+ * seen on the later page is never lost behind the stale copy.
  */
 export async function listLinkChargesSince(
   creds: BeamCredentials,
@@ -777,7 +857,7 @@ export async function listLinkChargesSince(
   if (!Number.isInteger(maxPages) || maxPages < 1) throw new RangeError("maxPages must be a positive integer");
   const now = opts.now ?? Date.now;
   const started = now();
-  const seen = new Set<string>();
+  const positionOf = new Map<string, number>();
   const charges: BeamCharge[] = [];
   for (let page = 0; page < maxPages; page++) {
     let pageOpts = opts;
@@ -799,8 +879,12 @@ export async function listLinkChargesSince(
       if (createdMs !== null && createdMs < sinceMs) return { charges, complete: true };
       if (c.chargeId !== "") {
         // New charges arriving at the top shift the offsets: a charge can come back on the next page.
-        if (seen.has(c.chargeId)) continue;
-        seen.add(c.chargeId);
+        const i = positionOf.get(c.chargeId);
+        if (i !== undefined) {
+          if (isFresherCopy(charges[i], c)) charges[i] = c;
+          continue;
+        }
+        positionOf.set(c.chargeId, charges.length);
       }
       charges.push(c);
     }
