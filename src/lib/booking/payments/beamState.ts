@@ -11,13 +11,22 @@
 //
 // Rules, first match wins:
 // 1. Link VOIDED or REFUNDED -> 'refunded', even with a SUCCEEDED charge
-//    (money review 4: a refunded booking is never confirmed).
+//    (money review 4: a refunded booking is never confirmed) - as long as the
+//    link has at most one SUCCEEDED charge. With two or more (a double charge:
+//    a late QR or wallet success after the card paid, or a pending attempt
+//    that succeeded after the refund), the link status cannot say which of
+//    them were refunded, and one payment may still be kept. That answer is
+//    never 'refunded' (which would release the hold, make fulfil answer
+//    not_paid and tell the guest 'refunded'): it is 'paid' with refundAmbiguous
+//    and a mismatch that reads "... check in Lighthouse which charges were
+//    refunded", so the gateway raises a CRITICAL needs_attention and nothing
+//    is confirmed or released automatically (round-1 review issue 0).
 // 2. Any SUCCEEDED charge -> 'paid', whatever the link status (an ACTIVE lag,
 //    or a late success on an EXPIRED or DISABLED link). Amount and currency
-//    come from the primary (oldest) charge; mismatch when that amount differs
-//    from link.order.netAmount or its currency is not THB. succeeded lists
-//    every SUCCEEDED charge, so the gateway can tell a double charge (money
-//    review 3).
+//    come from the primary charge (the first to succeed); mismatch when that
+//    amount differs from link.order.netAmount or its currency is not THB.
+//    succeeded lists every SUCCEEDED charge, so the gateway can tell a double
+//    charge (money review 3).
 // 3. Link PAID with no SUCCEEDED charge listed -> 'paid' with amount =
 //    link.order.netAmount and primary null: "charge id pending" (gap review 2,
 //    money review 7).
@@ -42,17 +51,27 @@
 //   link 'processing', and an EXPIRED or DISABLED one 'processing' once its
 //   grace is over (it stops rules 6 and 7 from releasing);
 // - an EXPIRED or DISABLED link with a PENDING charge and no readable
-//   expiresAt stays 'processing' (the grace cannot be measured).
+//   expiresAt (and no options.fallbackExpiresAtMs) stays 'processing' (the
+//   grace cannot be measured).
 //
 // 'failed' is never answered: a declined attempt leaves the link ACTIVE so the
 // guest can try again, and a link that closes after it is 'expired'.
 //
-// Times: createdAt and expiresAt are read with parseBeamTime (Z or an offset
-// only). "Oldest first" orders by createdAt; a charge without a readable
-// createdAt counts as the newest, and equal times keep Beam's newest-first
-// listing order reversed. A PENDING charge without a readable createdAt is
-// aged from the link's expiresAt (it was begun before the link closed), which
-// can only make the 24-hour block last longer, never shorter.
+// Times: createdAt, transactionTime and expiresAt are read with parseBeamTime
+// (Z or an offset only). When Beam's expiresAt cannot be read, the expiry we
+// set at create time (options.fallbackExpiresAtMs, from the PaymentRecord) is
+// used instead, so the skew and grace rules still run.
+// - "Oldest first" (pending, and the order of the charge lists) is by
+//   createdAt; a charge without a readable createdAt counts as the newest,
+//   and equal times keep Beam's newest-first listing order reversed.
+// - SUCCEEDED charges are listed in the order they SUCCEEDED: by
+//   transactionTime, else createdAt, then as above. The primary is the first
+//   to succeed - the payment that paid the booking - so a QR or wallet
+//   attempt begun earlier that confirms after the card paid never takes its
+//   place (round-1 review issue 1).
+// - A PENDING charge without a readable createdAt is aged from the link's
+//   expiry (it was begun before the link closed), which can only make the
+//   24-hour block last longer, never shorter.
 //
 // UNVERIFIED (Beam question 2): whether a PENDING charge can still succeed
 // after its link is DISABLED or EXPIRED. The rules assume it can.
@@ -79,13 +98,23 @@ export interface BeamStateOptions {
   skewMs?: number;
   /** Default BEAM_PENDING_BLOCK_MS (24 hours). */
   pendingBlockMs?: number;
+  /**
+   * The link's expiry as we set it at create time, epoch ms (the gateway fills it from the PaymentRecord's
+   * expiresAt, S2.4/S4.1). Used only when Beam's link.expiresAt cannot be read (missing, or a time without a
+   * zone): without it an ACTIVE link would never be disabled by us and a PENDING charge on a closed link would
+   * keep its hold forever. Beam's own expiresAt wins whenever it is readable.
+   */
+  fallbackExpiresAtMs?: number;
 }
 
 export interface BeamPaymentState {
   state: GatewayState;
-  /** Every SUCCEEDED charge of the link, oldest first (more than one: the guest paid twice). */
+  /** Every SUCCEEDED charge of the link, in the order they succeeded (more than one: the guest paid twice). */
   succeeded: BeamCharge[];
-  /** The oldest SUCCEEDED charge; null when there is none (also a PAID link whose charge is not listed yet). */
+  /**
+   * The first charge to SUCCEED (by transactionTime, else createdAt): the one that paid the booking. null when
+   * there is none (also a PAID link whose charge is not listed yet).
+   */
   primary: BeamCharge | null;
   /** Every PENDING charge of the link, oldest first. */
   pending: BeamCharge[];
@@ -99,8 +128,17 @@ export interface BeamPaymentState {
    */
   amountSatang: number | null;
   currency: string | null;
-  /** The primary charge disagrees with the link's order (amount, or a currency other than THB). No personal data. */
+  /**
+   * What the owner must check, no personal data: the primary charge disagrees with the link's order (amount,
+   * or a currency other than THB), and/or the refund is ambiguous (refundAmbiguous).
+   */
   mismatch?: string;
+  /**
+   * Set (true) for a VOIDED or REFUNDED link with two or more SUCCEEDED charges (rule 1): Beam cannot say which
+   * were refunded. The state is then 'paid' with a mismatch, never 'refunded'; the gateway raises a CRITICAL
+   * needs_attention: check in Lighthouse which charges were refunded.
+   */
+  refundAmbiguous?: boolean;
   /** A payment was started on Beam's page: the link has at least one charge. */
   attempted: boolean;
 }
@@ -128,9 +166,17 @@ function stringOrNull(v: unknown): string | null {
   return typeof v === "string" ? v : null;
 }
 
-/** The link's own charges, each chargeId once (a SUCCEEDED copy wins), oldest first. */
-function linkCharges(linkId: string, charges: readonly BeamCharge[]): BeamCharge[] {
-  const entries: { charge: BeamCharge; pos: number; createdMs: number }[] = [];
+interface OwnCharge {
+  charge: BeamCharge;
+  /** Its position in Beam's (newest-first) list. */
+  pos: number;
+  /** createdAt, epoch ms; +Infinity when it cannot be read. */
+  createdMs: number;
+}
+
+/** The link's own charges, each chargeId once (a SUCCEEDED copy wins), oldest first by createdAt. */
+function linkCharges(linkId: string, charges: readonly BeamCharge[]): OwnCharge[] {
+  const entries: OwnCharge[] = [];
   const byId = new Map<string, number>();
   charges.forEach((c, pos) => {
     if (!c || typeof c !== "object" || c.source !== "PAYMENT_LINK" || c.sourceId !== linkId) return;
@@ -150,13 +196,34 @@ function linkCharges(linkId: string, charges: readonly BeamCharge[]): BeamCharge
   });
   // Beam lists newest first: on equal (or unreadable) times, a later position is the older charge.
   entries.sort((a, b) => (a.createdMs !== b.createdMs ? (a.createdMs < b.createdMs ? -1 : 1) : b.pos - a.pos));
-  return entries.map((e) => e.charge);
+  return entries;
+}
+
+/** When a SUCCEEDED charge succeeded: its transactionTime, else its createdAt (+Infinity when neither can be read). */
+function succeededMs(e: OwnCharge): number {
+  return parseBeamTime(e.charge.transactionTime) ?? e.createdMs;
+}
+
+/**
+ * The SUCCEEDED charges in the order they succeeded. The sort is stable, so equal (or unreadable) success
+ * times keep the createdAt order, and then Beam's listing order reversed.
+ */
+function inSuccessOrder(own: readonly OwnCharge[]): BeamCharge[] {
+  return own
+    .filter((e) => kindOf(e.charge.status) === "succeeded")
+    .map((e) => ({ e, ms: succeededMs(e) }))
+    .sort((a, b) => (a.ms === b.ms ? 0 : a.ms < b.ms ? -1 : 1))
+    .map(({ e }) => e.charge);
+}
+
+function idOf(charge: BeamCharge): string {
+  return typeof charge.chargeId === "string" && charge.chargeId !== "" ? charge.chargeId : "(no id)";
 }
 
 function amountMismatch(linkId: string, netAmount: number | null, charge: BeamCharge): string | undefined {
   const amount = finiteOrNull(charge.amount);
   const currency = stringOrNull(charge.currency);
-  const id = typeof charge.chargeId === "string" && charge.chargeId !== "" ? charge.chargeId : "(no id)";
+  const id = idOf(charge);
   const problems: string[] = [];
   if (amount === null || netAmount === null || amount !== netAmount) {
     problems.push(`amount ${amount ?? "unknown"} does not match the link's netAmount ${netAmount ?? "unknown"}`);
@@ -167,11 +234,12 @@ function amountMismatch(linkId: string, netAmount: number | null, charge: BeamCh
 
 /** The state of a Beam payment link from its GET answer and its charges (see the rules above). */
 export function beamPaymentState(link: BeamPaymentLink, charges: readonly BeamCharge[], options: BeamStateOptions): BeamPaymentState {
-  const { nowMs, graceMs, skewMs = BEAM_EXPIRY_SKEW_MS, pendingBlockMs = BEAM_PENDING_BLOCK_MS } = options;
+  const { nowMs, graceMs, skewMs = BEAM_EXPIRY_SKEW_MS, pendingBlockMs = BEAM_PENDING_BLOCK_MS, fallbackExpiresAtMs } = options;
   checkTime("nowMs", nowMs, null);
   checkTime("graceMs", graceMs, 0);
   checkTime("skewMs", skewMs, 0);
   checkTime("pendingBlockMs", pendingBlockMs, 0);
+  if (fallbackExpiresAtMs !== undefined) checkTime("fallbackExpiresAtMs", fallbackExpiresAtMs, null);
 
   const order = link && typeof link.order === "object" && link.order !== null ? link.order : null;
   const orderAmount = finiteOrNull(order?.netAmount);
@@ -193,21 +261,41 @@ export function beamPaymentState(link: BeamPaymentLink, charges: readonly BeamCh
   if (linkId === null) return base({ state: "processing" });
 
   const own = linkCharges(linkId, charges);
-  const succeeded = own.filter((c) => kindOf(c.status) === "succeeded");
-  const pending = own.filter((c) => kindOf(c.status) === "pending");
-  const other = own.filter((c) => kindOf(c.status) === "other");
+  const ownCharges = own.map((e) => e.charge);
+  const succeeded = inSuccessOrder(own);
+  const pending = ownCharges.filter((c) => kindOf(c.status) === "pending");
+  const other = ownCharges.filter((c) => kindOf(c.status) === "other");
   const primary = succeeded[0] ?? null;
   const common = { succeeded, primary, pending, attempted: own.length > 0 };
   const status: unknown = link.status;
 
-  /** The answer quotes the primary charge's own amount and currency, and says when they disagree with the order. */
-  const fromPrimary = (state: GatewayState, p: BeamCharge): BeamPaymentState => {
-    const mismatch = amountMismatch(linkId, orderAmount, p);
-    return base({ ...common, state, amountSatang: finiteOrNull(p.amount), currency: stringOrNull(p.currency), ...(mismatch ? { mismatch } : {}) });
+  /**
+   * The answer quotes the primary charge's own amount and currency, and says when they disagree with the
+   * order; `ambiguous` (rule 1) comes first in the mismatch and sets refundAmbiguous.
+   */
+  const fromPrimary = (state: GatewayState, p: BeamCharge, ambiguous?: string): BeamPaymentState => {
+    const problems = [ambiguous, amountMismatch(linkId, orderAmount, p)].filter((m): m is string => m !== undefined);
+    return base({
+      ...common,
+      state,
+      amountSatang: finiteOrNull(p.amount),
+      currency: stringOrNull(p.currency),
+      ...(problems.length > 0 ? { mismatch: problems.join(". ") } : {}),
+      ...(ambiguous !== undefined ? { refundAmbiguous: true } : {}),
+    });
   };
 
-  // Rule 1: a refund (or void) beats any SUCCEEDED charge.
-  if (status === "VOIDED" || status === "REFUNDED") return primary ? fromPrimary("refunded", primary) : base({ ...common, state: "refunded" });
+  // Rule 1: a refund (or void) beats a SUCCEEDED charge - but with two or more the link status cannot say
+  // which were refunded, so it is never answered 'refunded' (no release, no not_paid, no 'refunded' for the guest).
+  if (status === "VOIDED" || status === "REFUNDED") {
+    if (primary && succeeded.length >= 2) {
+      const ambiguous =
+        `Beam payment link ${linkId} is ${status} but has ${succeeded.length} SUCCEEDED charges ` +
+        `(${succeeded.map(idOf).join(", ")}): check in Lighthouse which charges were refunded`;
+      return fromPrimary("paid", primary, ambiguous);
+    }
+    return primary ? fromPrimary("refunded", primary) : base({ ...common, state: "refunded" });
+  }
 
   // Rule 2: money was taken, whatever the link says.
   if (primary) return fromPrimary("paid", primary);
@@ -215,7 +303,8 @@ export function beamPaymentState(link: BeamPaymentLink, charges: readonly BeamCh
   // Rule 3: PAID before its charge is listed: paid at the order's amount, charge id pending.
   if (status === "PAID") return base({ ...common, state: "paid" });
 
-  const expiresMs = parseBeamTime(link.expiresAt);
+  // Beam's expiresAt, else the one we set at create time (a time Beam sent without a zone is never guessed).
+  const expiresMs = parseBeamTime(link.expiresAt) ?? fallbackExpiresAtMs ?? null;
 
   // Rules 4 and 5.
   if (status === "ACTIVE") {

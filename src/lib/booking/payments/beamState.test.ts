@@ -5,9 +5,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPaymentLinkRequest, createPaymentLink, getPaymentLink, listPaymentLinkCharges } from "../beam.ts";
+import { buildPaymentLinkRequest, createPaymentLink, disablePaymentLink, getPaymentLink, listPaymentLinkCharges } from "../beam.ts";
 import type { BeamCharge, BeamChargeStatus, BeamMethodGroup, BeamPaymentLink } from "../beam.ts";
 import { bangkokTime, createFakeBeam } from "../mock/fakeBeam.ts";
+import type { FakeBeamOptions } from "../mock/fakeBeam.ts";
 import type { Quote, QuoteLine } from "../types.ts";
 import { BEAM_EXPIRY_SKEW_MS, BEAM_PENDING_BLOCK_MS, beamPaymentState } from "./beamState.ts";
 import type { BeamPaymentState, BeamStateOptions } from "./beamState.ts";
@@ -57,9 +58,11 @@ function run(l: BeamPaymentLink, charges: BeamCharge[], nowMs: number, extra: Pa
   return beamPaymentState(l, charges, { nowMs, graceMs: GRACE, ...extra });
 }
 
-/** "state[/pendingReason][+disable][!mismatch]" */
+/** "state[/pendingReason][+disable][!mismatch][!ambiguous]" (!ambiguous: refundAmbiguous) */
 function code(s: BeamPaymentState): string {
-  return `${s.state}${s.pendingReason ? `/${s.pendingReason}` : ""}${s.needsDisable ? "+disable" : ""}${s.mismatch ? "!mismatch" : ""}`;
+  return `${s.state}${s.pendingReason ? `/${s.pendingReason}` : ""}${s.needsDisable ? "+disable" : ""}${s.mismatch ? "!mismatch" : ""}${
+    s.refundAmbiguous ? "!ambiguous" : ""
+  }`;
 }
 
 type SetName =
@@ -125,7 +128,8 @@ const REFUNDED: Record<SetName, [string, string]> = {
   pending: ["refunded", "refunded"],
   "failed+pending": ["refunded", "refunded"],
   succeeded: ["refunded", "refunded"],
-  "two succeeded": ["refunded", "refunded"],
+  // Which of the two was refunded is unknown: never 'refunded' (round-1 review issue 0), a CRITICAL instead.
+  "two succeeded": ["paid!mismatch!ambiguous", "paid!mismatch!ambiguous"],
   "wrong amount": ["refunded!mismatch", "refunded!mismatch"],
   foreign: ["refunded", "refunded"],
   "unknown status": ["refunded", "refunded"],
@@ -190,9 +194,10 @@ test("table: every link status x charge set, inside the link's life and after ex
         // The charge lists follow the set, whatever the state.
         const own = set === "foreign" ? [] : charges;
         const byStatus = (st: string) => own.filter((c) => c.status === st).reverse();
-        assert.deepEqual(s.succeeded, byStatus("SUCCEEDED"), `${where}: succeeded, oldest first`);
+        assert.deepEqual(s.succeeded, byStatus("SUCCEEDED"), `${where}: succeeded, in the order they succeeded`);
         assert.deepEqual(s.pending, byStatus("PENDING"), `${where}: pending, oldest first`);
-        assert.equal(s.primary, s.succeeded[0] ?? null, `${where}: primary = oldest SUCCEEDED`);
+        assert.equal(s.primary, s.succeeded[0] ?? null, `${where}: primary = the first to succeed`);
+        assert.equal(s.refundAmbiguous === true, (status === "VOIDED" || status === "REFUNDED") && s.succeeded.length >= 2, `${where}: refundAmbiguous`);
         assert.equal(s.attempted, own.length > 0, `${where}: attempted = any charge of this link`);
 
         // Amount and currency: the primary charge's when there is one, else the link order's.
@@ -217,7 +222,8 @@ test("PAID with no SUCCEEDED charge listed: paid at the order's amount, charge i
   }
 });
 
-test("two SUCCEEDED charges: both listed oldest first, the oldest is primary (money review 3)", () => {
+test("two SUCCEEDED charges: both listed in the order they succeeded, the first to succeed is primary (money review 3)", () => {
+  // Without a transactionTime, createdAt decides.
   const newer = charge("SUCCEEDED", { createdAt: bangkokTime(T0 + 9 * MIN), paymentMethod: { paymentMethodType: "CARD" } });
   const older = charge("SUCCEEDED", { createdAt: bangkokTime(T0 + 2 * MIN), paymentMethod: { paymentMethodType: "QR_PROMPT_PAY" } });
   for (const status of ["ACTIVE", "PAID", "EXPIRED", "DISABLED"]) {
@@ -226,6 +232,103 @@ test("two SUCCEEDED charges: both listed oldest first, the oldest is primary (mo
     assert.deepEqual(s.succeeded, [older, newer], status);
     assert.equal(s.primary, older, status);
     assert.equal(s.mismatch, undefined, status);
+  }
+
+  // The late confirmation (round-1 review issue 1): a QR attempt begun first confirms only after the card paid.
+  // The card stays primary: it is the payment that paid the booking (amount, currency and method come from it).
+  const qr = charge("SUCCEEDED", {
+    createdAt: bangkokTime(T0 + MIN),
+    transactionTime: bangkokTime(T0 + 12 * MIN),
+    paymentMethod: { paymentMethodType: "QR_PROMPT_PAY" },
+    amount: NET - 72_000,
+  });
+  const card = charge("SUCCEEDED", { createdAt: bangkokTime(T0 + 4 * MIN), transactionTime: bangkokTime(T0 + 5 * MIN), paymentMethod: { paymentMethodType: "CARD" } });
+  for (const list of [
+    [qr, card],
+    [card, qr],
+  ]) {
+    const s = run(link("PAID"), list, LATE);
+    assert.equal(s.primary, card);
+    assert.deepEqual(s.succeeded, [card, qr]);
+    assert.equal(s.amountSatang, NET);
+    assert.equal(s.mismatch, undefined, "the late QR's own amount is not the booking's answer");
+    assert.deepEqual(s.pending, []);
+  }
+  // transactionTime across offsets; a charge without a readable transactionTime falls back to its createdAt.
+  const zulu = charge("SUCCEEDED", { createdAt: bangkokTime(T0), transactionTime: "2026-10-22T03:07:00Z" }); // 10:07+07:00
+  const bkk = charge("SUCCEEDED", { createdAt: bangkokTime(T0), transactionTime: "2026-10-22T10:06:00+07:00" });
+  const undated = charge("SUCCEEDED", { createdAt: bangkokTime(T0 + 6 * MIN + 30_000), transactionTime: "2026-10-22T10:05:00" });
+  assert.deepEqual(run(link("PAID"), [zulu, bkk, undated], LATE).succeeded, [bkk, undated, zulu]);
+  // Equal success times keep the createdAt order, then Beam's listing order reversed.
+  const same = bangkokTime(T0 + 8 * MIN);
+  const a = charge("SUCCEEDED", { createdAt: bangkokTime(T0 + 3 * MIN), transactionTime: same });
+  const b = charge("SUCCEEDED", { createdAt: bangkokTime(T0 + 2 * MIN), transactionTime: same });
+  const c = charge("SUCCEEDED", { createdAt: bangkokTime(T0 + 2 * MIN), transactionTime: same });
+  assert.deepEqual(run(link("PAID"), [a, b, c], LATE).succeeded, [c, b, a]);
+  // Neither time readable: such a charge succeeded last.
+  const blind = charge("SUCCEEDED", { createdAt: undefined, transactionTime: undefined });
+  assert.deepEqual(run(link("PAID"), [blind, a], LATE).succeeded, [a, blind]);
+});
+
+test("rule 1 with two or more SUCCEEDED charges: never 'refunded', but 'paid' with refundAmbiguous and a mismatch for the owner", () => {
+  const first = charge("SUCCEEDED", { createdAt: bangkokTime(T0 + 2 * MIN) });
+  const second = charge("SUCCEEDED", { createdAt: bangkokTime(T0 + 7 * MIN), paymentMethod: { paymentMethodType: "ALIPAY" } });
+  for (const status of ["VOIDED", "REFUNDED"]) {
+    for (const nowMs of [DURING, LATE, LATE + 30 * BEAM_PENDING_BLOCK_MS]) {
+      const s = run(link(status), [second, first], nowMs);
+      assert.equal(code(s), "paid!mismatch!ambiguous", status);
+      assert.equal(s.refundAmbiguous, true);
+      assert.equal(s.primary, first);
+      assert.deepEqual(s.succeeded, [first, second]);
+      assert.equal(s.amountSatang, NET);
+      assert.equal(s.needsDisable, false);
+      assert.equal(
+        s.mismatch,
+        `Beam payment link ${LINK_ID} is ${status} but has 2 SUCCEEDED charges (${first.chargeId}, ${second.chargeId}): check in Lighthouse which charges were refunded`,
+      );
+    }
+  }
+  // Three, one of them for the wrong amount: both problems are named, the ambiguity first.
+  const third = charge("SUCCEEDED", { createdAt: bangkokTime(T0 + MIN), amount: NET - 1 });
+  const s = run(link("REFUNDED"), [second, first, third], DURING);
+  assert.equal(s.primary, third);
+  assert.equal(s.amountSatang, NET - 1);
+  assert.match(s.mismatch ?? "", /^Beam payment link \S+ is REFUNDED but has 3 SUCCEEDED charges \(.+\): check in Lighthouse which charges were refunded\. Beam charge \S+ on payment link \S+: amount 2471999 does not match the link's netAmount 2472000$/);
+  // Charges without an id cannot be told apart: two of them are two charges.
+  assert.equal(code(run(link("REFUNDED"), [charge("SUCCEEDED", { chargeId: "" }), charge("SUCCEEDED", { chargeId: "" })], DURING)), "paid!mismatch!ambiguous");
+  // The same charge listed twice is one charge: plainly refunded.
+  const once = charge("SUCCEEDED");
+  assert.equal(code(run(link("REFUNDED"), [once, { ...once }], DURING)), "refunded");
+  // One SUCCEEDED charge next to PENDING or FAILED ones is still refunded (until a second one succeeds).
+  assert.equal(code(run(link("REFUNDED"), [charge("PENDING"), first, charge("FAILED")], LATE)), "refunded");
+  assert.equal(run(link("REFUNDED"), [first], LATE).refundAmbiguous, undefined);
+});
+
+test("fallbackExpiresAtMs: the expiry we set at create time stands in when Beam's expiresAt cannot be read", () => {
+  const fallbackExpiresAtMs = EXPIRES;
+  for (const expiresAt of [undefined, "", "2026-10-22T10:30:00"]) {
+    const where = String(expiresAt);
+    // ACTIVE: disabled by us at the fallback + skew.
+    assert.equal(code(run(link("ACTIVE", { expiresAt }), [], EXPIRES + BEAM_EXPIRY_SKEW_MS - 1, { fallbackExpiresAtMs })), "open", where);
+    assert.equal(code(run(link("ACTIVE", { expiresAt }), [], EXPIRES + BEAM_EXPIRY_SKEW_MS, { fallbackExpiresAtMs })), "open+disable", where);
+    assert.equal(code(run(link("ACTIVE", { expiresAt }), [charge("PENDING")], LATE, { fallbackExpiresAtMs })), "processing/processing+disable", where);
+    // EXPIRED or DISABLED with a PENDING charge: the grace and the 24 hours are measured from the fallback.
+    for (const status of ["EXPIRED", "DISABLED"]) {
+      const l = link(status, { expiresAt });
+      assert.equal(code(run(l, [charge("PENDING")], EXPIRES + GRACE - 1, { fallbackExpiresAtMs })), "processing/processing", where);
+      assert.equal(code(run(l, [charge("PENDING")], EXPIRES + GRACE, { fallbackExpiresAtMs })), "expired/unconfirmed", where);
+      const undated = [charge("PENDING", { createdAt: undefined })];
+      assert.equal(code(run(l, undated, EXPIRES + BEAM_PENDING_BLOCK_MS, { fallbackExpiresAtMs })), "expired", `${where}: aged from the fallback`);
+      // Without the fallback it stays processing, as before.
+      assert.equal(code(run(l, [charge("PENDING")], LATE + 30 * BEAM_PENDING_BLOCK_MS)), "processing/processing", where);
+    }
+  }
+  // Beam's own readable expiresAt wins over the fallback.
+  assert.equal(code(run(link("ACTIVE"), [], EXPIRES + BEAM_EXPIRY_SKEW_MS, { fallbackExpiresAtMs: EXPIRES + 60 * MIN })), "open+disable");
+  assert.equal(code(run(link("EXPIRED"), [charge("PENDING")], EXPIRES + GRACE, { fallbackExpiresAtMs: EXPIRES + 60 * MIN })), "expired/unconfirmed");
+  // It must be a finite time.
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, "x" as unknown as number]) {
+    assert.throws(() => run(link("ACTIVE", { expiresAt: undefined }), [], DURING, { fallbackExpiresAtMs: bad }), RangeError);
   }
 });
 
@@ -486,9 +589,9 @@ const quote: Quote = {
   balanceSatang: 0,
 };
 
-function fakeSetup() {
+function fakeSetup(options: FakeBeamOptions = {}) {
   let t = T0;
-  const fake = createFakeBeam({ now: () => t });
+  const fake = createFakeBeam({ now: () => t, ...options });
   let key = 0;
   return {
     fake,
@@ -560,11 +663,19 @@ test("fake Beam: open, declined, disabled, PAID before its charge is listed, a d
   k.advance(31 * MIN);
   assert.equal(code(await k.read(declined)), "expired");
 
-  // An ACTIVE link Beam has not expired yet (the fake expires links itself on GET, so judge a later clock).
-  const stale = await k.newLink();
-  assert.equal(code(await k.read(stale, k.now() + 30 * MIN + BEAM_EXPIRY_SKEW_MS)), "open+disable");
-  k.fake.disable(stale);
-  assert.equal(code(await k.read(stale)), "expired");
+  // An ACTIVE link a lagging Beam has not expired yet (expiryLagMs), on the fake's own clock:
+  // needsDisable -> PATCH disable (the real client) -> re-read.
+  const lagging = fakeSetup({ expiryLagMs: 10 * MIN });
+  const stale = await lagging.newLink();
+  lagging.advance(30 * MIN + BEAM_EXPIRY_SKEW_MS - 1);
+  assert.equal(code(await lagging.read(stale)), "open", "1 ms before expiresAt + skew");
+  lagging.advance(1);
+  assert.equal(code(await lagging.read(stale)), "open+disable");
+  assert.equal(await disablePaymentLink(lagging.fake.creds, stale, "msv-bd-stale-1", lagging.fake.fetch), "disabled");
+  assert.equal(code(await lagging.read(stale)), "expired");
+  // A repeated disable (a fresh key) is 'not_open', and the re-read still says expired.
+  assert.equal(await disablePaymentLink(lagging.fake.creds, stale, "msv-bd-stale-2", lagging.fake.fetch), "not_open");
+  assert.equal(code(await lagging.read(stale)), "expired");
 
   // PAID while the charge list lags: paid with no primary, then the charge appears.
   const lag = await k.newLink();
@@ -600,4 +711,74 @@ test("fake Beam: open, declined, disabled, PAID before its charge is listed, a d
   const wrong = await k.newLink();
   k.fake.pay(wrong, "CARD", { amount: NET - 1 });
   assert.equal(code(await k.read(wrong)), "paid!mismatch");
+});
+
+/** A wallet attempt begun first and left pending, then the card pays, then the wallet confirms late. */
+async function lateWalletAfterCard(k: ReturnType<typeof fakeSetup>) {
+  const id = await k.newLink();
+  k.advance(MIN);
+  const alipay = k.fake.payPending(id, "ALIPAY");
+  assert.equal(code(await k.read(id)), "processing/processing");
+  k.advance(2 * MIN);
+  const card = k.fake.pay(id, "CARD");
+  const paid = await k.read(id);
+  assert.equal(code(paid), "paid");
+  assert.equal(paid.primary?.chargeId, card.chargeId);
+  assert.deepEqual(
+    paid.pending.map((c) => c.chargeId),
+    [alipay.chargeId],
+  );
+  k.advance(2 * MIN);
+  k.fake.succeed(alipay.chargeId); // the link was PAID already and stays PAID
+  return { id, alipay, card };
+}
+
+test("fake Beam: a late wallet confirmation after the card paid never takes the primary's place (round-1 review issue 1)", async () => {
+  const k = fakeSetup();
+  const { id, alipay, card } = await lateWalletAfterCard(k);
+  for (const nowMs of [k.now(), LATE, LATE + 2 * BEAM_PENDING_BLOCK_MS]) {
+    const s = await k.read(id, nowMs);
+    assert.equal(code(s), "paid");
+    assert.equal(s.primary?.chargeId, card.chargeId, "the card paid the booking: it stays primary on every read");
+    assert.equal(s.primary?.paymentMethod?.paymentMethodType, "CARD");
+    assert.deepEqual(
+      s.succeeded.map((c) => c.chargeId),
+      [card.chargeId, alipay.chargeId],
+      "in the order they succeeded (the wallet charge is older by createdAt)",
+    );
+    assert.deepEqual(s.pending, []);
+    assert.equal(s.amountSatang, NET);
+  }
+  assert.ok(k.fake.charge(alipay.chargeId).createdMs < k.fake.charge(card.chargeId).createdMs);
+});
+
+test("fake Beam: CARD pays, a late ALIPAY succeeds, only the ALIPAY charge is refunded -> never plain 'refunded' (round-1 review issue 0)", async () => {
+  for (const refundLinkStatus of ["any_refund", "all_charges_fully_refunded"] as const) {
+    const k = fakeSetup({ refundLinkStatus });
+    const { id, alipay, card } = await lateWalletAfterCard(k);
+    k.advance(60 * MIN);
+    k.fake.refund(alipay.chargeId); // the owner refunds the duplicate in Lighthouse
+    const s = await k.read(id);
+    assert.equal(s.state, "paid", refundLinkStatus);
+    assert.equal(s.primary?.chargeId, card.chargeId);
+    assert.deepEqual(
+      s.succeeded.map((c) => c.chargeId),
+      [card.chargeId, alipay.chargeId],
+      "a refunded charge stays SUCCEEDED",
+    );
+    const linkStatus = (await getPaymentLink(k.fake.creds, id, k.fake.fetch, FAST)).status;
+    if (refundLinkStatus === "any_refund") {
+      // Beam moves the link to REFUNDED although the card payment is kept: which charge was refunded can't be told.
+      assert.equal(linkStatus, "REFUNDED");
+      assert.equal(code(s), "paid!mismatch!ambiguous");
+      assert.match(s.mismatch ?? "", /^Beam payment link \S+ is REFUNDED but has 2 SUCCEEDED charges \(.+\): check in Lighthouse which charges were refunded$/);
+    } else {
+      // The link stays PAID: an ordinary double charge, which the gateway alerts (money review 3).
+      assert.equal(linkStatus, "PAID");
+      assert.equal(code(s), "paid");
+    }
+    // Even with the card refunded too, the link alone cannot prove it: still the owner's check, never 'refunded'.
+    k.fake.refund(card.chargeId);
+    assert.equal(code(await k.read(id)), "paid!mismatch!ambiguous", refundLinkStatus);
+  }
 });
