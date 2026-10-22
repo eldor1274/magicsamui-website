@@ -1,8 +1,9 @@
-// Builds the Stripe-mode dependencies for route handlers and server pages
-// (server only): Stripe client, Cloudbeds writer, KV store, alerts, logging.
-// getProviderDeps and getFulfilmentProviderDeps hand them out with the
-// provider's PaymentGateway, so status and abandon pick them by the booking's
-// provider (only Stripe has a gateway so far).
+// Builds the Stripe-mode and Beam-mode dependencies for route handlers and
+// server pages (server only): Stripe client, Cloudbeds writer, KV store,
+// alerts, logging; for Beam (design S4.5) also Beam's settings, its fetch, the
+// 429 counter and the caller's deadline (BeamGatewayDeps). getProviderDeps and
+// getFulfilmentProviderDeps hand them out with the provider's PaymentGateway,
+// so status and abandon pick them by the booking's provider.
 //
 // - stripe-live: real Stripe, real Cloudbeds writer, Upstash Redis (config
 //   refuses live without Redis), alerts by email.
@@ -13,11 +14,20 @@
 // - stripe-mock: the in-repo fakes for Stripe AND Cloudbeds plus an in-memory
 //   store, kept on globalThis so they survive dev-server module reloads.
 //   Nothing leaves the process.
+// - beam-playground / beam-live: as Stripe's test and live modes (the live
+//   writer needs Redis), except that a Beam mode with the MOCK writer (local
+//   runs only: config refuses it wherever VERCEL_ENV is set) always uses the
+//   in-memory store, never Redis (money review 10). The Beam gateway the routes
+//   get (beamGatewayOf) loads the Beam client (beam.ts) only when it calls Beam:
+//   this file is loaded by the abandon, sweep and Stripe webhook routes, which
+//   never load beam.ts through a static import (importGraph.test.ts).
+// Building any of these deps writes nothing and logs nothing (a drain logs
+// once that it is draining).
 
 import { after } from "next/server";
 import { site } from "../../data/site.ts";
 import { sendSiteMail } from "../siteMail.ts";
-import { getFulfilmentConfig, getStripeDrainConfig } from "./config.ts";
+import { getBeamDrainConfig, getFulfilmentConfig, getStripeDrainConfig } from "./config.ts";
 import type { BookingConfig } from "./config.ts";
 import { cloudbedsRestrictions } from "./cloudbedsProvider.ts";
 import type { PromoRestrictionInput } from "./cloudbedsProvider.ts";
@@ -26,12 +36,15 @@ import type { CloudbedsWriter } from "./cloudbedsWrite.ts";
 import { createMemoryKv } from "./kv.ts";
 import type { KvStore } from "./kv.ts";
 import { createUpstashKv } from "./kvUpstash.ts";
-import { keyScope } from "./lock.ts";
+import { BEAM_RECORD_TTL_SECONDS, beamKeyOf, keyScope, keys, linkIdOf, parseBeamHoldIdentifier } from "./lock.ts";
 import { ALERT_MAIL_TIMEOUT_MS, alertEmailEnabled, alertSubjectPrefix, createAlerter } from "./alerts.ts";
 import { createFakeCloudbeds, mockHoldPricer } from "./mock/fakeCloudbeds.ts";
 import type { FakeCloudbeds } from "./mock/fakeCloudbeds.ts";
 import { createFakeStripe } from "./mock/fakeStripe.ts";
 import type { FakeStripe } from "./mock/fakeStripe.ts";
+import type { BeamGateway, BeamGatewayDeps } from "./payments/beamGateway.ts";
+import { isBeamLinkId } from "./payments/beamIds.ts";
+import { beamGatewayText } from "./payments/beamText.ts";
 import { createStripeClient } from "./payments/stripe.ts";
 import type { StripeClient } from "./payments/stripe.ts";
 import { stripeGateway } from "./payments/stripeGateway.ts";
@@ -51,6 +64,9 @@ interface RuntimeGlobals {
   redisKv?: { url: string; kv: KvStore };
   warnedMemory?: boolean;
   warnedDrain?: boolean;
+  warnedBeamDrain?: boolean;
+  /** Test hook: Beam's fetch for every Beam deps built here (tests: the in-repo fake Beam). Unset: the global fetch. */
+  beamFetch?: typeof fetch;
 }
 
 const g = globalThis as typeof globalThis & { __msvBookingRuntime?: RuntimeGlobals };
@@ -71,6 +87,10 @@ export function mockWorld(config: BookingConfig): MockWorld {
 
 function kvFor(config: BookingConfig): KvStore {
   if (config.paymentMode === "stripe-mock") return mockWorld(config).kv;
+  // A Beam mode with the mock writer never uses Redis, set or not: every Vercel deployment shares the production
+  // Redis, and fake holds must never reach its index (money review 10). It is a local run (config refuses it
+  // wherever VERCEL_ENV is set), so the in-memory store is what it is meant to use: no warning.
+  if (config.beam && config.cloudbedsWrite?.mode !== "live") return (globals.memoryKv ??= createMemoryKv());
   if (config.redis) {
     if (!globals.redisKv || globals.redisKv.url !== config.redis.url) globals.redisKv = { url: config.redis.url, kv: createUpstashKv(config.redis) };
     return globals.redisKv.kv;
@@ -123,11 +143,29 @@ function alerterFor(config: BookingConfig, kv: KvStore): AlertFn {
   });
 }
 
+/** The live restriction check (getRatePlans) while availability is Cloudbeds', else nothing (CoreDeps.restrictions). */
+function restrictionsFor(config: BookingConfig): Pick<StripeDeps, "restrictions"> {
+  const cloudbeds = config.cloudbeds;
+  return cloudbeds && config.dataSource === "cloudbeds"
+    ? {
+        restrictions: (roomTypeId: string, rateId: string | null, checkIn: string, checkOut: string, adults: number, promo?: PromoRestrictionInput | null) =>
+          cloudbedsRestrictions(
+            roomTypeId,
+            rateId,
+            checkIn,
+            checkOut,
+            adults,
+            { apiKey: cloudbeds.apiKey, propertyId: cloudbeds.propertyId, budgetWaitMs: 3_000 },
+            promo ?? null,
+          ),
+      }
+    : {};
+}
+
 /** Stripe-mode dependencies, or null outside the Stripe modes. */
 export function getStripeDeps(config: BookingConfig): StripeDeps | null {
   if (!config.stripe) return null;
   const kv = kvFor(config);
-  const cloudbeds = config.cloudbeds;
   return {
     config,
     stripe: stripeFor(config),
@@ -135,20 +173,125 @@ export function getStripeDeps(config: BookingConfig): StripeDeps | null {
     kv,
     alert: alerterFor(config, kv),
     log: logEvent,
-    ...(cloudbeds && config.dataSource === "cloudbeds"
-      ? {
-          restrictions: (roomTypeId: string, rateId: string | null, checkIn: string, checkOut: string, adults: number, promo?: PromoRestrictionInput | null) =>
-            cloudbedsRestrictions(
-              roomTypeId,
-              rateId,
-              checkIn,
-              checkOut,
-              adults,
-              { apiKey: cloudbeds.apiKey, propertyId: cloudbeds.propertyId, budgetWaitMs: 3_000 },
-              promo ?? null,
-            ),
-        }
-      : {}),
+    ...restrictionsFor(config),
+  };
+}
+
+/** HTTP 429 answers from Beam within one hour (keys.beamRateLimited, a fixed window) that tell the owner (money review 13). */
+export const BEAM_RATE_LIMIT_ALERT_COUNT = 20;
+const BEAM_RATE_LIMIT_WINDOW_SECONDS = 3600;
+
+/**
+ * BeamGatewayDeps.onRateLimited: counts every 429 in keys.beamRateLimited (per mode scope, one-hour window) and
+ * tells the owner once, at the BEAM_RATE_LIMIT_ALERT_COUNT-th (alert key 'beam-rate-limited'; the alerter keeps
+ * repeats out for 6 hours). Best effort: a failed count is dropped and never breaks the Beam call (beam.ts calls
+ * it synchronously). Inside a request after() keeps the count alive past the response; outside one it just runs.
+ */
+function beamRateLimitCounter(config: BookingConfig, kv: KvStore, alert: AlertFn): () => void {
+  const key = keys.beamRateLimited(keyScope(config.paymentMode));
+  const count = async (): Promise<void> => {
+    const n = await kv.incr(key, BEAM_RATE_LIMIT_WINDOW_SECONDS);
+    if (n !== BEAM_RATE_LIMIT_ALERT_COUNT) return;
+    await alert(
+      "Beam is rate-limiting the booking engine",
+      [
+        `${n} requests were answered 429 in the last hour. Return pages may show 'couldn't check the payment just now'; webhooks and the sweeper still confirm bookings. Ask Beam for the limits if this repeats.`,
+      ],
+      { key: "beam-rate-limited", severity: "warning" },
+    );
+  };
+  return () => {
+    const task = count().catch(() => undefined);
+    try {
+      after(() => task);
+    } catch {
+      // Outside a request scope: the count runs on its own.
+    }
+  };
+}
+
+/** The caller's time limit for every Beam call (BeamGatewayDeps.deadlineMs and its clock): the route's, or the sweeper run's. */
+export type BeamTiming = Pick<BeamGatewayDeps, "deadlineMs" | "clock">;
+
+/**
+ * Beam-mode dependencies (BeamGatewayDeps), or null outside the Beam modes: the KV store, writer, alerter and
+ * restriction check as for Stripe, plus config.beam, Beam's fetch (the beamFetch test hook, else the global
+ * fetch), the 429 counter and `timing` (the route's or the sweeper run's deadline and its clock; absent: beam.ts's
+ * own budgets). nonce and sleep stay at their defaults. Building them writes nothing and logs nothing.
+ */
+export function getBeamDeps(config: BookingConfig, timing: BeamTiming = {}): BeamGatewayDeps | null {
+  const beam = config.beam;
+  if (!beam) return null;
+  const kv = kvFor(config);
+  const alert = alerterFor(config, kv);
+  const fetchImpl = globals.beamFetch;
+  return {
+    config,
+    beam,
+    writer: writerFor(config),
+    kv,
+    alert,
+    log: logEvent,
+    ...restrictionsFor(config),
+    ...(fetchImpl ? { fetchImpl } : {}),
+    onRateLimited: beamRateLimitCounter(config, kv, alert),
+    ...(timing.deadlineMs !== undefined ? { deadlineMs: timing.deadlineMs } : {}),
+    ...(timing.clock ? { clock: timing.clock } : {}),
+  };
+}
+
+/** What idOf throws for a key that is not a Beam payment key: missing, as a 404 is (the real gateway's BeamApiError 404). */
+class NotABeamKeyError extends Error {
+  constructor() {
+    super("Not a Beam payment key");
+    this.name = "NotABeamKeyError";
+  }
+}
+
+/**
+ * The Beam gateway (payments/beamGateway.ts) for deps built here, loading the Beam client only once it calls Beam.
+ * This file is loaded by the abandon, sweep and Stripe webhook routes, which must never load beam.ts through a
+ * static import (importGraph.test.ts): every member that calls Beam (get, cancel, sweepRecent, releaseGuard,
+ * readLink) imports payments/beamGateway.ts on first use and runs the real gateway's; the members used without a
+ * call are the real gateway's own values, taken from modules that do not load beam.ts (keyOf, parseHoldId and
+ * doneTtlSeconds from lock.ts, isPaymentId from payments/beamIds.ts, text from payments/beamText.ts). Building it
+ * loads nothing.
+ */
+function beamGatewayOf(deps: BeamGatewayDeps): BeamGateway {
+  let loading: Promise<BeamGateway> | null = null;
+  let loaded: BeamGateway | null = null;
+  const real = (): Promise<BeamGateway> =>
+    (loading ??= import("./payments/beamGateway.ts").then(
+      (m) => (loaded = m.beamGateway(deps)),
+      (e: unknown) => {
+        // A failed load is tried again by the next call.
+        loading = null;
+        throw e;
+      },
+    ));
+  return {
+    provider: "beam",
+    brand: "Beam",
+    keyOf: beamKeyOf,
+    idOf(key) {
+      const linkId = linkIdOf(key);
+      if (linkId === null) throw new NotABeamKeyError();
+      return linkId;
+    },
+    get: async (key) => (await real()).get(key),
+    cancel: async (key) => (await real()).cancel(key),
+    // Every error of a Beam call comes after the load; before it only idOf throws.
+    isMissing: (e) => e instanceof NotABeamKeyError || (loaded !== null && loaded.isMissing(e)),
+    sweepRecent: async (sinceMs) => (await real()).sweepRecent(sinceMs),
+    text: beamGatewayText(deps.beam),
+    doneTtlSeconds: BEAM_RECORD_TTL_SECONDS,
+    async releaseGuard(key) {
+      const gw = await real();
+      return gw.releaseGuard ? gw.releaseGuard(key) : false;
+    },
+    parseHoldId: parseBeamHoldIdentifier,
+    isPaymentId: isBeamLinkId,
+    readLink: async (key) => (await real()).readLink(key),
   };
 }
 
@@ -177,19 +320,60 @@ export function getStripeFulfilmentDeps(env: Record<string, string | undefined> 
   return getStripeDeps(drain);
 }
 
-/** The active config's deps with its provider's gateway (Stripe: getStripeDeps), or null (demo; Beam has no gateway yet). */
-export function getProviderDeps(config: BookingConfig): ProviderDeps | null {
+/**
+ * Dependencies for FINISHING Beam payments (Beam webhook, sweeper, return
+ * page, abandon), the mirror of getStripeFulfilmentDeps: the fulfilment
+ * config's when it is a Beam mode (its beam-live branch included: emergency
+ * stop, no Cloudbeds email), else the Beam drain config's (getBeamDrainConfig:
+ * BOOKING_PAYMENT_PROVIDER switched away from beam), logging beam_drain_mode
+ * once. null when Beam is not configured, and for a beam-live drain while
+ * LIVE_FULFILMENT_READY.beam is false. `timing`: getBeamDeps'. Never use this
+ * for checkout.
+ */
+export function getBeamFulfilmentDeps(env: Record<string, string | undefined> = process.env, timing: BeamTiming = {}): BeamGatewayDeps | null {
+  let config: BookingConfig | null = null;
+  try {
+    config = getFulfilmentConfig(env);
+  } catch {
+    config = null;
+  }
+  const normal = config ? getBeamDeps(config, timing) : null;
+  if (normal) return normal;
+  const drain = getBeamDrainConfig(env);
+  if (!drain) return null;
+  if (!globals.warnedBeamDrain) {
+    globals.warnedBeamDrain = true;
+    logEvent("beam_drain_mode", { mode: drain.paymentMode });
+  }
+  return getBeamDeps(drain, timing);
+}
+
+/**
+ * The active config's deps with its provider's gateway (Stripe: getStripeDeps; Beam: getBeamDeps with `timing`,
+ * and the Beam gateway), or null (demo). Building them writes nothing and logs nothing.
+ */
+export function getProviderDeps(config: BookingConfig, timing: BeamTiming = {}): ProviderDeps | null {
   const deps = getStripeDeps(config);
-  return deps ? { deps, gw: stripeGateway(deps) } : null;
+  if (deps) return { deps, gw: stripeGateway(deps) };
+  const beam = getBeamDeps(config, timing);
+  return beam ? { deps: beam, gw: beamGatewayOf(beam) } : null;
 }
 
 /**
  * Deps for FINISHING one provider's payments (return page, abandon), with its
  * gateway. Stripe: getStripeFulfilmentDeps (the normal config's, else the
- * drain config's). null when that provider is not configured, and for Beam
- * (no gateway yet). Never use this for checkout.
+ * drain config's). Beam: getBeamFulfilmentDeps (likewise, with `timing`).
+ * null when that provider is not configured. Never use this for checkout.
  */
-export function getFulfilmentProviderDeps(env: Record<string, string | undefined>, provider: ProviderDeps["gw"]["provider"]): ProviderDeps | null {
+export function getFulfilmentProviderDeps(
+  env: Record<string, string | undefined>,
+  provider: ProviderDeps["gw"]["provider"],
+  timing: BeamTiming = {},
+): ProviderDeps | null {
+  if (provider === "beam") {
+    const beam = getBeamFulfilmentDeps(env, timing);
+    return beam ? { deps: beam, gw: beamGatewayOf(beam) } : null;
+  }
   if (provider !== "stripe") return null;
   const deps = getStripeFulfilmentDeps(env);
   return deps ? { deps, gw: stripeGateway(deps) } : null;
@@ -199,9 +383,10 @@ export function getFulfilmentProviderDeps(env: Record<string, string | undefined
  * providerDeps for the status and abandon routes and the return page's server
  * render: the active config's deps, built at once (as the routes always did),
  * for its own provider; any other provider's fulfilment deps (its drain) are
- * built only when a booking of that provider asks for them.
+ * built only when a booking of that provider asks for them. `timing` bounds
+ * every Beam call (Stripe ignores it).
  */
-export function providerDepsFor(config: BookingConfig, env: Record<string, string | undefined> = process.env): ProviderDepsFn {
-  const active = getProviderDeps(config);
-  return (provider) => (active && active.gw.provider === provider ? active : getFulfilmentProviderDeps(env, provider));
+export function providerDepsFor(config: BookingConfig, env: Record<string, string | undefined> = process.env, timing: BeamTiming = {}): ProviderDepsFn {
+  const active = getProviderDeps(config, timing);
+  return (provider) => (active && active.gw.provider === provider ? active : getFulfilmentProviderDeps(env, provider, timing));
 }

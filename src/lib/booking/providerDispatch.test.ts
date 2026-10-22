@@ -260,7 +260,7 @@ test("runtime: providerDepsFor builds the active deps at once and another provid
   assert.equal(active?.deps.config, mock);
   assert.equal(active?.gw.provider, "stripe");
   assert.equal(fn("stripe"), active, "the same active deps for every ask");
-  assert.equal(fn("beam"), null, "no Beam gateway yet");
+  assert.equal(fn("beam"), null, "no Beam config, active or drain: no Beam deps (runtimeBeam.test.ts builds them)");
   assert.equal(runtime.getProviderDeps(mock)?.deps.config.paymentMode, "stripe-mock");
 
   const demo = getFulfilmentConfig(DEMO_ENV);
