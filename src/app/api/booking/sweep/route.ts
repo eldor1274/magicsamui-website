@@ -18,11 +18,14 @@ import type { SweepRun } from "@/lib/booking/sweepProviders";
 // switched away from stripe, so in-flight holds are still released.
 // Every configured provider (Beam design S4.8): while a Beam config exists
 // (the active one, or the Beam drain after a switch away from beam), one
-// request sweeps Stripe (when configured) and Beam through sweepProviders,
-// Stripe first, and adds runs[] to the answer. Without one it runs exactly
-// the single Stripe sweep it always ran. Beam's gateway comes through
-// runtime.ts (loaded on its first Beam call): this route never loads beam.ts
-// statically.
+// request sweeps Stripe (when configured) and Beam through sweepProviders -
+// the active provider first when it is Beam, else Stripe first - and adds
+// runs[] to the answer (Stripe first). Its top-level counts are the active
+// provider's run only: while runs[] is there, EVERY runs[].openHolds, errors
+// and paidUnconfirmed must be 0 before any provider's variables or keys
+// change. Without a Beam config it runs exactly the single Stripe sweep it
+// always ran. Beam's gateway comes through runtime.ts (loaded on its first
+// Beam call): this route never loads beam.ts statically.
 export const runtime = "nodejs";
 export const maxDuration = 60;
 /** Every Beam call of a sweep request ends by this long after it arrived (maxDuration minus a margin; Stripe ignores it). */

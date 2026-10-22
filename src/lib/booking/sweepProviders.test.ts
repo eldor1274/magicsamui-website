@@ -21,36 +21,44 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { existsSync, statSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import * as nodeModule from "node:module";
 import { fileURLToPath } from "node:url";
+import { buildOffers } from "./availability.ts";
 import { BEAM_API_KEY, BEAM_CLOUDBEDS_METHOD, BEAM_HMAC_KEY_B64, BEAM_MERCHANT_ID, beamHeld, makeBeamKit } from "./beamTestkit.ts";
 import type { BeamHeld, BeamKit } from "./beamTestkit.ts";
+import { POLICY_VERSION } from "./catalogue.ts";
+import { checkSweeperFresh } from "./checkoutShared.ts";
 import type { ListedReservation } from "./cloudbedsWrite.ts";
 import type { CloudbedsWriter } from "./cloudbedsWrite.ts";
-import { BEAM_PLAYGROUND_BASE, MOCK_STRIPE_WEBHOOK_SECRET } from "./config.ts";
+import { BEAM_PLAYGROUND_BASE, MOCK_STRIPE_WEBHOOK_SECRET, getFulfilmentConfig } from "./config.ts";
 import type { Env } from "./config.ts";
+import { addDays } from "./dates.ts";
+import { demoInventory } from "./demoProvider.ts";
 import { fulfilPayment } from "./fulfil.ts";
 import { createMemoryKv } from "./kv.ts";
 import type { KvStore } from "./kv.ts";
 import { holdIdentifier, keyScope, keys } from "./lock.ts";
 import { createFakeBeam } from "./mock/fakeBeam.ts";
+import type { FakeBeam } from "./mock/fakeBeam.ts";
 import { FAKE_PAYMENT_METHODS, createFakeCloudbeds } from "./mock/fakeCloudbeds.ts";
 import type { FakeCloudbeds, FakeRoomType } from "./mock/fakeCloudbeds.ts";
 import { createFakeStripe } from "./mock/fakeStripe.ts";
 import { beamGateway } from "./payments/beamGateway.ts";
 import type { BeamGatewayDeps } from "./payments/beamGateway.ts";
 import { beamGatewayText } from "./payments/beamText.ts";
+import type { StripeClient } from "./payments/stripe.ts";
 import { stripeGateway } from "./payments/stripeGateway.ts";
-import { STALE_HOLD_MS, runSweep, sweepRecentPayments } from "./sweep.ts";
+import { STALE_HOLD_MS, SWEEP_STALE_ALERT_MS, runSweep, sweepRecentPayments } from "./sweep.ts";
 import type { SweepSummary } from "./sweep.ts";
-import { SWEEP_HOLD_SIDE_RESERVE_MS, SWEEP_MIN_SLICE_MS, sweepProviders } from "./sweepProviders.ts";
+import { SWEEP_HOLD_SIDE_RESERVE_MS, SWEEP_MIN_SLICE_MS, stripeWithin, sweepProviders } from "./sweepProviders.ts";
 import type { SweepProvidersAnswer, SweepRun, SweepRunReport, SweepTiming } from "./sweepProviders.ts";
-import { HONEYMOON, NOW, ROOM_TYPES, TOKEN_SECRET, checkout, makeKit, recordingKv, refCharSequence, sessionIdOf } from "./testkit.ts";
+import { GUEST, HONEYMOON, NOW, ROOM_TYPES, STRIPE_LIVE_ENV, TOKEN_SECRET, checkout, makeKit, recordingKv, refCharSequence, sessionIdOf } from "./testkit.ts";
 import type { Kit, KvWrite } from "./testkit.ts";
-import type { CartItemInput, CheckoutSuccess } from "./types.ts";
+import type { CartItemInput, CheckoutSuccess, Quote } from "./types.ts";
 
 const MIN = 60_000;
 /** The sweep route's budget (maxDuration 60 s minus a margin). */
@@ -276,7 +284,12 @@ async function assertStripeAsLone(a: World, at: Mark, answer: SweepProvidersAnsw
 
 for (const primary of ["stripe", "beam", null] as const) {
   const label = primary === "stripe" ? "Stripe-primary with a Beam drain" : primary === "beam" ? "Beam-primary with a Stripe drain" : "no active run (the demo with both drains), Beam passed first";
-  test(`${label}: the Stripe run is a lone runSweep; one listing; each orphan released by its own run; heartbeats per scope`, async () => {
+  // Round 6: the Beam primary goes first in both phases (its hold side takes the listing); the Stripe drain after it.
+  const claim =
+    primary === "beam"
+      ? "Beam runs first and takes the one listing, the Stripe drain after it; each orphan released by its own run; heartbeats per scope"
+      : "the Stripe run is a lone runSweep; one listing; each orphan released by its own run; heartbeats per scope";
+  test(`${label}: ${claim}`, async () => {
     const a = await scenario();
     const at = mark(a.w);
     const listings = a.w.cb.count("getReservations");
@@ -297,11 +310,22 @@ for (const primary of ["stripe", "beam", null] as const) {
     assert.equal(answer.body.mode, primaryRun.mode, "the primary run's mode (the first run's when no run is the active one)");
     assert.deepEqual(summaryOf(answer.body as unknown as SweepRunReport), { ...summaryOf(primaryRun), runs: answer.body.runs }, "the primary run's summary, then runs");
     assert.equal(a.w.cb.count("getReservations") - listings, 1, "one Cloudbeds listing for both runs");
-    assert.equal(
-      a.w.cb.calls.slice(at.cb).filter((c, i) => c.method === "getReservations" && a.w.beamCalls.has(at.cb + i)).length,
-      0,
-      "taken by the Stripe run (the first) at its own listing point",
-    );
+    if (primary === "beam") {
+      assert.equal(
+        a.w.cb.calls.slice(at.cb).filter((c, i) => c.method === "getReservations" && a.w.beamCalls.has(at.cb + i)).length,
+        1,
+        "taken by the Beam run (the first) at its own listing point",
+      );
+      // Beam's step 1 (confirming b1) came before the Stripe drain's (confirming s1).
+      const first = (viaBeam: boolean) => a.w.cb.calls.findIndex((c, i) => i >= at.cb && c.method === "postPayment" && a.w.beamCalls.has(i) === viaBeam);
+      assert.ok(first(true) >= 0 && first(true) < first(false), `Beam first: ${first(true)} < ${first(false)}`);
+    } else {
+      assert.equal(
+        a.w.cb.calls.slice(at.cb).filter((c, i) => c.method === "getReservations" && a.w.beamCalls.has(at.cb + i)).length,
+        0,
+        "taken by the Stripe run (the first) at its own listing point",
+      );
+    }
 
     // Stripe: paid -> confirmed, expired -> released, its orphan released in its words. Beam: the same for its own.
     const stripe = runOf(answer, "stripe");
@@ -339,6 +363,8 @@ for (const primary of ["stripe", "beam", null] as const) {
     );
     assert.deepEqual(a.w.sweeperLogs, [], "nothing failed, nothing skipped");
 
+    // A Stripe drain behind the Beam primary is a later run (it sees Beam's hold side): no lone-run identity.
+    if (primary === "beam") return;
     const b = await scenario();
     const lone = await assertStripeAsLone(a.w, at, answer, b.w);
     assert.equal(lone.released, 2);
@@ -520,7 +546,8 @@ for (const [took, advanceMs] of [
   ["most of the step-1 slice", BUDGET_MS - SWEEP_HOLD_SIDE_RESERVE_MS - SWEEP_MIN_SLICE_MS + 1_000],
   ["more than the whole budget", BUDGET_MS + 1_000],
 ] as const) {
-  test(`Stripe's step 1 took ${took}: Beam is skipped and never called; the Stripe run (the first) still runs in full`, async () => {
+  // Round 6: with Stripe primary (the first run). Behind a Beam primary a Stripe drain is a later run (below).
+  test(`Stripe's step 1 took ${took} (Stripe primary): Beam is skipped and never called; the Stripe run (the first) still runs in full`, async () => {
     const slowList = (fake: typeof fetch, wall: { ms: number }) =>
       (async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input));
@@ -530,10 +557,10 @@ for (const [took, advanceMs] of [
     const a = await scenario({ stripeFetch: slowList });
     const beamCalls = a.w.beam.fakeBeam.calls.length;
     const at = mark(a.w);
-    const answer = await sweepBoth(a.w, "beam");
+    const answer = await sweepBoth(a.w, "stripe");
     assert.equal(answer.status, 502);
     assert.equal(answer.body.error, "out_of_time");
-    assert.equal(answer.body.mode, "beam-playground");
+    assert.equal(answer.body.mode, "stripe-test");
     assert.deepEqual(runOf(answer, "beam"), { provider: "beam", mode: "beam-playground", ok: false, error: "out_of_time", skipped: "out of time" });
     assert.deepEqual(
       sweeperLogged(a.w, "sweep_run_skipped").map((l) => [l.data?.provider, l.data?.phase]),
@@ -550,6 +577,135 @@ for (const [took, advanceMs] of [
     await assertStripeAsLone(a.w, at, answer, b.w, false);
   });
 }
+
+/** The Stripe fake behind `match`ing Checkout Session requests: `onMatch` runs first (it may move the wall clock or throw). */
+const stripeOn =
+  (match: (method: string, url: URL) => boolean, onMatch: (wall: { ms: number }) => void) =>
+  (fake: typeof fetch, wall: { ms: number }) =>
+    (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (match(init?.method ?? "GET", url)) onMatch(wall);
+      return fake(input, init);
+    }) as typeof fetch;
+const isSessionList = (method: string, url: URL) => method === "GET" && url.pathname === "/v1/checkout/sessions";
+
+test("Beam primary, a Stripe drain whose session list takes most of the step-1 slice: Beam's step 1 and hold side go first and in full; the drain still runs", async () => {
+  const advanceMs = BUDGET_MS - SWEEP_HOLD_SIDE_RESERVE_MS - SWEEP_MIN_SLICE_MS + 1_000;
+  const a = await scenario({ stripeFetch: stripeOn(isSessionList, (wall) => void (wall.ms += advanceMs)) });
+  const beamCalls = a.w.beam.fakeBeam.calls.length;
+  const answer = await sweepBoth(a.w, "beam");
+  assert.equal(answer.status, 200, JSON.stringify(answer.body));
+  assert.equal(answer.body.mode, "beam-playground");
+  assert.deepEqual(
+    answer.body.runs.map((r) => [r.provider, r.ok]),
+    [
+      ["stripe", true],
+      ["beam", true],
+    ],
+  );
+  assert.ok(a.w.beam.fakeBeam.calls.length > beamCalls);
+  assert.deepEqual(
+    [a.b1, a.b2, a.s1, a.s2].map((h) => status(a.w, h.reservationId)),
+    ["confirmed", "canceled", "confirmed", "canceled"],
+  );
+  assert.equal(status(a.w, a.beamOrphan), "canceled");
+  assert.equal(status(a.w, a.stripeOrphan), "canceled");
+  assert.equal(await a.w.beamKv.get(keys.lastSweep(BEAM_SCOPE)), String(a.w.now.ms));
+  assert.equal(await a.w.stripeKv.get(keys.lastSweep(STRIPE_SCOPE)), String(a.w.now.ms));
+  assert.deepEqual(a.w.sweeperLogs, []);
+});
+
+test("Beam primary, a Stripe drain whose API hangs (cut at the step-1 slice's end, as stripeWithin cuts it): Beam confirms, releases and writes its heartbeat; the drain gets sweepPaidAndAlerts without a heartbeat; 502", async () => {
+  const start = 1_000_000;
+  // The bounded client gives the request what is left of the slice and no retry: it fails at the slice's end.
+  const hang = (wall: { ms: number }) => {
+    wall.ms = start + BUDGET_MS - SWEEP_HOLD_SIDE_RESERVE_MS;
+    throw new TypeError("fetch failed: the request timed out");
+  };
+  const a = await scenario({ stripeFetch: stripeOn(isSessionList, hang) });
+  assert.equal(a.w.wall.ms, start);
+  const answer = await sweepBoth(a.w, "beam");
+  assert.equal(answer.status, 502);
+  assert.equal(answer.body.error, "payments_unavailable");
+  assert.equal(answer.body.mode, "beam-playground");
+  const beam = runOf(answer, "beam");
+  assert.deepEqual([beam.ok, beam.fulfilled, beam.released, beam.errors], [true, 1, 2, 0]);
+  assert.equal(status(a.w, a.b1.reservationId), "confirmed", "the paid Beam booking whose webhook was lost");
+  assert.equal(status(a.w, a.b2.reservationId), "canceled", "the expired Beam hold");
+  assert.equal(status(a.w, a.beamOrphan), "canceled");
+  assert.equal(await a.w.beamKv.get(keys.lastSweep(BEAM_SCOPE)), String(a.w.now.ms));
+  const stripe = runOf(answer, "stripe");
+  assert.deepEqual([stripe.ok, stripe.error, stripe.errors, stripe.released, stripe.cloudbedsOk], [false, "payments_unavailable", 1, 0, true]);
+  assert.equal(status(a.w, a.s1.reservationId), "not_confirmed");
+  assert.equal(status(a.w, a.stripeOrphan), "not_confirmed");
+  assert.equal(await a.w.stripeKv.get(keys.lastSweep(STRIPE_SCOPE)), null, "a Stripe run whose session list failed is no sweep");
+  assert.deepEqual(
+    sweeperLogged(a.w, "sweep_step1_failed").map((l) => l.data?.provider),
+    ["stripe"],
+  );
+  assert.deepEqual(sweeperLogged(a.w, "sweep_run_skipped"), [], "Beam is never skipped");
+  assert.equal(a.w.wall.ms - start, BUDGET_MS - SWEEP_HOLD_SIDE_RESERVE_MS, "the request's time: the step-1 slice");
+});
+
+test("Beam primary: the Stripe drain's hold side (a slow step 1b retry) comes after Beam's, so it can never eat Beam's hold-side slice", async () => {
+  // A paid Stripe booking whose confirmation failed 49 hours ago (only step 1b retries it), whose re-read takes 52 s.
+  let late: { sessionId: string; reservationId: string } | null = null;
+  const slowRetrieve = stripeOn(
+    (method, url) => method === "GET" && late !== null && url.pathname === `/v1/checkout/sessions/${late.sessionId}`,
+    (wall) => void (wall.ms += BUDGET_MS - SWEEP_MIN_SLICE_MS + 2_000),
+  );
+  const w = world({ stripeFetch: slowRetrieve });
+  const lateHeld = await held(w.stripe, [{ slug: "sunrise-suite", ratePlanId: "standard", adults: 2, addonIds: [] }]);
+  w.stripe.fakeStripe.complete(lateHeld.sessionId);
+  w.cb.failNext("postReservationNote", "http500");
+  w.cb.failNext("getReservation", "http500");
+  await assert.rejects(fulfilPayment(lateHeld.sessionId, w.stripe.deps, stripeGateway(w.stripe.deps)));
+  late = lateHeld;
+  w.now.ms += 49 * 3600_000;
+  const b1 = await beamHeld(w.beam);
+  w.beam.fakeBeam.pay(b1.linkId, "CARD");
+  const beamOrphan = await orphan(w.beam.deps.writer, w.cb, BEAM_ORPHAN_REF, "beam-playground");
+  w.now.ms += ORPHAN_STALE_MS;
+  const answer = await sweepBoth(w, "beam");
+  assert.equal(answer.status, 200, JSON.stringify(answer.body));
+  assert.equal(runOf(answer, "beam").ok, true);
+  assert.equal(status(w, b1.reservationId), "confirmed");
+  assert.equal(status(w, beamOrphan), "canceled", "Beam's hold side ran before the drain's slow retry");
+  assert.equal(await w.beamKv.get(keys.lastSweep(BEAM_SCOPE)), String(w.now.ms));
+  assert.equal(runOf(answer, "stripe").fulfilled, 1, "the drain's own retry still ran, after Beam's");
+  assert.equal(status(w, lateHeld.reservationId), "confirmed");
+  assert.deepEqual(sweeperLogged(w, "sweep_run_skipped"), []);
+});
+
+test("stripeWithin: every Checkout Session request gets what is left before the end as its timeout (read per page) and no retry; none is sent once the time is up", async () => {
+  const clock = { ms: 1_000 };
+  const sent: { call: string; args: unknown[]; timeout: number; maxNetworkRetries: number }[] = [];
+  const record =
+    (call: string) =>
+    (...args: unknown[]) => {
+      const options = args.at(-1) as { timeout: number; maxNetworkRetries: number };
+      sent.push({ call, args: args.slice(0, -1), timeout: options.timeout, maxNetworkRetries: options.maxNetworkRetries });
+      clock.ms += 400;
+      // A second page of a list: the SDK reads the same options object again.
+      if (call === "list") sent.push({ call: "list page 2", args: [], timeout: options.timeout, maxNetworkRetries: options.maxNetworkRetries });
+      return Promise.resolve({ call });
+    };
+  const webhooks = { constructEvent: () => "untouched" };
+  const real = { checkout: { sessions: { list: record("list"), retrieve: record("retrieve"), expire: record("expire"), create: () => "untouched create" } }, webhooks } as unknown as StripeClient;
+  const bounded = stripeWithin(real, { deadlineMs: 2_000, clock: () => clock.ms });
+  await bounded.checkout.sessions.list({ limit: 100 });
+  await bounded.checkout.sessions.retrieve("cs_test_a1b2c3", { expand: ["payment_intent"] });
+  assert.deepEqual(sent, [
+    { call: "list", args: [{ limit: 100 }], timeout: 1_000, maxNetworkRetries: 0 },
+    { call: "list page 2", args: [], timeout: 600, maxNetworkRetries: 0 },
+    { call: "retrieve", args: ["cs_test_a1b2c3", { expand: ["payment_intent"] }], timeout: 600, maxNetworkRetries: 0 },
+  ]);
+  assert.equal(bounded.webhooks, real.webhooks, "every other member is the client's own");
+  assert.equal((bounded.checkout.sessions as unknown as { create?: unknown }).create, undefined, "only list, retrieve and expire are reachable");
+  clock.ms = 2_000;
+  assert.throws(() => bounded.checkout.sessions.expire("cs_test_a1b2c3"), /Stripe request not sent: the sweeper run's time is up/);
+  assert.equal(sent.length, 3, "nothing sent once the time is up");
+});
 
 test("a hold another provider's step 1 sees a payable payment for is left to that provider (each run gets the others' step 1)", async () => {
   const a = await scenario();
@@ -596,7 +752,9 @@ test("a Stripe step 1 that throws: Stripe gets sweepPaidAndAlerts only (its hold
   assert.equal(status(a.w, a.s1.reservationId), "not_confirmed");
   assert.equal(status(a.w, a.s2.reservationId), "not_confirmed");
   assert.equal(status(a.w, a.stripeOrphan), "not_confirmed");
-  assert.equal(await a.w.stripeKv.get(keys.lastSweep(STRIPE_SCOPE)), String(a.w.now.ms), "the shared listing worked: Stripe's heartbeat");
+  // Round 6: no Stripe heartbeat though the shared listing worked - Stripe keeps no failure count of its own, so a
+  // Stripe run whose session list failed is no sweep (checkout's stale-sweeper warning fires).
+  assert.equal(await a.w.stripeKv.get(keys.lastSweep(STRIPE_SCOPE)), null, "a Stripe run whose session list failed writes no heartbeat");
   assert.ok(a.w.stripe.logs.some((l) => l.message === "sweep_done" && l.data?.step1Failed === true));
   const beam = runOf(answer, "beam");
   assert.deepEqual([beam.ok, beam.fulfilled, beam.released], [true, 1, 2]);
@@ -820,11 +978,46 @@ const MOCK_STRIPE: Env = { BOOKING_STRIPE_MOCK: "true", BOOKING_TOKEN_SECRET: TO
  * one in-memory store, the stripe-mock fake and a fake Beam (runtime.ts's globals), with a Stripe and a Beam orphan
  * in Cloudbeds. The global fetch and node:http(s) (the Stripe SDK of a stripe-test drain) are blocked and recorded.
  */
-/**
- * `stripeListMs`: the mocked clock moves this much while the stripe-mock fake answers its session list.
- * `beamTimeoutMs`: every Beam call moves it this much and then times out (counted in beamAttempts).
- */
-async function routeSweep(t: TestContext, env: Env, slow: { stripeListMs?: number; beamTimeoutMs?: number } = {}) {
+interface RouteOptions {
+  /** The mocked clock moves this much while the stripe-mock fake answers its session list. */
+  stripeListMs?: number;
+  /** Every Beam call moves it this much and then times out (counted in beamAttempts). */
+  beamTimeoutMs?: number;
+  /** Round 6: node:https never answers (a Stripe API that hangs): each request's own timeout fires, the mocked clock moved by it. */
+  stripeHttpsHangs?: boolean;
+  /** Round 6: Cloudbeds' API host reaches the fake Cloudbeds through the global fetch (the live writer); every other host stays blocked. */
+  cloudbedsOverFetch?: boolean;
+  /** Round 6: rt.redisKv is the in-memory store for the env's Upstash URL (live configs need Redis). */
+  redisAsMemory?: boolean;
+  /** Round 6: this runtime global throws when read, so the deps of the provider that reads it can't be built. */
+  brokenGlobal?: "memoryKv" | "mock";
+  /** Round 6: run at NOW, before the clock moves past the orphans' age (Beam bookings through the real checkout route). */
+  seed?: (w: RouteSeed) => Promise<void>;
+}
+
+interface RouteSeed {
+  cb: FakeCloudbeds;
+  kv: KvStore;
+  fakeBeam: FakeBeam;
+  /** A Beam booking through the checkout route (demo availability), held and awaiting payment. */
+  book(items: CartItemInput[]): Promise<{ linkId: string; reservationId: string }>;
+}
+
+/** The first 3-night window from Jan 2027 (after `skip` others) where the demo calendar has `slug` free. */
+function demoWindow(slug: string, skip = 0): { checkIn: string; checkOut: string } {
+  let found = 0;
+  for (let i = 0; i < 300; i++) {
+    const checkIn = addDays("2027-01-04", i * 4);
+    const checkOut = addDays(checkIn, 3);
+    if (buildOffers(demoInventory(checkIn, checkOut), 2).find((o) => o.slug === slug)?.available) {
+      if (found === skip) return { checkIn, checkOut };
+      found++;
+    }
+  }
+  throw new Error(`no demo window for ${slug}`);
+}
+
+async function routeSweep(t: TestContext, env: Env, slow: RouteOptions = {}) {
   const stripeListMs = slow.stripeListMs ?? 0;
   const beamAttempts = { n: 0 };
   const savedEnv = process.env;
@@ -835,10 +1028,15 @@ async function routeSweep(t: TestContext, env: Env, slow: { stripeListMs?: numbe
   const savedGlobals = { ...rt };
   const network: string[] = [];
   const lines: string[] = [];
+  /** The Stripe SDK's requests on a hanging node:https, with the timeout each one was sent with. */
+  const httpsRequests: { target: string; timeoutMs: number | null }[] = [];
   try {
     process.env = { ...env } as NodeJS.ProcessEnv;
-    globalThis.fetch = (async (input: string | URL | Request) => {
-      network.push(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    let cloudbedsFetch: typeof fetch | null = null;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (cloudbedsFetch && new URL(url).host === "api.cloudbeds.com") return cloudbedsFetch(input, init);
+      network.push(url);
       throw new TypeError("network blocked by sweepProviders.test.ts");
     }) as typeof fetch;
     const block = (proto: string) =>
@@ -847,13 +1045,40 @@ async function routeSweep(t: TestContext, env: Env, slow: { stripeListMs?: numbe
         network.push(`${proto} ${typeof o === "string" ? o : `${o.method ?? "GET"} ${o.hostname ?? o.host}${o.path ?? ""}`}`);
         throw new Error(`${proto} blocked by sweepProviders.test.ts`);
       }) as unknown as typeof https.request;
-    https.request = block("https");
+    const hanging = ((o: { host?: string; hostname?: string; path?: string; method?: string }) => {
+      const entry = { target: `${o.method ?? "GET"} ${o.hostname ?? o.host}${o.path ?? ""}`, timeoutMs: null as number | null };
+      httpsRequests.push(entry);
+      network.push(`https ${entry.target}`);
+      const req = new EventEmitter() as EventEmitter & Record<string, unknown>;
+      let destroyed = false;
+      req.setTimeout = (ms: number, onTimeout: () => void) => {
+        entry.timeoutMs = ms;
+        setImmediate(() => {
+          if (destroyed) return;
+          t.mock.timers.setTime(Date.now() + ms);
+          onTimeout();
+        });
+        return req;
+      };
+      req.write = () => true;
+      req.end = () => req;
+      req.destroy = (err?: Error) => {
+        if (!destroyed) {
+          destroyed = true;
+          setImmediate(() => req.emit("error", err ?? new Error("destroyed")));
+        }
+        return req;
+      };
+      return req;
+    }) as unknown as typeof https.request;
+    https.request = slow.stripeHttpsHangs ? hanging : block("https");
     http.request = block("http");
     const route = await loadSweepRoute();
     t.mock.timers.enable({ apis: ["Date"], now: NOW });
     for (const level of ["info", "warn", "error"] as const) t.mock.method(console, level, (...args: unknown[]) => lines.push(String(args[0])));
     for (const key of Object.keys(rt)) delete rt[key];
     const cb = createFakeCloudbeds({ lenient: true, now: () => Date.now() });
+    if (slow.cloudbedsOverFetch) cloudbedsFetch = cb.fetch;
     const kv = recordingKv(createMemoryKv(() => Date.now()));
     const fakeBeam = createFakeBeam({ now: () => Date.now(), merchantId: BEAM_MERCHANT_ID, apiKey: BEAM_API_KEY, hmacKeyB64: BEAM_HMAC_KEY_B64, base: "playground" });
     const fakeStripe = createFakeStripe({ webhookSecret: MOCK_STRIPE_WEBHOOK_SECRET, now: () => Date.now() });
@@ -862,8 +1087,18 @@ async function routeSweep(t: TestContext, env: Env, slow: { stripeListMs?: numbe
       if ((init?.method ?? "GET") === "GET" && url.pathname === "/v1/checkout/sessions") t.mock.timers.setTime(Date.now() + stripeListMs);
       return fakeStripe.fetch(input, init);
     }) as typeof fetch;
-    rt.mock = { stripe: { ...fakeStripe, fetch: stripeFetch }, cloudbeds: cb, kv };
-    rt.memoryKv = kv;
+    const broken = (name: string): PropertyDescriptor => ({
+      configurable: true,
+      enumerable: true,
+      get(): never {
+        throw new Error(`runtime global ${name} unavailable (sweepProviders.test.ts)`);
+      },
+    });
+    if (slow.brokenGlobal === "mock") Object.defineProperty(rt, "mock", broken("mock"));
+    else rt.mock = { stripe: { ...fakeStripe, fetch: stripeFetch }, cloudbeds: cb, kv };
+    if (slow.brokenGlobal === "memoryKv") Object.defineProperty(rt, "memoryKv", broken("memoryKv"));
+    else rt.memoryKv = kv;
+    if (slow.redisAsMemory && env.UPSTASH_REDIS_REST_URL) rt.redisKv = { url: env.UPSTASH_REDIS_REST_URL, kv };
     rt.mockWriterCloudbeds = cb;
     rt.beamFetch =
       slow.beamTimeoutMs === undefined
@@ -876,8 +1111,38 @@ async function routeSweep(t: TestContext, env: Env, slow: { stripeListMs?: numbe
     const stripeOrphan = cb.book("462960", "2027-12-01", "2027-12-02", holdIdentifier(STRIPE_ORPHAN_REF, "stripe-mock"));
     const beamOrphan = cb.book("462961", "2027-12-01", "2027-12-02", holdIdentifier(BEAM_ORPHAN_REF, "beam-playground"));
     for (const id of [stripeOrphan, beamOrphan]) cb.reservations.get(id)!.status = "not_confirmed";
+    if (slow.seed) {
+      const { POST: checkout } = await import("../../app/api/booking/checkout/route.ts");
+      let n = 0;
+      const post = (body: unknown) =>
+        checkout(
+          new Request("http://localhost:3000/api/booking/checkout", {
+            method: "POST",
+            headers: { host: "localhost:3000", "x-forwarded-for": `198.51.100.${60 + n++}`, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+        );
+      await slow.seed({
+        cb,
+        kv,
+        fakeBeam,
+        async book(items) {
+          const req = { ...demoWindow(items[0].slug, n), items, termsVersion: POLICY_VERSION, guest: GUEST, payMethod: "card_ewallet" };
+          const quoted = await post({ ...req, expectedTotalSatang: 1, expectedDueNowSatang: 1 });
+          assert.equal(quoted.status, 409);
+          const { quote } = (await quoted.json()) as { quote: Quote };
+          const res = await post({ ...req, expectedTotalSatang: quote.totalSatang, expectedDueNowSatang: quote.dueNowSatang });
+          const body = (await res.json()) as CheckoutSuccess;
+          assert.equal(res.status, 200, JSON.stringify(body));
+          assert.equal(body.provider, "beam");
+          return { linkId: new URL(body.redirectUrl).pathname.split("/").pop() ?? "", reservationId: body.holdReservationId ?? "" };
+        },
+      });
+    }
     t.mock.timers.setTime(NOW + ORPHAN_STALE_MS);
+    const arrivedAt = Date.now();
     const res = await route.GET(new Request("http://localhost:3000/api/booking/sweep", { headers: { authorization: `Bearer ${SWEEP_SECRET}` } }));
+    const elapsedMs = Date.now() - arrivedAt;
     return {
       status: res.status,
       cacheControl: res.headers.get("cache-control"),
@@ -890,6 +1155,8 @@ async function routeSweep(t: TestContext, env: Env, slow: { stripeListMs?: numbe
       beamAttempts: beamAttempts.n,
       stripeOrphan,
       beamOrphan,
+      httpsRequests,
+      elapsedMs,
     };
   } finally {
     for (const key of Object.keys(rt)) delete rt[key];
@@ -940,7 +1207,8 @@ test("the route: a Beam deployment with a Stripe drain sweeps both (Beam primary
   assert.equal(r.body.released, 1, "the primary (Beam) run's summary");
   assert.equal(r.cb.reservations.get(r.beamOrphan)?.status, "canceled");
   assert.equal(r.cb.reservations.get(r.stripeOrphan)?.status, "not_confirmed", "no hold side for a provider whose step 1 failed");
-  assert.notEqual(await r.kv.get(keys.lastSweep(keyScope("stripe-test"))), null, "its heartbeat: the shared listing worked");
+  assert.equal(await r.kv.get(keys.lastSweep(keyScope("stripe-test"))), null, "no heartbeat for a Stripe run whose session list failed (round 6)");
+  assert.notEqual(await r.kv.get(keys.lastSweep(BEAM_SCOPE)), null, "Beam's heartbeat");
   assert.ok(r.network.length > 0 && r.network.every((n) => n.startsWith("https ") && n.includes("api.stripe.com")), r.network.join(", "));
   assert.ok(r.lines.some((l) => l.includes("sweep_step1_failed")));
 });
@@ -975,4 +1243,150 @@ test("the route: without a Beam config (active or drain) it answers the single S
   assert.equal(r.cb.reservations.get(r.beamOrphan)?.status, "not_confirmed", "a Beam hold is never a Stripe run's");
   assert.equal(r.fakeBeam.calls.length, 0);
   assert.deepEqual(Object.keys(r.body), ["ok", "mode", "sessionsChecked", "fulfilled", "released", "holdsChecked", "skippedOpen", "skippedYoung", "skippedOtherMode", "openHolds", "errors", "cloudbedsOk", "undeliveredAlerts", "paidUnconfirmed", "pruned"]);
+});
+
+/* ------------------------------------------------ round 6 ------------------------------------------------ */
+
+const STRIPE_TEST_DRAIN_KEY = "sk_test_routetest0123456789";
+const SUNRISE: CartItemInput[] = [{ slug: "sunrise-suite", ratePlanId: "standard", adults: 2, addonIds: [] }];
+
+test("the route: Beam primary with a Stripe drain whose API hangs - Beam confirms, releases and writes its heartbeat; the drain's one request is cut at the step-1 slice's end (no retry); 502", async (t) => {
+  let paid: { linkId: string; reservationId: string } | null = null;
+  let unpaid: { linkId: string; reservationId: string } | null = null;
+  const r = await routeSweep(
+    t,
+    { BOOKING_PAYMENT_PROVIDER: "beam", ...MOCK_STRIPE, STRIPE_SECRET_KEY: STRIPE_TEST_DRAIN_KEY, ...BEAM_VARS },
+    {
+      stripeHttpsHangs: true,
+      seed: async (w) => {
+        paid = await w.book(GARDEN);
+        w.fakeBeam.pay(paid.linkId, "CARD"); // its webhook is lost
+        unpaid = await w.book(SUNRISE);
+      },
+    },
+  );
+  const p = paid as unknown as { linkId: string; reservationId: string };
+  const u = unpaid as unknown as { linkId: string; reservationId: string };
+  assert.equal(r.status, 502, JSON.stringify(r.body));
+  assert.equal(r.body.error, "payments_unavailable");
+  assert.equal(r.body.mode, "beam-playground");
+  assert.deepEqual(
+    r.body.runs?.map((x) => [x.provider, x.mode, x.ok, x.error ?? null]),
+    [
+      ["stripe", "stripe-test", false, "payments_unavailable"],
+      ["beam", "beam-playground", true, null],
+    ],
+  );
+  assert.equal(r.cb.reservations.get(p.reservationId)?.status, "confirmed", "the paid Beam booking whose webhook was lost");
+  assert.equal(r.cb.reservations.get(u.reservationId)?.status, "canceled", "the expired Beam hold");
+  assert.equal(r.cb.reservations.get(r.beamOrphan)?.status, "canceled");
+  assert.equal(r.cb.reservations.get(r.stripeOrphan)?.status, "not_confirmed", "no hold side for the drain whose step 1 failed");
+  assert.notEqual(await r.kv.get(keys.lastSweep(BEAM_SCOPE)), null, "Beam's heartbeat");
+  assert.equal(await r.kv.get(keys.lastSweep(keyScope("stripe-test"))), null, "no heartbeat for the drain");
+  // One Stripe request (no retry), sent with what was left of the step-1 slice (Beam's step 1 took no mocked time).
+  assert.deepEqual(
+    r.httpsRequests.map((x) => [x.target.split("?")[0], x.timeoutMs]),
+    [["GET api.stripe.com/v1/checkout/sessions", BUDGET_MS - SWEEP_HOLD_SIDE_RESERVE_MS]],
+  );
+  assert.equal(r.elapsedMs, BUDGET_MS - SWEEP_HOLD_SIDE_RESERVE_MS, "the request took the step-1 slice, not the Stripe client's 3 x 15 s");
+  assert.ok(r.lines.includes("[booking] sweep_step1_failed"));
+  assert.ok(!r.lines.includes("[booking] sweep_run_skipped"), "Beam is never skipped");
+});
+
+test("the route: a Stripe-live deployment with a Beam drain whose Stripe session list fails writes no live heartbeat, so checkout's stale-sweeper warning fires after SWEEP_STALE_ALERT_MS", async (t) => {
+  const env: Env = { ...STRIPE_LIVE_ENV, ...BEAM_VARS, BOOKING_SWEEP_SECRET: SWEEP_SECRET };
+  // The last good sweep ran 20 minutes before this one.
+  const lastGood = NOW + ORPHAN_STALE_MS - 20 * MIN;
+  const r = await routeSweep(t, env, {
+    cloudbedsOverFetch: true,
+    redisAsMemory: true,
+    seed: async (w) => void (await w.kv.set(keys.lastSweep("live"), String(lastGood), 7 * 24 * 3600)),
+  });
+  assert.equal(r.status, 502, JSON.stringify(r.body));
+  assert.equal(r.body.mode, "stripe-live");
+  assert.deepEqual(
+    r.body.runs?.map((x) => [x.provider, x.mode, x.ok, x.error ?? null, x.cloudbedsOk]),
+    [
+      ["stripe", "stripe-live", false, "payments_unavailable", true],
+      ["beam", "beam-playground", true, null, true],
+    ],
+  );
+  assert.ok(r.network.some((n) => n.startsWith("https ") && n.includes("api.stripe.com")), "the session list was asked (and failed)");
+  assert.equal(await r.kv.get(keys.lastSweep("live")), String(lastGood), "the failed Stripe run is no sweep: the heartbeat stays the last good one's");
+  assert.notEqual(await r.kv.get(keys.lastSweep(BEAM_SCOPE)), null, "the Beam drain's own heartbeat");
+  const alerts: string[][] = [];
+  const deps = { config: getFulfilmentConfig(env), kv: r.kv, alert: async (subject: string, lines: string[]) => void alerts.push([subject, ...lines]) };
+  await checkSweeperFresh(deps, lastGood + SWEEP_STALE_ALERT_MS - MIN);
+  assert.equal(alerts.length, 0, "inside SWEEP_STALE_ALERT_MS of the last good sweep: no warning yet");
+  await checkSweeperFresh(deps, lastGood + SWEEP_STALE_ALERT_MS + MIN);
+  assert.deepEqual(alerts.map((a) => a.slice(0, 2)), [["The booking sweeper has not run recently", "The last successful sweep was 31 minutes ago."]]);
+});
+
+test("the route: the Beam deps can't be built (a Beam config exists) - the Beam run fails sweep_failed, the Stripe run still sweeps; 502", async (t) => {
+  const r = await routeSweep(t, { BOOKING_PAYMENT_PROVIDER: "stripe", ...MOCK_STRIPE, ...BEAM_VARS }, { brokenGlobal: "memoryKv" });
+  assert.equal(r.status, 502, JSON.stringify(r.body));
+  assert.equal(r.body.error, "sweep_failed");
+  assert.equal(r.body.mode, "stripe-mock");
+  assert.deepEqual(r.body.runs?.map((x) => [x.provider, x.mode, x.ok, x.error ?? null]), [
+    ["stripe", "stripe-mock", true, null],
+    ["beam", null, false, "sweep_failed"],
+  ]);
+  assert.deepEqual(r.body.runs?.[1], { provider: "beam", mode: null, ok: false, error: "sweep_failed" });
+  assert.equal(r.cb.reservations.get(r.stripeOrphan)?.status, "canceled", "the Stripe orphan released by the Stripe run");
+  assert.equal(r.cb.reservations.get(r.beamOrphan)?.status, "not_confirmed");
+  assert.equal(r.fakeBeam.calls.length, 0);
+  assert.ok(r.lines.includes("[booking] sweep_failed"));
+});
+
+test("the route: the Stripe deps can't be built (a Beam config exists) - the Stripe run fails sweep_failed, the Beam run still sweeps; 502", async (t) => {
+  const r = await routeSweep(t, { BOOKING_PAYMENT_PROVIDER: "stripe", ...MOCK_STRIPE, ...BEAM_VARS }, { brokenGlobal: "mock" });
+  assert.equal(r.status, 502, JSON.stringify(r.body));
+  assert.equal(r.body.error, "sweep_failed");
+  assert.deepEqual(r.body.runs?.[0], { provider: "stripe", mode: null, ok: false, error: "sweep_failed" });
+  assert.deepEqual(r.body.runs?.map((x) => [x.provider, x.mode, x.ok]), [
+    ["stripe", null, false],
+    ["beam", "beam-playground", true],
+  ]);
+  assert.equal(r.cb.reservations.get(r.beamOrphan)?.status, "canceled", "the Beam orphan released by the Beam run");
+  assert.equal(r.cb.reservations.get(r.stripeOrphan)?.status, "not_confirmed");
+  assert.ok(r.lines.includes("[booking] sweep_failed"));
+});
+
+/** 300 characters naming a guest's email and phone number. */
+const PII_ERROR = `Beam said: guest guest@example.com called from +66 81 234 5678 about it ${"x".repeat(300)}`.slice(0, 300);
+
+function assertRedacted(logged: unknown): void {
+  const text = String(logged);
+  assert.ok(text.includes("[email]") && text.includes("[number]"), text);
+  assert.ok(!text.includes("guest@example.com") && !text.includes("234 5678"), text);
+  assert.ok(text.length <= 200, `${text.length} characters`);
+}
+
+test("sweep_step1_failed and sweep_failed log the error redacted (no email, no phone number) and at most 200 characters long", async () => {
+  assert.equal(PII_ERROR.length, 300);
+  const a = await scenario();
+  const throwingStep1: SweepRun = {
+    provider: "beam",
+    open: (timing) => {
+      const deps = beamDepsFor(a.w, timing);
+      return { deps, gw: { ...beamGateway(deps), sweepRecent: () => Promise.reject(new Error(PII_ERROR)) } };
+    },
+  };
+  const log = (message: string, data?: Record<string, unknown>) => a.w.sweeperLogs.push({ message, data });
+  await sweepProviders([stripeRun(a.w, true), throwingStep1], { deadlineMs: a.w.wall.ms + BUDGET_MS, clock: () => a.w.wall.ms, log });
+  const step1 = sweeperLogged(a.w, "sweep_step1_failed");
+  assert.equal(step1.length, 1);
+  assertRedacted(step1[0].data?.error);
+
+  const unbuildable: SweepRun = {
+    provider: "beam",
+    open: () => {
+      throw new Error(PII_ERROR);
+    },
+  };
+  await sweepProviders([stripeRun(a.w, true), unbuildable], { deadlineMs: a.w.wall.ms + BUDGET_MS, clock: () => a.w.wall.ms, log });
+  const failedLog = sweeperLogged(a.w, "sweep_failed");
+  assert.equal(failedLog.length, 1);
+  assert.equal(failedLog[0].data?.phase, "step 1");
+  assertRedacted(failedLog[0].data?.error);
 });

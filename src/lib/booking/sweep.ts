@@ -265,6 +265,11 @@ export interface SweepOptions {
    * Cloudbeds with another provider's run needs them: the primary run releases orphans on what it can see.
    */
   peers?: RecentPayments[];
+  /**
+   * This run's time, taken by the caller before it ran this run's step 1 (opts.recent), so the run keeps one clock
+   * from its step 1 to its heartbeat, as a lone run does (Beam design S4.8, round 6). Default: now.
+   */
+  nowMs?: number;
 }
 
 /** Cloudbeds' reservations of the sweep window (step 2c). One listing can serve every run of a request (opts.listed). */
@@ -401,20 +406,34 @@ async function writeHeartbeat(deps: CoreDeps, scope: string, now: number, summar
  * What a provider's run still does when its step 1 (sweepRecentPayments) threw (Beam design S4.8; round-4
  * triage): step 1b for its scope (paid payments not yet confirmed: retried, and the CRITICAL once one has been
  * stuck PAID_UNCONFIRMED_ESCALATE_MS), step 3 (its stored critical alerts re-sent) and its heartbeat when the
- * shared Cloudbeds listing worked (`cloudbedsOk`). No hold side: nothing is released, since the payments step 1
- * could not list may belong to any hold. These are the very functions runSweep runs for step 1b, step 3 and the
- * heartbeat, so a run whose step 1 works is unchanged (Stripe's lone runSweep included). The answer counts the
- * failed step 1 as one error; it logs sweep_done with step1Failed: true.
+ * shared Cloudbeds listing worked (`cloudbedsOk`) and the caller wants it (`heartbeat`: the sweep route asks it for
+ * every provider but Stripe, round 6). No hold side: nothing is released, since the payments step 1 could not list
+ * may belong to any hold. These are the very functions runSweep runs for step 1b, step 3 and the heartbeat, so a
+ * run whose step 1 works is unchanged (Stripe's lone runSweep included). The answer counts the failed step 1 as one
+ * error; it logs sweep_done with step1Failed: true.
  */
-export async function sweepPaidAndAlerts(deps: CoreDeps, gw: PaymentGateway, opts: { cloudbedsOk: boolean }): Promise<SweepSummary> {
-  const now = nowOf(deps);
+export async function sweepPaidAndAlerts(
+  deps: CoreDeps,
+  gw: PaymentGateway,
+  opts: {
+    cloudbedsOk: boolean;
+    /**
+     * false: no heartbeat, whatever the listing did (round 6: a Stripe run whose session list failed is no sweep -
+     * Stripe keeps no failure count of its own, so checkout's stale-sweeper warning must still fire). Default true.
+     */
+    heartbeat?: boolean;
+    /** The run's time, taken before its step 1 (see SweepOptions.nowMs). Default: now. */
+    nowMs?: number;
+  },
+): Promise<SweepSummary> {
+  const now = opts.nowMs ?? nowOf(deps);
   const scope = keyScope(deps.config.paymentMode);
   const summary = emptySummary();
   summary.errors = 1;
   summary.cloudbedsOk = opts.cloudbedsOk;
   await retryPaidUnconfirmed(deps, gw, scope, now, new Set(), summary);
   await resendUndeliveredAlerts(deps, scope, now, summary);
-  await writeHeartbeat(deps, scope, now, summary);
+  if (opts.heartbeat !== false) await writeHeartbeat(deps, scope, now, summary);
   deps.log("sweep_done", { ...summary, step1Failed: true });
   return summary;
 }
@@ -424,7 +443,7 @@ export function runSweep(deps: StripeDeps, gw?: PaymentGateway, opts?: SweepOpti
 /** One sweep for the provider `gw` (see "Several providers" above for the options). */
 export function runSweep(deps: CoreDeps, gw: PaymentGateway, opts?: SweepOptions): Promise<SweepSummary>;
 export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGateway(deps as StripeDeps), opts: SweepOptions = {}): Promise<SweepSummary> {
-  const now = nowOf(deps);
+  const now = opts.nowMs ?? nowOf(deps);
   const summary = emptySummary();
   const mode = deps.config.paymentMode;
   const scope = keyScope(mode);
