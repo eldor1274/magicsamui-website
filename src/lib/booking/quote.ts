@@ -5,13 +5,14 @@
 
 import { ADDONS, RATE_PLANS, getCatalogueRoom } from "./catalogue.ts";
 import { eachNight, isHighSeason, isWeekendNight, nightsBetween, weekday } from "./dates.ts";
-import type { PromoSettings } from "./config.ts";
+import type { BeamSettings, BookingConfig, PromoSettings } from "./config.ts";
 import type {
   AddonInfo,
   BookingItemDiscount,
   CartItemInput,
   IsoDate,
   NightRate,
+  PayMethod,
   PricingConfig,
   PromoLookup,
   PromoResult,
@@ -60,6 +61,27 @@ export function cloudbedsMoneyToSatang(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
   const n = typeof v === "number" ? v : Number(String(v).replace(/,/g, ""));
   return Number.isFinite(n) ? Math.round(n * SATANG_PER_THB) : null;
+}
+
+/** One of the two payment method groups (types.ts PayMethod). */
+export function isPayMethod(v: unknown): v is PayMethod {
+  return v === "card_ewallet" || v === "promptpay";
+}
+
+/**
+ * The payment processing fee % a quote is priced with for the guest's payment method (design S3.2), on the server: the
+ * Beam checkout prices with it and passes it to buildPaymentLinkRequest as expectedFeePct, so the link's fee guard
+ * follows a BEAM_PROMPTPAY_FEE_PCT override. Beam (config.beam set): card_ewallet -> config.cardFeePct
+ * (BOOKING_CARD_FEE_PCT, 3 when unset); promptpay -> config.beam.promptPayFeePct (BEAM_PROMPTPAY_FEE_PCT, 0 when unset:
+ * owner decision 1); no method yet -> the card/e-wallet fee (the total a Beam page shows before a method is chosen; a
+ * Beam checkout without one is refused from S4.6). Stripe and the demo (config.beam null): config.cardFeePct whatever
+ * is sent. It always agrees with the public feeByMethod (config.ts toPublicConfig), which only Beam answers carry.
+ */
+export function feePctFor(
+  config: Pick<BookingConfig, "cardFeePct"> & { beam: Pick<BeamSettings, "promptPayFeePct"> | null },
+  payMethod: PayMethod | null | undefined,
+): number {
+  return config.beam !== null && payMethod === "promptpay" ? config.beam.promptPayFeePct : config.cardFeePct;
 }
 
 /** `pct` percent of an integer satang amount, rounded half-up to a satang. */

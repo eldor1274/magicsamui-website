@@ -25,7 +25,7 @@ import { formatDisplayDate } from "./dates.ts";
 import { BEAM_ID_PATTERN, isBeamLinkId } from "./payments/beamIds.ts";
 import { MIN_CHARGE_SATANG, percentOf } from "./quote.ts";
 import type { BeamCredentials } from "./config.ts";
-import type { PaymentStatus, Quote } from "./types.ts";
+import type { PayMethod, PaymentStatus, Quote } from "./types.ts";
 
 export type { BeamCredentials };
 
@@ -34,8 +34,9 @@ export type BeamPaymentLinkStatus = "ACTIVE" | "PAID" | "EXPIRED" | "DISABLED" |
 /**
  * Our two payment-method groups. The guest picks one on our page and the link
  * enables only that group: cards plus e-wallets, or the Thai PromptPay QR.
+ * The request's, token's and quote's PayMethod (types.ts, design S3.2).
  */
-export type BeamMethodGroup = "card_ewallet" | "promptpay";
+export type BeamMethodGroup = PayMethod;
 
 /**
  * The largest netAmount we send to Beam. PLACEHOLDER until Beam answers our

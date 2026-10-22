@@ -216,6 +216,14 @@ export interface PromoLookup {
   refusedPlans: string[];
 }
 
+/**
+ * The payment method group the guest picks on our page in the Beam modes (design S3.2): cards and e-wallets (the card
+ * fee, BOOKING_CARD_FEE_PCT) or the Thai PromptPay QR (BEAM_PROMPTPAY_FEE_PCT, fee-free unless the owner overrides it:
+ * owner decision 1). The fee % of each is quote.ts feePctFor (server) and PublicBookingConfig.feeByMethod (browser).
+ * Stripe and the demo have one fee whatever is sent.
+ */
+export type PayMethod = "card_ewallet" | "promptpay";
+
 /** Pricing knobs the client needs to mirror the server quote. */
 export interface PricingConfig {
   cardFeePct: number;
@@ -306,7 +314,7 @@ export interface PublicBookingConfig extends PricingConfig {
    * our page - card_ewallet = cardFeePct (BOOKING_CARD_FEE_PCT, 3 when unset), promptpay = BEAM_PROMPTPAY_FEE_PCT
    * (0 when unset: owner decision 1). Offered methods are in paymentMethods.
    */
-  feeByMethod?: { card_ewallet: number; promptpay: number };
+  feeByMethod?: Record<PayMethod, number>;
   /**
    * Beam only (absent for Stripe and the demo): how long after a checkout starts its payment may still succeed, in
    * minutes - the link's lifetime (holdMinutes) + BEAM_PENDING_GRACE_MINUTES + a 3-minute margin (53 by default).
@@ -490,6 +498,13 @@ export interface CheckoutRequest {
    */
   termsVersion?: string;
   /**
+   * The payment method group the guest chose (design S3.2): what a Beam checkout prices the fee with (feePctFor) and
+   * which methods its payment link offers; required on Beam from S4.6. Stripe and the demo never need it and ignore it
+   * (one fee whatever is sent). Absent (undefined, null or "") = not chosen; any value other than the two is an
+   * invalid_request issue (validate.ts).
+   */
+  payMethod?: PayMethod;
+  /**
    * Guest details. REQUIRED when config.requiresGuestDetails (stripe modes):
    * passed to Cloudbeds (the reservation) and Stripe (receipt email) only -
    * never stored by us, never put in tokens, URLs, logs or analytics. Ignored
@@ -562,6 +577,11 @@ export interface BookingSummary {
   linkExpiresAt: string;
   /** Preview theme, so the return/cancel pages keep the look the guest chose. */
   theme?: ThemeName;
+  /**
+   * Beam only (design S3.2; the Beam checkout sets it from S4.6): the payment method group the booking was priced
+   * and linked for. Absent in Stripe and demo tokens and in every token from before it existed (they still verify).
+   */
+  payMethod?: PayMethod;
 }
 
 export interface BookingItemDiscount {

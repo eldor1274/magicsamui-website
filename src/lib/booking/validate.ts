@@ -5,10 +5,10 @@
 
 import { ADDONS, RATE_PLANS, getCatalogueRoom, hasUnitConflict, isAddonId, isRatePlanId } from "./catalogue.ts";
 import { STAY_DATE_ERROR_MESSAGES, validateStayDates } from "./dates.ts";
-import { addonEligibleNights } from "./quote.ts";
+import { addonEligibleNights, isPayMethod } from "./quote.ts";
 import { GUEST_LIMITS, normalizeName, normalizePostcode, validateGuest } from "./guest.ts";
 import type { GuestDetails } from "./guest.ts";
-import type { AddonId, CartItemInput, CheckoutRequest, IsoDate, RoomOffer, StaySearch, ThemeName } from "./types.ts";
+import type { AddonId, CartItemInput, CheckoutRequest, IsoDate, PayMethod, RoomOffer, StaySearch, ThemeName } from "./types.ts";
 
 export interface ValidationLimits {
   today: IsoDate;
@@ -40,6 +40,20 @@ function parsePromoField(v: unknown, issues: string[]): string | undefined {
     return undefined;
   }
   return v.trim() || undefined;
+}
+
+/** The issue for a payMethod that is neither card_ewallet nor promptpay. */
+export const PAY_METHOD_UNREADABLE = "The payment method you chose couldn't be read - please choose how to pay again.";
+
+/**
+ * CheckoutRequest.payMethod (design S3.2): absent (undefined, null or "", as an empty promo field) -> undefined; one of
+ * the two groups -> kept; anything else is an issue, in every mode (as a malformed promo field is).
+ */
+function parsePayMethodField(v: unknown, issues: string[]): PayMethod | undefined {
+  if (v === undefined || v === null || v === "") return undefined;
+  if (isPayMethod(v)) return v;
+  issues.push(PAY_METHOD_UNREADABLE);
+  return undefined;
 }
 
 /** Validates search parameters (from a query string or JSON). */
@@ -128,6 +142,8 @@ export function parseCheckoutRequest(body: unknown, limits: ValidationLimits): P
   const checkOut = dateError ? null : (b.checkOut as IsoDate);
 
   const promo = parsePromoField(b.promo, issues);
+  // Stripe and the demo never send one: their parse result has no payMethod key, exactly as before.
+  const payMethod = parsePayMethodField(b.payMethod, issues);
 
   const expected = b.expectedTotalSatang;
   const expectedDueNow = b.expectedDueNowSatang;
@@ -170,6 +186,7 @@ export function parseCheckoutRequest(body: unknown, limits: ValidationLimits): P
       expectedDueNowSatang: expectedDueNow as number,
       ...(theme ? { theme } : {}),
       ...(termsVersion ? { termsVersion } : {}),
+      ...(payMethod ? { payMethod } : {}),
     },
   };
 }

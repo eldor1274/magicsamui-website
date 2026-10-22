@@ -10,6 +10,7 @@ import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 
 import { ADDONS, getCatalogueRoom, isAddonId, isRatePlanId } from "./catalogue.ts";
 import { MAX_CART_ITEMS, MAX_NIGHTS } from "./config.ts";
 import { compactDate, isIsoDate, nightsBetween } from "./dates.ts";
+import { isPayMethod } from "./quote.ts";
 import { BOOKING_REF_RE, isBookingRef } from "./ref.ts";
 import type { BookingSummary, DemoFailureCode, IsoDate, PaymentMode } from "./types.ts";
 
@@ -170,6 +171,8 @@ export function isBookingSummary(v: unknown): v is BookingSummary {
   if (b.dueNowSatang > b.totalSatang || b.cardFeeSatang > b.totalSatang) return false;
   if (!(b.promoCode === null || (typeof b.promoCode === "string" && PROMO_CODE_RE.test(b.promoCode)))) return false;
   if (b.theme !== undefined && b.theme !== "magic" && b.theme !== "classic") return false;
+  // Beam only (design S3.2): one of the two groups when present; tokens without it (Stripe, the demo, every older token) verify.
+  if (b.payMethod !== undefined && !isPayMethod(b.payMethod)) return false;
   return true;
 }
 
