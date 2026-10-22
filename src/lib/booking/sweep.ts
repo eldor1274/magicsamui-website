@@ -64,7 +64,11 @@
 // (sweepRecentPayments), then one runSweep per provider - the active one with
 // primary: true, each drain with primary: false - handed its own step 1
 // (opts.recent), the other providers' (opts.peers) and one Cloudbeds listing
-// for all (opts.listed, from listSweepReservations).
+// for all (opts.listed, from listSweepReservations). A provider whose step 1
+// threw gets no hold side that run, only sweepPaidAndAlerts: its step 1b,
+// step 3 and heartbeat - the same code runSweep runs for them (round 5), so a
+// failing payment list never stops paid bookings from being confirmed or
+// stored critical alerts from being re-sent.
 // Ownership of a hold between those runs:
 // - one with a record or an intent belongs to the run of its mode (any other
 //   run skips it as another mode's);
@@ -312,13 +316,8 @@ export async function sweepRecentPayments(deps: CoreDeps, gw: PaymentGateway, no
   return recent;
 }
 
-/** One sweep for the Stripe deployment (gw = Stripe, the primary run): what the route runs today. */
-export function runSweep(deps: StripeDeps, gw?: PaymentGateway, opts?: SweepOptions): Promise<SweepSummary>;
-/** One sweep for the provider `gw` (see "Several providers" above for the options). */
-export function runSweep(deps: CoreDeps, gw: PaymentGateway, opts?: SweepOptions): Promise<SweepSummary>;
-export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGateway(deps as StripeDeps), opts: SweepOptions = {}): Promise<SweepSummary> {
-  const now = nowOf(deps);
-  const summary: SweepSummary = {
+function emptySummary(): SweepSummary {
+  return {
     sessionsChecked: 0,
     fulfilled: 0,
     released: 0,
@@ -333,25 +332,14 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
     paidUnconfirmed: 0,
     pruned: 0,
   };
-  const mode = deps.config.paymentMode;
-  const scope = keyScope(mode);
-  const liveTag = isLiveMode(mode);
-  const primary = opts.primary ?? true;
-  const ownsOrphans = opts.ownsOrphans ?? primary;
-  const peers = opts.peers ?? [];
-  const parseHoldId = holdIdParser(gw);
+}
 
-  // 1. Provider side (unless the caller already ran it, so the other providers' runs could see it first).
-  const recent = opts.recent ?? (await sweepRecentPayments(deps, gw, now));
-  const { byReservation } = recent;
-  /** Paid payments step 1 already ran fulfil for (successfully or not) this run. */
-  const triedPaid = new Set(recent.triedPaid);
-  summary.sessionsChecked = recent.counts.sessionsChecked;
-  summary.fulfilled = recent.counts.fulfilled;
-  summary.released = recent.counts.released;
-  summary.errors = recent.counts.errors;
-
-  // 1b. Paid payments fulfil has not finished (no time limit: beyond the 48 h lookback and the provider's retries).
+/**
+ * Step 1b: paid payments fulfil has not finished (the paid index of `scope`, no time limit: beyond the 48 h
+ * lookback and the provider's retries) are retried, and escalated once paid PAID_UNCONFIRMED_ESCALATE_MS ago.
+ * `triedPaid`: what step 1 already ran fulfil for this run (only escalated here); the ones tried here are added.
+ */
+async function retryPaidUnconfirmed(deps: CoreDeps, gw: PaymentGateway, scope: string, now: number, triedPaid: Set<string>, summary: SweepSummary): Promise<void> {
   for (const key of await deps.kv.zrangeByScore(keys.paidIndex(scope), 0, Number.MAX_SAFE_INTEGER, 50)) {
     if ((await deps.kv.get(keys.fulfilDone(key))) !== null) {
       await deps.kv.zrem(keys.paidIndex(scope), key);
@@ -387,6 +375,72 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
       await alertFulfilPaymentFailure(deps, gw, key, e).catch(() => undefined);
     }
   }
+}
+
+/** Step 3: critical alerts of `scope` that never reached the owner are re-sent (alerts.ts). */
+async function resendUndeliveredAlerts(deps: CoreDeps, scope: string, now: number, summary: SweepSummary): Promise<void> {
+  try {
+    summary.undeliveredAlerts = await resendPendingAlerts(deps, scope, now);
+  } catch (e) {
+    summary.errors++;
+    deps.log("sweep_alert_resend_failed", { error: redactForLog(e instanceof Error ? e.message : String(e)) });
+  }
+}
+
+/** The run's heartbeat (msv:{scope}:sweep:last, which checkout watches): only a run whose Cloudbeds side worked writes it. */
+async function writeHeartbeat(deps: CoreDeps, scope: string, now: number, summary: SweepSummary): Promise<void> {
+  if (summary.cloudbedsOk) await deps.kv.set(keys.lastSweep(scope), String(now), 7 * 24 * 3600).catch(() => undefined);
+}
+
+/**
+ * What a provider's run still does when its step 1 (sweepRecentPayments) threw (Beam design S4.8; round-4
+ * triage): step 1b for its scope (paid payments not yet confirmed: retried, and the CRITICAL once one has been
+ * stuck PAID_UNCONFIRMED_ESCALATE_MS), step 3 (its stored critical alerts re-sent) and its heartbeat when the
+ * shared Cloudbeds listing worked (`cloudbedsOk`). No hold side: nothing is released, since the payments step 1
+ * could not list may belong to any hold. These are the very functions runSweep runs for step 1b, step 3 and the
+ * heartbeat, so a run whose step 1 works is unchanged (Stripe's lone runSweep included). The answer counts the
+ * failed step 1 as one error; it logs sweep_done with step1Failed: true.
+ */
+export async function sweepPaidAndAlerts(deps: CoreDeps, gw: PaymentGateway, opts: { cloudbedsOk: boolean }): Promise<SweepSummary> {
+  const now = nowOf(deps);
+  const scope = keyScope(deps.config.paymentMode);
+  const summary = emptySummary();
+  summary.errors = 1;
+  summary.cloudbedsOk = opts.cloudbedsOk;
+  await retryPaidUnconfirmed(deps, gw, scope, now, new Set(), summary);
+  await resendUndeliveredAlerts(deps, scope, now, summary);
+  await writeHeartbeat(deps, scope, now, summary);
+  deps.log("sweep_done", { ...summary, step1Failed: true });
+  return summary;
+}
+
+/** One sweep for the Stripe deployment (gw = Stripe, the primary run): what the route runs today. */
+export function runSweep(deps: StripeDeps, gw?: PaymentGateway, opts?: SweepOptions): Promise<SweepSummary>;
+/** One sweep for the provider `gw` (see "Several providers" above for the options). */
+export function runSweep(deps: CoreDeps, gw: PaymentGateway, opts?: SweepOptions): Promise<SweepSummary>;
+export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGateway(deps as StripeDeps), opts: SweepOptions = {}): Promise<SweepSummary> {
+  const now = nowOf(deps);
+  const summary = emptySummary();
+  const mode = deps.config.paymentMode;
+  const scope = keyScope(mode);
+  const liveTag = isLiveMode(mode);
+  const primary = opts.primary ?? true;
+  const ownsOrphans = opts.ownsOrphans ?? primary;
+  const peers = opts.peers ?? [];
+  const parseHoldId = holdIdParser(gw);
+
+  // 1. Provider side (unless the caller already ran it, so the other providers' runs could see it first).
+  const recent = opts.recent ?? (await sweepRecentPayments(deps, gw, now));
+  const { byReservation } = recent;
+  /** Paid payments step 1 already ran fulfil for (successfully or not) this run. */
+  const triedPaid = new Set(recent.triedPaid);
+  summary.sessionsChecked = recent.counts.sessionsChecked;
+  summary.fulfilled = recent.counts.fulfilled;
+  summary.released = recent.counts.released;
+  summary.errors = recent.counts.errors;
+
+  // 1b. Paid payments fulfil has not finished (no time limit: beyond the 48 h lookback and the provider's retries).
+  await retryPaidUnconfirmed(deps, gw, scope, now, triedPaid, summary);
 
   // 2. Hold side.
   const candidates = new Map<string, Candidate>();
@@ -669,15 +723,10 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
   summary.openHolds += (await deps.kv.zrangeByScore(keys.intentIndex(), now - STALE_HOLD_MS, now + 3_600_000, 200)).length;
 
   // 3. Critical alerts that never reached the owner (this mode's only).
-  try {
-    summary.undeliveredAlerts = await resendPendingAlerts(deps, scope, now);
-  } catch (e) {
-    summary.errors++;
-    deps.log("sweep_alert_resend_failed", { error: redactForLog(e instanceof Error ? e.message : String(e)) });
-  }
+  await resendUndeliveredAlerts(deps, scope, now, summary);
 
   // Only a run that could look for orphan holds in Cloudbeds counts as a sweep.
-  if (summary.cloudbedsOk) await deps.kv.set(keys.lastSweep(scope), String(now), 7 * 24 * 3600).catch(() => undefined);
+  await writeHeartbeat(deps, scope, now, summary);
   deps.log("sweep_done", { ...summary });
   return summary;
 }

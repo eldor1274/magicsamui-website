@@ -29,35 +29,45 @@
 // 'cancelled', or 'not_open' when the link was no longer ACTIVE. Callers re-read the link afterwards.
 //
 // releaseGuard(key) is a fresh link + charge read: true only while the payment still can never be paid (state
-// 'expired' or 'failed': no SUCCEEDED charge and no PENDING charge inside the grace; money review 9), or when
-// Beam answers 404 for the link (it does not exist for these credentials, so it can never be paid).
+// 'expired' or 'failed': no SUCCEEDED charge and no PENDING charge inside the grace; money review 9). A link Beam
+// answers 404 for can never be paid only when our record says it was created under this BEAM_MERCHANT_ID and its
+// expiry plus the pending grace is over (round 5): Beam reads the merchant from the API key, so after a merchant
+// switch every older link answers 404, paid ones too, and a 404 before the expiry may be passing.
 //
 // sweepRecent(sinceMs) is the sweeper's step 1 for Beam (S4.2; money review 1 and 7, gap review 1). Beam sends
 // no expiry event and a charge can succeed long after its link closed, so the sweeper finds the payments itself:
 // 1. The charge scan: the PAYMENT_LINK charges of the last 72 hours (BEAM_SCAN_LOOKBACK_HOURS), or of the last 7
 //    days (BEAM_DEEP_SCAN_DAYS) once the last complete deep pass (keys.beamDeepScan) is 6 hours old. Beam
-//    refusing the unfiltered list (a 4xx other than 429) is logged and told to the owner once, and the run goes
-//    on with the links we track; any other failure of the scan throws (the run fails and keeps every hold), as
-//    does a scan that could not finish (a later page failed, the budget or BEAM_SCAN_MAX_PAGES ran out).
+//    refusing the unfiltered list (a 4xx other than 429) is logged and told to the owner once per HTTP status a
+//    day, and the run goes on with the links we track; any other failure of the scan throws (the run fails and
+//    keeps every hold), as does a scan that could not finish (a later page failed, the budget or
+//    BEAM_SCAN_MAX_PAGES ran out). A deep pass that fails is logged and the 72-hour pass runs in its place, so a
+//    deep pass that keeps failing never fails every run (round 5).
 // 2. The links: every links-open entry (trackOpenLink at create time, score = expiresAt; every run, not only
 //    the expired ones), the late-watch entries younger than BEAM_LATE_WATCH_DAYS, and every link the scan
 //    names. A link without a record is read once for its signed note: ours -> tracked (its reading raises the
 //    record-missing warning); not ours -> cached as foreign for 8 days (no read again); not ours but carrying
-//    a SUCCEEDED charge that names an MSV booking -> one warning 'A Beam payment names booking {ref} but we
-//    have no record of it'. Such a reading that fails (other than 404) is told to the owner after 60 minutes
-//    and throws once every link was looked at: without it the link's booking is unknown, so no hold it might
-//    belong to may be released by that run.
+//    a SUCCEEDED charge that names an MSV booking -> one CRITICAL 'A Beam payment names booking {ref} but we
+//    have no record of it' (stored and re-sent until delivered: money was taken under our ref). Such a reading
+//    that fails (other than 404) is told to the owner after 60 minutes and throws once every link was looked
+//    at: without it the link's booking is unknown, so no hold it might belong to may be released by that run.
 // 3. One RecentPayment per reservation {key, reservationId (record or note), listedPaid (a SUCCEEDED charge in
 //    the scan), read}. read() reads the link afresh; an ACTIVE link past expiresAt + skew (needsDisable) is
 //    disabled (a fresh key) and read again. A disable that throws, or whose re-read still says ACTIVE, is a
 //    failed disable (keys.beamDisableFail: told to the owner after 60 minutes). A link Beam answers 404 for
-//    reads as expired (it can never be paid), never as an error; any other failed reading throws (the
-//    sweeper keeps that hold: RecentPayments.unread) and, after 60 minutes of failures
-//    (keys.beamReadFailures), is told to the owner. Two links naming one reservation (never by construction:
-//    one payment page per hold) share one entry, which answers the payment that matters most (paid first).
+//    reads as expired (it can never be paid) only when it was created under this BEAM_MERCHANT_ID and its
+//    expiry plus the pending grace is over; before that, or for a link of another merchant (then also one
+//    CRITICAL per link), the reading fails like any other. A failed reading throws (the sweeper keeps that hold:
+//    RecentPayments.unread) and, after 60 minutes of failures (keys.beamReadFailures), is told to the owner. Two
+//    links naming one reservation (never by construction: one payment page per hold) share one entry, which
+//    answers the payment that matters most (paid first).
 // 4. Housekeeping: a links-open entry whose done marker exists is dropped; one whose hold was released moves
 //    to the late watch (score = now); one whose link expired more than BEAM_LATE_WATCH_DAYS ago is dropped;
-//    late-watch entries past the window are dropped.
+//    late-watch entries past the window are dropped. A released link whose last reading showed a PENDING
+//    charge is also kept in keys.beamLinksPending and read on every run until that charge settles, for
+//    BEAM_PENDING_WATCH_DAYS at most (round 5), so a very late success is found even when its webhook is lost.
+// 5. A sweepRecent that throws is counted (keys.beamSweepFailures, consecutive runs); the
+//    BEAM_SWEEP_FAILURE_ALERT_RUNS-th failed run in a row tells the owner, a good run ends the count (round 5).
 // The core's step 1 (sweep.ts) then fulfils the paid ones (a late success on a released hold -> the CRITICAL
 // needs_attention of owner decision 3), hands refunded ones to fulfil, and releases the expired ones with the
 // guard and the release note ('unconfirmed' ones with the pending-released warning).
@@ -106,11 +116,18 @@ export const BEAM_SCAN_MAX_PAGES = 50;
 const MARKER_TTL_SECONDS = 7 * 24 * 3600;
 /** The foreign-link cache's value for a link carrying another payment mode's valid note (another deployment's payment). */
 const OTHER_MODE_LINK = "other-mode";
+/** Failed sweepRecent runs in a row before the owner is told (as sweep.ts CLOUDBEDS_FAILURE_ALERT_RUNS). */
+export const BEAM_SWEEP_FAILURE_ALERT_RUNS = 3;
+/** TTL of the failed-run count (refreshed by every failed run; a good run deletes it). */
+const SWEEP_FAILURE_TTL_SECONDS = 24 * 3600;
+/** How long at most a released link whose last reading showed a PENDING charge stays watched (keys.beamLinksPending). */
+export const BEAM_PENDING_WATCH_DAYS = 30;
 
 /**
  * Tracks a link we just created in links-open (score = its expiresAt), so every sweeper run reads it until its
- * booking is done or its hold released (S4.2). The checkout adapter calls it once the PaymentRecord is written
- * (design S4.3 afterCreate; the test kit's stand-in adapter does the same).
+ * booking is done or its hold released (S4.2). The checkout adapter (payments/beamCheckoutAdapter.ts, which
+ * beamCheckout.ts startBeamCheckout and the test kit run) calls it in afterCreate, once the PaymentRecord is
+ * written (design S4.3).
  */
 export async function trackOpenLink(kv: Pick<KvStore, "zadd">, mode: string, linkId: string, expiresAtMs: number): Promise<void> {
   await kv.zadd(keys.beamLinksOpen(keyScope(mode)), expiresAtMs, linkId);
@@ -190,8 +207,17 @@ interface TrackedLink {
   linkId: string;
   key: string;
   facts: BeamNote;
+  /**
+   * The Beam merchant the link was created under: the record's, else (the signed note carries none) this
+   * deployment's, whose API key just read the link.
+   */
+  merchantId: string;
   /** The charge scan showed a SUCCEEDED charge of the link. */
   listedPaid: boolean;
+  /** Its hold was released: from the late watch or keys.beamLinksPending, or moved to the late watch this run. */
+  watched: boolean;
+  /** keys.beamLinksPending lists it (as this run started). */
+  pendingWatched: boolean;
 }
 
 /** One sweeper run's view of the links whose readings keep failing (keys.beamReadFailures). */
@@ -412,37 +438,34 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
 
   const openKey = keys.beamLinksOpen(scope);
   const watchKey = keys.beamLinksWatch(scope);
+  const pendingKey = keys.beamLinksPending(scope);
   const readFailKey = keys.beamReadFailures(scope);
   const bookingOf = (facts: BeamNote | null) => (facts ? `booking ${facts.ref}, Cloudbeds reservation ${facts.reservationId}` : "booking unknown");
 
   /**
-   * The charge scan: 72 hours, or 7 days once the last complete deep pass is BEAM_DEEP_SCAN_EVERY_MS old (from
-   * sinceMs at the latest). [] when Beam refuses the unfiltered list (logged, the owner told once). Any other
-   * failure throws, and so does a scan that could not finish (a later page failed, the time budget or the page
-   * limit ran out): the charges it did not read may hold the payment of a hold we lost track of.
+   * One pass of the charge scan, from sinceMs: its charges, or null when Beam refuses the unfiltered list (logged
+   * on every run; told to the owner once per HTTP status a day, so a warning whose mail was lost comes again).
+   * Any other failure throws, and so does a pass that could not finish (a later page failed, the time budget or
+   * the page limit ran out): the charges it did not read may hold the payment of a hold we lost track of.
    */
-  async function scanCharges(nowMs: number, sinceMs: number): Promise<BeamCharge[]> {
-    const lastRaw = await deps.kv.get(keys.beamDeepScan(scope));
-    const last = lastRaw === null ? Number.NaN : Number(lastRaw);
-    const deep = !(Number.isFinite(last) && nowMs - last < BEAM_DEEP_SCAN_EVERY_MS);
-    const lookbackMs = deep ? beam.deepScanDays * DAY_MS : beam.scanLookbackHours * 3_600_000;
+  async function scanPass(nowMs: number, sinceMs: number, deep: boolean): Promise<BeamCharge[] | null> {
     let scan: ChargeScan;
     try {
-      scan = await listLinkChargesSince(beam, { sinceMs: Math.min(sinceMs, nowMs - lookbackMs), maxPages: BEAM_SCAN_MAX_PAGES }, deps.fetchImpl, callOptions());
+      scan = await listLinkChargesSince(beam, { sinceMs, maxPages: BEAM_SCAN_MAX_PAGES }, deps.fetchImpl, callOptions());
     } catch (e) {
       if (!isScanRefusal(e)) throw e;
       deps.log("beam_scan_refused", { status: e.status, errorCode: e.errorCode });
-      if (await firstReport("scan-refused", String(e.status))) {
+      if (await firstReport("scan-refused", `${e.status}:${new Date(nowMs).toISOString().slice(0, 10)}`)) {
         await deps.alert(
           "Beam refused the sweeper's payment scan",
           [
             `Beam answered the sweeper's list of recent payment-link charges (GET /api/v1/charges without a link id) with ${problemOf(e)}, so the sweeper only checks the payment links the booking engine tracks: the open ones, and released ones for ${beam.lateWatchDays} days.`,
             "A payment on a link the booking engine lost track of (for example after a Redis data loss) is then not found automatically. Ask Beam whether the unfiltered charge list is available for this account.",
           ],
-          { key: "beam-scan-refused", severity: "warning" },
+          { key: `beam-scan-refused:${e.status}`, severity: "warning" },
         );
       }
-      return [];
+      return null;
     }
     deps.log("beam_sweep_scan", {
       deep,
@@ -456,8 +479,32 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
         ? new BeamApiError(err.status ?? 0, err.errorCode, `Beam charge scan stopped on a later page: ${err.message}`)
         : new BeamApiError(0, "SCAN_INCOMPLETE", "Beam charge scan did not finish (time budget or page limit)");
     }
-    if (deep) await deps.kv.set(keys.beamDeepScan(scope), String(nowMs), MARKER_TTL_SECONDS);
     return scan.charges;
+  }
+
+  /**
+   * The charge scan: 72 hours, or 7 days once the last complete deep pass is BEAM_DEEP_SCAN_EVERY_MS old (from
+   * sinceMs at the latest). [] when Beam refuses the unfiltered list. A deep pass that fails is logged and the
+   * 72-hour pass runs in its place (its marker is not written, so the next run tries the deep pass again): a deep
+   * pass that keeps failing must not fail every run. The 72-hour pass throws as scanPass does.
+   */
+  async function scanCharges(nowMs: number, sinceMs: number): Promise<BeamCharge[]> {
+    const lastRaw = await deps.kv.get(keys.beamDeepScan(scope));
+    const last = lastRaw === null ? Number.NaN : Number(lastRaw);
+    if (!(Number.isFinite(last) && nowMs - last < BEAM_DEEP_SCAN_EVERY_MS)) {
+      let charges: BeamCharge[] | null | undefined;
+      try {
+        charges = await scanPass(nowMs, Math.min(sinceMs, nowMs - beam.deepScanDays * DAY_MS), true);
+      } catch (e) {
+        deps.log("beam_deep_scan_failed", { ...beamErrorInfo(e) });
+      }
+      if (charges === null) return [];
+      if (charges !== undefined) {
+        await deps.kv.set(keys.beamDeepScan(scope), String(nowMs), MARKER_TTL_SECONDS);
+        return charges;
+      }
+    }
+    return (await scanPass(nowMs, Math.min(sinceMs, nowMs - beam.scanLookbackHours * 3_600_000), false)) ?? [];
   }
 
   /** The links whose readings keep failing, as this run starts (one Redis read when there are none). */
@@ -536,7 +583,53 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     return next;
   }
 
-  /** A link Beam answers 404 for: it does not exist for these credentials, so it can never be paid (expired). */
+  /**
+   * One CRITICAL per link (keys.beamReported 'merchant-switch'): a link of ours created under another Beam merchant
+   * than BEAM_MERCHANT_ID, which Beam answers 404 for. The guest may have paid, or may still pay, on that
+   * merchant's page; nobody here can see it, so the hold is kept and the owner checks by hand.
+   */
+  async function reportOtherMerchant(t: Pick<TrackedLink, "linkId" | "facts" | "merchantId">): Promise<void> {
+    if (!(await firstReport("merchant-switch", t.linkId))) return;
+    const { ref, reservationId } = t.facts;
+    deps.log("beam_link_other_merchant", { linkId: t.linkId, ref });
+    await deps.alert(
+      `URGENT: Beam payment link ${t.linkId} for booking ${ref} belongs to another Beam merchant`,
+      [
+        `Beam payment link ${t.linkId} (booking ${ref}, Cloudbeds reservation ${reservationId}) was created under Beam merchant ${shown(t.merchantId)}, but this deployment's BEAM_MERCHANT_ID is ${shown(beam.merchantId)}, so Beam answers that the link does not exist. The sweeper can't tell whether the guest paid: the hold is kept and nothing was confirmed, cancelled or refunded.`,
+        `Check the link in the Beam Lighthouse of merchant ${shown(t.merchantId)}: if the guest paid, confirm reservation ${reservationId} by hand (or refund the full amount there); if nobody paid, disable the link there and cancel reservation ${reservationId} in Cloudbeds. Never change BEAM_MERCHANT_ID while payment links are still open.`,
+      ],
+      { key: `beam-merchant-switch:${t.linkId}`, severity: "critical" },
+    );
+  }
+
+  /**
+   * Why Beam's 404 for a link of ours does NOT mean that it can never be paid, or null when it does (round-4
+   * triage). Beam reads the merchant from the API key, so every link of another merchant answers 404, paid and
+   * payable ones too: a 404 is final only for a link created under this BEAM_MERCHANT_ID whose expiry plus the
+   * pending grace is over (before that the guest may still be on Beam's page). The error is not a 404, so the
+   * reading fails like any other (its hold is kept: RecentPayments.unread; told after 60 minutes of failures).
+   * A link of another merchant also raises its CRITICAL (best effort: the hold is kept either way).
+   */
+  async function missingProblem(t: Pick<TrackedLink, "linkId" | "facts" | "merchantId">): Promise<BeamApiError | null> {
+    if (t.merchantId !== beam.merchantId) {
+      await reportOtherMerchant(t).catch((e: unknown) => deps.log("beam_merchant_alert_failed", { linkId: t.linkId, ...beamErrorInfo(e) }));
+      return new BeamApiError(0, "LINK_OF_ANOTHER_MERCHANT", `Beam payment link ${t.linkId} was created under another Beam merchant than BEAM_MERCHANT_ID`);
+    }
+    if (nowOf(deps) < t.facts.expiresAt + graceMs) {
+      deps.log("beam_link_missing_early", { linkId: t.linkId, ref: t.facts.ref });
+      return new BeamApiError(0, "NOT_FOUND_BEFORE_EXPIRY", `Beam answered 404 for payment link ${t.linkId} before its expiry and pending grace were over`);
+    }
+    return null;
+  }
+
+  /** A released link stays watched while its last reading shows a PENDING charge (keys.beamLinksPending). Best effort. */
+  async function notePendingWatch(t: TrackedLink, pending: boolean): Promise<void> {
+    if (pending === t.pendingWatched) return;
+    const write = pending ? deps.kv.zadd(pendingKey, nowOf(deps), t.linkId) : deps.kv.zrem(pendingKey, t.linkId);
+    await write.catch((e: unknown) => deps.log("beam_pending_watch_failed", { linkId: t.linkId, error: e instanceof Error ? e.message.slice(0, 200) : "unknown" }));
+  }
+
+  /** A link Beam answers 404 for that can never be paid (missingProblem answered null): expired. */
   function missingPayment(t: TrackedLink): GatewayPayment {
     return {
       key: t.key,
@@ -550,17 +643,22 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     };
   }
 
-  /** RecentPayment.read of one link: a fresh reading (disabled first when it needs it), in the gateway's shape. */
+  /**
+   * RecentPayment.read of one link: a fresh reading (disabled first when it needs it), in the gateway's shape. A
+   * released link's reading also keeps keys.beamLinksPending up to date.
+   */
   async function readTracked(run: ReadFailures, t: TrackedLink): Promise<GatewayPayment> {
     let payment: GatewayPayment;
     try {
       let reading = await readLink(t.key);
       if (reading.state.needsDisable && reading.owner) reading = await disableExpired(reading, t.facts);
       payment = await paymentOf(reading);
+      if (t.watched) await notePendingWatch(t, reading.state.pending.length > 0);
     } catch (e) {
-      if (!isBeamNotFound(e)) {
-        await noteReadFailure(run, t.linkId, t.facts, e).catch(() => undefined);
-        throw e;
+      const failure = isBeamNotFound(e) ? await missingProblem(t) : e;
+      if (failure !== null) {
+        await noteReadFailure(run, t.linkId, t.facts, failure).catch(() => undefined);
+        throw failure;
       }
       deps.log("beam_link_missing", { linkId: t.linkId, ref: t.facts.ref });
       payment = missingPayment(t);
@@ -592,7 +690,12 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     return entry;
   }
 
-  /** A not-ours link's SUCCEEDED charges that name an MSV booking: one warning per charge (keys.beamReported). */
+  /**
+   * A not-ours link's SUCCEEDED charges that name an MSV booking: one CRITICAL per charge (keys.beamReported). Money
+   * was taken under our booking reference with no booking behind it (owner decision 3's 'guest paid, no booking'),
+   * so the alert is stored and re-sent by every sweeper run until a mail goes out (round 5: as a warning, the one
+   * send behind the set-once marker could be lost).
+   */
   async function reportUnknownPayments(linkId: string, charges: BeamCharge[], link: BeamPaymentLink | null): Promise<void> {
     for (const c of charges) {
       if (c?.status !== "SUCCEEDED" || c.sourceId !== linkId) continue;
@@ -606,12 +709,47 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
         [
           `Charge ${chargeId} (${money(c.amount)}, ${beamMethodName(methodTypeOf(c))}) on payment link ${linkId} carries our booking reference but neither a record nor a valid signed note. Check it in Lighthouse and Cloudbeds; if it is a real guest payment, book or refund it by hand.`,
         ],
-        { key: `beam-unknown-msv:${chargeId}`, severity: "warning" },
+        { key: `beam-unknown-msv:${chargeId}`, severity: "critical" },
       );
     }
   }
 
+  /** A failed step 1: counted (runs in a row); the BEAM_SWEEP_FAILURE_ALERT_RUNS-th tells the owner. Never throws. */
+  async function noteSweepFailure(e: unknown): Promise<void> {
+    try {
+      const failKey = keys.beamSweepFailures(scope);
+      const n = Number(await deps.kv.get(failKey)) + 1;
+      await deps.kv.set(failKey, String(n), SWEEP_FAILURE_TTL_SECONDS);
+      deps.log("beam_sweep_failed", { runs: n, ...beamErrorInfo(e) });
+      if (n < BEAM_SWEEP_FAILURE_ALERT_RUNS) return;
+      await deps.alert(
+        "The booking sweeper cannot check Beam payments",
+        [
+          `${n} sweeper runs in a row could not finish Beam's payment check (the charge scan, or the reading of a payment link whose record is gone): ${problemOf(e)}.`,
+          "While this lasts no Beam hold is released (the units stay blocked) and a payment on a link the booking engine lost track of is not found; paid bookings already known are still retried and stored urgent alerts re-sent. Check status.beamcheckout.com, the Beam API key and the Vercel logs (beam_sweep_scan, beam_sweep_link_unreadable).",
+        ],
+        { key: "beam-sweep-failing", severity: "warning" },
+      );
+    } catch {
+      // Best effort only.
+    }
+  }
+
+  /** Step 1 for Beam, with its failures counted (round 5): a good run ends the count (one Redis read when there is none). */
   async function sweepRecent(sinceMs: number): Promise<RecentPayment[]> {
+    let listed: RecentPayment[];
+    try {
+      listed = await listRecent(sinceMs);
+    } catch (e) {
+      await noteSweepFailure(e);
+      throw e;
+    }
+    const failKey = keys.beamSweepFailures(scope);
+    if ((await deps.kv.get(failKey).catch(() => null)) !== null) await deps.kv.del(failKey).catch(() => undefined);
+    return listed;
+  }
+
+  async function listRecent(sinceMs: number): Promise<RecentPayment[]> {
     const nowMs = nowOf(deps);
     const scanned = new Map<string, BeamCharge[]>();
     for (const c of await scanCharges(nowMs, sinceMs)) {
@@ -620,8 +758,14 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     }
     const watchFrom = nowMs - beam.lateWatchDays * DAY_MS;
     for (const linkId of await deps.kv.zrangeByScore(watchKey, 0, watchFrom - 1, BEAM_TRACKED_LINKS_LIMIT)) await deps.kv.zrem(watchKey, linkId);
+    const pendingFrom = nowMs - BEAM_PENDING_WATCH_DAYS * DAY_MS;
+    for (const linkId of await deps.kv.zrangeByScore(pendingKey, 0, pendingFrom - 1, BEAM_TRACKED_LINKS_LIMIT)) await deps.kv.zrem(pendingKey, linkId);
     const open = await deps.kv.zrangeByScore(openKey, 0, Number.MAX_SAFE_INTEGER, BEAM_TRACKED_LINKS_LIMIT);
     const watched = await deps.kv.zrangeByScore(watchKey, watchFrom, Number.MAX_SAFE_INTEGER, BEAM_TRACKED_LINKS_LIMIT);
+    const pendingWatched = await deps.kv.zrangeByScore(pendingKey, pendingFrom, Number.MAX_SAFE_INTEGER, BEAM_TRACKED_LINKS_LIMIT);
+    // A released link is "watched" however this run lists it (the charge scan names it first while its charges are recent).
+    const watchedSet = new Set(watched);
+    const pendingSet = new Set(pendingWatched);
     const run = await readFailuresAt(nowMs);
 
     const tracked = new Map<string, TrackedLink>();
@@ -629,18 +773,25 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     const unreadable = new Set<string>();
     let firstUnreadable: unknown = null;
 
-    /** Classifies one link (ours: tracked; not ours: cached as foreign) and keeps links-open and the late watch tidy. */
-    const consider = async (linkId: string, from: "open" | "scan" | "watch"): Promise<void> => {
+    /**
+     * Classifies one link (ours: tracked; not ours: cached as foreign) and keeps links-open, the late watch and
+     * keys.beamLinksPending tidy.
+     */
+    const consider = async (linkId: string, from: "open" | "scan" | "watch" | "pending"): Promise<void> => {
       if (considered.has(linkId)) return;
       considered.add(linkId);
-      const zset = from === "open" ? openKey : from === "watch" ? watchKey : null;
+      const zset = from === "open" ? openKey : from === "watch" ? watchKey : from === "pending" ? pendingKey : null;
       const untrack = async () => {
         if (zset) await deps.kv.zrem(zset, linkId);
       };
       if (!isBeamLinkId(linkId)) return untrack();
       const key = beamKeyOf(linkId);
       const fromScan = scanned.get(linkId) ?? [];
-      let facts: BeamNote | null = await readRecord(deps.kv, linkId);
+      const record = await readRecord(deps.kv, linkId);
+      let facts: BeamNote | null = record;
+      // The note carries no merchant: a link read through it was just read with this deployment's API key.
+      let merchantId = record?.merchantId ?? beam.merchantId;
+      let watching = watchedSet.has(linkId) || pendingSet.has(linkId);
       if (facts && facts.mode !== mode) {
         deps.log("beam_payment_other_mode", { linkId, source: "record", mode: facts.mode });
         return;
@@ -676,6 +827,7 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
           return;
         }
         facts = reading.owner.facts;
+        if (reading.owner.source === "record") merchantId = reading.owner.facts.merchantId;
       }
       if (from === "open") {
         if ((await deps.kv.get(keys.fulfilDone(key))) !== null) {
@@ -686,6 +838,7 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
           // Released: watched for a late success (owner decision 3).
           await untrack();
           await deps.kv.zadd(watchKey, nowMs, linkId);
+          watching = true;
         } else if (facts.expiresAt < watchFrom) {
           // Closed longer than the late watch (its release kept being refused): the charge scan still sees it.
           await untrack();
@@ -693,11 +846,21 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
           if (fromScan.length === 0) return;
         }
       }
-      tracked.set(linkId, { linkId, key, facts, listedPaid: fromScan.some((c) => c.status === "SUCCEEDED") });
+      tracked.set(linkId, {
+        linkId,
+        key,
+        facts,
+        merchantId,
+        listedPaid: fromScan.some((c) => c.status === "SUCCEEDED"),
+        watched: watching,
+        pendingWatched: pendingSet.has(linkId),
+      });
     };
     for (const linkId of open) await consider(linkId, "open");
     for (const linkId of scanned.keys()) await consider(linkId, "scan");
     for (const linkId of watched) await consider(linkId, "watch");
+    // Released links still waiting on a PENDING charge, past the late watch (BEAM_PENDING_WATCH_DAYS at most).
+    for (const linkId of pendingWatched) await consider(linkId, "pending");
 
     // Failure records of links this run no longer lists (or that turned out not to be ours) are dropped.
     for (const linkId of [...run.failing]) if (!tracked.has(linkId) && !unreadable.has(linkId)) await clearReadFailure(run, linkId);
@@ -723,14 +886,18 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     text,
     doneTtlSeconds: BEAM_RECORD_TTL_SECONDS,
     async releaseGuard(key) {
-      // A key that is not a Beam key is never released by this guard; a link Beam does not know can never be paid.
-      if (linkIdOf(key) === null) return false;
+      // A key that is not a Beam key is never released by this guard.
+      const linkId = linkIdOf(key);
+      if (linkId === null) return false;
       try {
         const { state } = await readLink(key);
         return state.state === "expired" || state.state === "failed";
       } catch (e) {
-        if (isBeamNotFound(e)) return true;
-        throw e;
+        if (!isBeamNotFound(e)) throw e;
+        // A link Beam does not know can never be paid only when our record says it is this merchant's and its
+        // expiry plus the grace is over (see missingProblem); without a record nothing says so: the hold stays.
+        const record = await readRecord(deps.kv, linkId);
+        return record !== null && record.merchantId === beam.merchantId && nowOf(deps) >= record.expiresAt + graceMs;
       }
     },
     parseHoldId: parseBeamHoldIdentifier,

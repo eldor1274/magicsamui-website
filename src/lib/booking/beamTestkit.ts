@@ -239,6 +239,21 @@ export interface BeamHeld {
   body: CheckoutSuccess;
 }
 
+/**
+ * Whether a card's last digits show in `text` the way a leak would show them: standing alone, not inside a longer id
+ * or number. The booking refs, the fake Cloudbeds' request ids and UUID-shaped keys, where four digits could stand
+ * alone by chance, are blanked first, so the privacy checks can never collide with a random id (round-4 triage:
+ * '4729' inside reservationId 7000000047298 or requestId fake-467264729 failed 5 runs in 400).
+ */
+export function cardDigitsShown(text: string, digits: string): boolean {
+  if (!/^\d{4}$/.test(digits)) throw new RangeError("cardDigitsShown: four digits");
+  const blanked = text
+    .replace(/MSV-\d{8}-[A-Z0-9]{4}/g, "MSV-REF")
+    .replace(/fake-\d+/g, "fake-ID")
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "UUID");
+  return new RegExp(`(?<![0-9A-Za-z])${digits}(?![0-9A-Za-z])`).test(blanked);
+}
+
 /** beamCheckout that must succeed. */
 export async function beamHeld(kit: BeamKit, payMethod: PayMethod = "card_ewallet", items: CartItemInput[] = HONEYMOON): Promise<BeamHeld> {
   const res = await beamCheckout(kit, payMethod, items);

@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { ALERT_WINDOW_SECONDS } from "./alerts.ts";
 import { createPaymentLink } from "./beam.ts";
 import type { BeamCreatePaymentLinkRequest } from "./beam.ts";
-import { BEAM_CLOUDBEDS_METHOD, beamHeld, makeBeamKit } from "./beamTestkit.ts";
+import { BEAM_CLOUDBEDS_METHOD, beamHeld, cardDigitsShown, makeBeamKit } from "./beamTestkit.ts";
 import type { BeamHeld, BeamKit } from "./beamTestkit.ts";
 import { BEAM_BAD_SIGNATURE_ALERT_THRESHOLD, BEAM_TXN_TTL_SECONDS, beamWebhookEventOf, handleBeamWebhook } from "./beamWebhook.ts";
 import type { BeamWebhookResult } from "./beamWebhook.ts";
@@ -724,7 +724,7 @@ test("the card's last digits and the guest's details in Beam's charge body never
   const h = await beamHeld(kit);
   const card = kit.fakeBeam.pay(h.linkId, "CARD", { card: { brand: "VISA", last4: "4729", countryAlpha2: "TH" } });
   const ev = kit.fakeBeam.signedEvent("charge.succeeded", card.chargeId);
-  assert.match(ev.raw, /4729/, "Beam sends them");
+  assert.ok(cardDigitsShown(ev.raw, "4729"), "Beam sends them");
   assert.match(ev.raw, /guest@example\.com/);
   await deliver(kit, ev);
   await deliver(kit, kit.fakeBeam.signedEvent("transaction.created", card.chargeId));
@@ -732,5 +732,8 @@ test("the card's last digits and the guest's details in Beam's charge body never
   await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", refundId));
   assert.ok(kit.alerts.length >= 2);
   const everything = JSON.stringify([kit.logs, kit.alerts, kv.writes, kit.fakeCb.calls.filter((c) => c.method !== "postReservation")]);
-  for (const pii of ["4729", "guest@example.com", "0812345678", "Refund requested by"]) assert.ok(!everything.includes(pii), pii);
+  for (const pii of ["guest@example.com", "0812345678", "Refund requested by"]) assert.ok(!everything.includes(pii), pii);
+  // The digits standing alone, as a leak would show them (random ids can carry them by chance), and no last4 field.
+  assert.equal(cardDigitsShown(everything, "4729"), false);
+  assert.doesNotMatch(everything, /"last4"/);
 });

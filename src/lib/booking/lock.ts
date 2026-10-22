@@ -27,7 +27,7 @@ export const BEAM_DISPUTE_WINDOW_DAYS = 120;
 export const BEAM_RECORD_TTL_SECONDS = (BOOKING_WINDOW_MONTHS * 31 + BEAM_DISPUTE_WINDOW_DAYS + 30) * 24 * 3600;
 
 /** The set-once "told the owner" markers of the Beam payment flow (keys.beamReported). */
-export type BeamReportKind = "dup-charge" | "record-missing" | "unknown-payment" | "foreign-link" | "refund-ambiguous" | "scan-refused";
+export type BeamReportKind = "dup-charge" | "record-missing" | "unknown-payment" | "foreign-link" | "refund-ambiguous" | "scan-refused" | "merchant-switch";
 
 /**
  * Key scope of a payment mode: "live" for stripe-live, else the mode itself
@@ -112,7 +112,8 @@ export const keys = {
   /**
    * Set-once "told the owner" marker: a duplicate charge, a missing record, an unknown MSV payment, a foreign
    * link (cached as not ours: the sweeper's 8-day cache, S4.2), a refunded link with several successful charges
-   * (S4.1), Beam refusing the sweeper's unfiltered charge scan (S4.2).
+   * (S4.1), Beam refusing the sweeper's unfiltered charge scan (S4.2; id = '{status}:{UTC day}' since round 5),
+   * a link of another Beam merchant than BEAM_MERCHANT_ID that Beam answers 404 for (round 5).
    */
   beamReported: (scope: string, kind: BeamReportKind, id: string) => `msv:${scope}:beam:reported:${kind}:${id}`,
   /** A Beam transaction (PAYMENT, REFUND, VOID, CHARGEBACK) already handled by the webhook. */
@@ -131,6 +132,13 @@ export const keys = {
   beamPaused: (scope: string) => `msv:${scope}:beam:paused`,
   /** The last 7-day charge scan (ms). */
   beamDeepScan: (scope: string) => `msv:${scope}:beam:deepscan`,
+  /** Consecutive sweeper runs whose Beam step 1 (sweepRecent) failed: a run of them alerts (round 5). */
+  beamSweepFailures: (scope: string) => `msv:${scope}:beam:sweepfail`,
+  /**
+   * Sorted set of released links whose last reading showed a PENDING charge (score = when first seen so, ms):
+   * watched past BEAM_LATE_WATCH_DAYS until that charge settles, for BEAM_PENDING_WATCH_DAYS at most (round 5).
+   */
+  beamLinksPending: (scope: string) => `msv:${scope}:beam:links:pending`,
 };
 
 /**

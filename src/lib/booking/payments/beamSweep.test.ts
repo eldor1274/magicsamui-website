@@ -17,17 +17,26 @@ import assert from "node:assert/strict";
 import { ALERT_WINDOW_SECONDS } from "../alerts.ts";
 import { BeamApiError, createPaymentLink } from "../beam.ts";
 import type { BeamCreatePaymentLinkRequest } from "../beam.ts";
-import { beamHeld, makeBeamKit } from "../beamTestkit.ts";
+import { BEAM_MERCHANT_ID, beamHeld, cardDigitsShown, makeBeamKit } from "../beamTestkit.ts";
 import type { BeamHeld, BeamKit } from "../beamTestkit.ts";
+import { fulfilPayment } from "../fulfil.ts";
 import { createMemoryKv } from "../kv.ts";
 import { keyScope, keys } from "../lock.ts";
+import { createFakeBeam } from "../mock/fakeBeam.ts";
 import type { FakeBeamRefundLinkStatus } from "../mock/fakeBeam.ts";
-import { STALE_HOLD_MS, runSweep } from "../sweep.ts";
+import { STALE_HOLD_MS, runSweep, sweepPaidAndAlerts, sweepRecentPayments } from "../sweep.ts";
 import type { SweepSummary } from "../sweep.ts";
 import { NOW, TOKEN_SECRET, recordingKv } from "../testkit.ts";
 import type { CartItemInput } from "../types.ts";
-import { BEAM_FAILURE_ALERT_MS, BEAM_FOREIGN_CACHE_SECONDS, beamGateway, trackOpenLink } from "./beamGateway.ts";
-import type { BeamGateway } from "./beamGateway.ts";
+import {
+  BEAM_FAILURE_ALERT_MS,
+  BEAM_FOREIGN_CACHE_SECONDS,
+  BEAM_PENDING_WATCH_DAYS,
+  BEAM_SWEEP_FAILURE_ALERT_RUNS,
+  beamGateway,
+  trackOpenLink,
+} from "./beamGateway.ts";
+import type { BeamGateway, BeamGatewayDeps } from "./beamGateway.ts";
 import { buildBeamNote, readRecord, writeRecord } from "./beamRecord.ts";
 import { BEAM_EXPIRY_SKEW_MS } from "./beamState.ts";
 
@@ -41,6 +50,8 @@ const PAST_ALERT_WINDOW_MS = ALERT_WINDOW_SECONDS * 1000 + MIN;
 const ORPHAN_STALE_MS = STALE_HOLD_MS + 7 * HOUR + MIN;
 const GARDEN: CartItemInput[] = [{ slug: "garden-suite", ratePlanId: "standard", adults: 2, addonIds: [] }];
 const SCOPE = keyScope("beam-playground");
+/** BEAM_MERCHANT_ID after the owner moved the deployment to another Beam merchant. */
+const NEW_MERCHANT_ID = "m_NewMerchantAfterSwitch00000";
 
 const sweep = (kit: BeamKit, gw: BeamGateway = kit.gw): Promise<SweepSummary> => runSweep(kit.deps, gw);
 const res = (kit: BeamKit, id: string) => {
@@ -58,6 +69,7 @@ const cbWrites = (kit: BeamKit) => kit.fakeCb.calls.filter((c) => ["postPayment"
 const members = (kit: BeamKit, key: string) => kit.deps.kv.zrangeByScore(key, 0, Number.MAX_SAFE_INTEGER, 1000);
 const inOpen = async (kit: BeamKit, linkId: string) => (await members(kit, keys.beamLinksOpen(SCOPE))).includes(linkId);
 const inWatch = async (kit: BeamKit, linkId: string) => (await members(kit, keys.beamLinksWatch(SCOPE))).includes(linkId);
+const inPending = async (kit: BeamKit, linkId: string) => (await members(kit, keys.beamLinksPending(SCOPE))).includes(linkId);
 const expiryOf = (kit: BeamKit, linkId: string) => {
   const ms = kit.fakeBeam.link(linkId).expiresAtMs;
   assert.ok(ms !== null);
@@ -331,7 +343,7 @@ test("the owner's own Lighthouse link is ignored and cached: one GET in 8 days, 
   assert.equal(linkGets(kit, own.id), 1);
 });
 
-test("a link that is not ours but whose SUCCEEDED charge names an MSV booking: one warning, never handled as ours", async () => {
+test("a link that is not ours but whose SUCCEEDED charge names an MSV booking: one CRITICAL (stored until delivered), never handled as ours", async () => {
   const kit = makeBeamKit();
   const h = await beamHeld(kit);
   const fake = await createPaymentLink(kit.beam, linkBody(kit, "msv1|forged", h.ref), "forged-1", kit.fakeBeam.fetch);
@@ -341,7 +353,7 @@ test("a link that is not ours but whose SUCCEEDED charge names an MSV booking: o
   await sweep(kit);
   const warned = withSubject(kit, /^A Beam payment names booking/);
   assert.equal(warned.length, 1);
-  assert.equal(warned[0].severity, "warning");
+  assert.equal(warned[0].severity, "critical", "money taken under our ref with no booking: stored and re-sent until delivered (round 5)");
   assert.equal(warned[0].subject, `A Beam payment names booking ${h.ref} but we have no record of it`);
   assert.equal(
     warned[0].lines[0],
@@ -420,12 +432,12 @@ test("any other scan failure fails the run (every hold kept): a 5xx, a later pag
   const kit = makeBeamKit();
   const h = await beamHeld(kit);
   kit.now.ms += 31 * MIN;
-  kit.fakeBeam.failNext(/^GET \/api\/v1\/charges$/, 503);
-  kit.fakeBeam.failNext(/^GET \/api\/v1\/charges$/, 503);
+  // Each pass is retried once by beam.ts; the failed deep pass is followed by the 72-hour pass (round 5): 4 failures.
+  for (let i = 0; i < 4; i++) kit.fakeBeam.failNext(/^GET \/api\/v1\/charges$/, 503);
   await assert.rejects(sweep(kit), (e: unknown) => e instanceof BeamApiError && e.status === 503);
   assert.equal(res(kit, h.reservationId).status, "not_confirmed");
   // A 429 is Beam asking us to slow down, not a refusal of the list.
-  kit.fakeBeam.rateLimitNext(2, /^GET \/api\/v1\/charges$/);
+  kit.fakeBeam.rateLimitNext(4, /^GET \/api\/v1\/charges$/);
   await assert.rejects(sweep(kit), (e: unknown) => e instanceof BeamApiError && e.status === 429);
   assert.equal(res(kit, h.reservationId).status, "not_confirmed");
   // More than a page of charges (another guest's declined attempts), and the second page fails.
@@ -606,24 +618,297 @@ test("a record of another payment mode is never listed (that mode's sweeper owns
   assert.equal(kit2.fakeBeam.link(g.linkId).status, "ACTIVE");
 });
 
-test("a link Beam answers 404 for reads as expired, never as an error: its hold is released (the guard agrees)", async () => {
+test("a link of this merchant Beam answers 404 for: kept until its expiry plus the grace (a failed reading), then read as expired and released (the guard agrees)", async () => {
   const kit = makeBeamKit();
   const h = await beamHeld(kit);
+  const expiresAt = expiryOf(kit, h.linkId);
   kit.fakeBeam.links.delete(h.linkId);
-  assert.equal(await kit.gw.releaseGuard?.(h.key), true, "a link Beam does not know can never be paid");
+  // A 404 before the expiry plus the pending grace may pass (the guest may still be on Beam's page): never final.
+  assert.equal(await kit.gw.releaseGuard?.(h.key), false, "before the expiry plus the grace the guard keeps the hold");
   assert.equal(await kit.gw.releaseGuard?.("cs_test_a1b2c3"), false, "a key that is not a Beam key is never released by the Beam guard");
-  const [listed] = await kit.gw.sweepRecent(NOW);
+  let [listed] = await kit.gw.sweepRecent(NOW);
+  await assert.rejects(listed.read(), (e: unknown) => e instanceof BeamApiError && e.errorCode === "NOT_FOUND_BEFORE_EXPIRY" && !kit.gw.isMissing(e));
+  kit.now.ms = expiresAt + GRACE_MS - MIN;
+  let s = await sweep(kit);
+  assert.equal(s.released, 0);
+  assert.ok(s.errors >= 1);
+  assert.equal(res(kit, h.reservationId).status, "not_confirmed", "kept: the link may still be paid");
+  assert.ok(logged(kit, "beam_link_missing_early").length >= 2);
+  assert.equal(logged(kit, "beam_link_missing").length, 0);
+  // From the expiry plus the grace, a link of this merchant that Beam does not know can never be paid.
+  kit.now.ms = expiresAt + GRACE_MS;
+  assert.equal(await kit.gw.releaseGuard?.(h.key), true);
+  [listed] = await kit.gw.sweepRecent(kit.now.ms);
   const p = await listed.read();
   assert.equal(p.state, "expired");
   assert.equal(p.meta?.reservationId, h.reservationId);
   assert.equal(p.attempted, false);
-  kit.now.ms += 31 * MIN;
-  const s = await sweep(kit);
+  s = await sweep(kit);
   assert.equal(s.errors, 0);
   assert.equal(s.released, 1);
   assert.equal(res(kit, h.reservationId).status, "canceled");
   assert.ok(logged(kit, "beam_link_missing").length >= 1);
   assert.equal(kit.alerts.length, 0);
+  assert.deepEqual(await members(kit, keys.beamReadFailures(SCOPE)), [], "the final reading ended the failure record");
+  // Without its record nothing says whose link it was or when it expired: the guard keeps the hold.
+  const kit2 = makeBeamKit();
+  const g = await beamHeld(kit2);
+  kit2.fakeBeam.links.delete(g.linkId);
+  await kit2.deps.kv.del(keys.beamPayment(g.linkId));
+  kit2.now.ms += DAY;
+  assert.equal(await kit2.gw.releaseGuard?.(g.key), false);
+});
+
+/** The same deployment after the owner switched BEAM_MERCHANT_ID (and its API key): Beam knows none of the older links. */
+function switchedMerchant(kit: BeamKit): { deps: BeamGatewayDeps; gw: BeamGateway } {
+  const merchantId = NEW_MERCHANT_ID;
+  const fake = createFakeBeam({ now: () => kit.now.ms, merchantId, apiKey: kit.beam.apiKey, base: "playground" });
+  const beam = { ...kit.beam, merchantId };
+  const deps: BeamGatewayDeps = { ...kit.deps, beam, config: { ...kit.config, beam }, fetchImpl: fake.fetch };
+  return { deps, gw: beamGateway(deps) };
+}
+
+test("a merchant switch while links are open: a paid link (webhook lost) and a payable one keep their holds, one CRITICAL per link", async () => {
+  for (const paid of [true, false]) {
+    const label = paid ? "paid before the switch, webhook lost" : "paid on the old merchant's page after the switch";
+    const kit = makeBeamKit();
+    const h = await beamHeld(kit);
+    if (paid) kit.fakeBeam.pay(h.linkId, "CARD");
+    const after = switchedMerchant(kit);
+    kit.now.ms += 5 * MIN;
+    await runSweep(after.deps, after.gw);
+    assert.equal(res(kit, h.reservationId).status, "not_confirmed", `${label}: kept at once`);
+    assert.notEqual(await kit.deps.kv.get(keys.alerted(SCOPE, `beam-merchant-switch:${h.linkId}`)), null, `${label}: alert key beam-merchant-switch:{linkId}`);
+    kit.now.ms += 5 * MIN;
+    if (!paid) kit.fakeBeam.pay(h.linkId, "CARD");
+    // Hours of sweeps on the new merchant: Beam answers 404 for the old link every time.
+    for (let i = 0; i < 12; i++) {
+      kit.now.ms += 30 * MIN;
+      const s = await runSweep(after.deps, after.gw);
+      assert.equal(s.released, 0, `${label}: run ${i}`);
+    }
+    assert.equal(res(kit, h.reservationId).status, "not_confirmed", `${label}: never released`);
+    assert.equal(calls(kit, "putReservation").filter((x) => x.params.status === "canceled").length, 0, label);
+    assert.equal(calls(kit, "postPayment").length, 0, label);
+    const urgent = withSubject(kit, /belongs to another Beam merchant$/);
+    assert.equal(urgent.length, 1, `${label}: one CRITICAL for the link`);
+    assert.equal(urgent[0].severity, "critical");
+    assert.equal(urgent[0].subject, `URGENT: Beam payment link ${h.linkId} for booking ${h.ref} belongs to another Beam merchant`);
+    assert.deepEqual(urgent[0].lines, [
+      `Beam payment link ${h.linkId} (booking ${h.ref}, Cloudbeds reservation ${h.reservationId}) was created under Beam merchant ${BEAM_MERCHANT_ID}, but this deployment's BEAM_MERCHANT_ID is ${NEW_MERCHANT_ID}, so Beam answers that the link does not exist. The sweeper can't tell whether the guest paid: the hold is kept and nothing was confirmed, cancelled or refunded.`,
+      `Check the link in the Beam Lighthouse of merchant ${BEAM_MERCHANT_ID}: if the guest paid, confirm reservation ${h.reservationId} by hand (or refund the full amount there); if nobody paid, disable the link there and cancel reservation ${h.reservationId} in Cloudbeds. Never change BEAM_MERCHANT_ID while payment links are still open.`,
+    ]);
+    assert.equal(await kit.deps.kv.get(keys.beamReported(SCOPE, "merchant-switch", h.linkId)), "1");
+    assert.equal(withSubject(kit, /could not be read for 60 minutes$/).length, 1, `${label}: the failing reading is told too`);
+    assert.ok(logged(kit, "sweep_session_error").some((l) => l.data?.sessionId === h.key), label);
+    assert.equal(await after.gw.releaseGuard?.(h.key), false, `${label}: the guard never releases a link of another merchant`);
+  }
+});
+
+/** The kit's gateway whose fetch answers Beam's unfiltered charge list (the scan) with `gate.status` while `gate.on`; link reads work. */
+function failingScan(kit: BeamKit, status = 503, errorCode = "INTERNAL_SERVER_ERROR"): { deps: BeamGatewayDeps; gw: BeamGateway; gate: { on: boolean; status: number; errorCode: string } } {
+  const gate = { on: true, status, errorCode };
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input instanceof Request ? input.url : input));
+    if (gate.on && url.pathname === "/api/v1/charges" && !url.searchParams.has("sourceId")) {
+      const body = { code: gate.status, message: "simulated", error: { errorCode: gate.errorCode, errorMessage: "simulated" } };
+      return new Response(JSON.stringify(body), { status: gate.status });
+    }
+    return kit.fakeBeam.fetch(input, init);
+  }) as typeof fetch;
+  const deps: BeamGatewayDeps = { ...kit.deps, fetchImpl };
+  return { deps, gw: beamGateway(deps), gate };
+}
+
+test("a Beam step 1 that throws: sweepPaidAndAlerts still confirms a paid booking and re-sends a stored CRITICAL, releases nothing, writes the heartbeat", async () => {
+  const kit = makeBeamKit();
+  // A paid booking whose first confirmation failed (Cloudbeds down): on the unconfirmed-paid index.
+  const paid = await beamHeld(kit);
+  kit.fakeBeam.pay(paid.linkId, "CARD");
+  kit.fakeCb.failNext("postReservationNote", "http500");
+  kit.fakeCb.failNext("getReservation", "http500");
+  await assert.rejects(fulfilPayment(paid.key, kit.deps, kit.gw));
+  assert.deepEqual(await members(kit, keys.paidIndex(SCOPE)), [paid.key]);
+  // An unpaid hold whose link expires, and a CRITICAL whose mail failed (stored for re-sending).
+  const idle = await beamHeld(kit, "card_ewallet", GARDEN);
+  kit.mail.ok = false;
+  await kit.deps.alert("URGENT: stored test alert", ["Raised while the mail relay was down."], { key: "stored-test-alert", severity: "critical" });
+  kit.mail.ok = true;
+  assert.equal(withSubject(kit, /stored test alert/).length, 0);
+  kit.now.ms += 41 * MIN;
+  const { deps, gw } = failingScan(kit);
+  await assert.rejects(sweepRecentPayments(deps, gw), (e: unknown) => e instanceof BeamApiError && e.status === 503);
+  const s = await sweepPaidAndAlerts(deps, gw, { cloudbedsOk: true });
+  assert.equal(s.fulfilled, 1);
+  assert.equal(s.errors, 1, "the failed step 1");
+  assert.equal(s.released, 0);
+  assert.equal(s.undeliveredAlerts, 1);
+  assert.equal(res(kit, paid.reservationId).status, "confirmed");
+  assert.deepEqual(await members(kit, keys.paidIndex(SCOPE)), []);
+  assert.equal(withSubject(kit, /stored test alert/).length, 1, "the stored CRITICAL is re-sent");
+  assert.equal(res(kit, idle.reservationId).status, "not_confirmed", "no hold side: nothing released");
+  assert.equal(await kit.deps.kv.get(keys.lastSweep(SCOPE)), String(kit.now.ms), "the Beam heartbeat");
+  assert.ok(logged(kit, "sweep_done").some((l) => l.data?.step1Failed === true && l.data?.fulfilled === 1));
+
+  // One stuck for 2 hours (Cloudbeds still failing for it): the CRITICAL 'still not confirmed'; no heartbeat without Cloudbeds.
+  const kit2 = makeBeamKit();
+  const stuck = await beamHeld(kit2);
+  kit2.fakeBeam.pay(stuck.linkId, "CARD");
+  kit2.fakeCb.failNext("postReservationNote", "http500");
+  kit2.fakeCb.failNext("getReservation", "http500");
+  await assert.rejects(fulfilPayment(stuck.key, kit2.deps, kit2.gw));
+  kit2.now.ms += 2 * HOUR + MIN;
+  kit2.fakeCb.failNext("postReservationNote", "http500");
+  kit2.fakeCb.failNext("getReservation", "http500");
+  const late = failingScan(kit2);
+  await assert.rejects(sweepRecentPayments(late.deps, late.gw));
+  const s2 = await sweepPaidAndAlerts(late.deps, late.gw, { cloudbedsOk: false });
+  assert.equal(s2.paidUnconfirmed, 1);
+  assert.equal(s2.errors, 2);
+  const urgent = critical(kit2);
+  assert.equal(urgent.length, 1);
+  assert.equal(urgent[0].subject, `URGENT: paid booking ${stuck.ref} still not confirmed in Cloudbeds`);
+  assert.equal(await kit2.deps.kv.get(keys.lastSweep(SCOPE)), null);
+});
+
+test("failed Beam step-1 runs are counted: the 3rd in a row tells the owner once; a good run ends the count", async () => {
+  const kit = makeBeamKit();
+  await beamHeld(kit);
+  const { gw, gate } = failingScan(kit);
+  for (let i = 1; i <= BEAM_SWEEP_FAILURE_ALERT_RUNS + 1; i++) {
+    await assert.rejects(sweep(kit, gw), (e: unknown) => e instanceof BeamApiError && e.status === 503);
+    assert.equal(await kit.deps.kv.get(keys.beamSweepFailures(SCOPE)), String(i));
+    assert.equal(withSubject(kit, /^The booking sweeper cannot check Beam payments$/).length, i >= BEAM_SWEEP_FAILURE_ALERT_RUNS ? 1 : 0, `run ${i}`);
+    kit.now.ms += 10 * MIN;
+  }
+  const [told] = withSubject(kit, /^The booking sweeper cannot check Beam payments$/);
+  assert.equal(told.severity, "warning");
+  assert.equal(
+    told.lines[0],
+    "3 sweeper runs in a row could not finish Beam's payment check (the charge scan, or the reading of a payment link whose record is gone): INTERNAL_SERVER_ERROR, HTTP 503.",
+  );
+  assert.notEqual(await kit.deps.kv.get(keys.alerted(SCOPE, "beam-sweep-failing")), null);
+  assert.equal(logged(kit, "beam_deep_scan_failed").length, BEAM_SWEEP_FAILURE_ALERT_RUNS + 1, "each run tried the deep pass, then the 72-hour pass");
+  assert.equal(logged(kit, "beam_sweep_failed").length, BEAM_SWEEP_FAILURE_ALERT_RUNS + 1);
+  gate.on = false;
+  await sweep(kit, gw);
+  assert.equal(await kit.deps.kv.get(keys.beamSweepFailures(SCOPE)), null, "a good run ends the count");
+  gate.on = true;
+  await assert.rejects(sweep(kit, gw));
+  assert.equal(await kit.deps.kv.get(keys.beamSweepFailures(SCOPE)), "1");
+});
+
+test("a deep pass that fails is followed by the 72-hour pass in the same run; the next run tries the deep pass again", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit);
+  kit.now.ms += 31 * MIN;
+  // The deep pass's first page fails twice (beam.ts retries once); the 72-hour pass works.
+  kit.fakeBeam.failNext(/^GET \/api\/v1\/charges$/, 503);
+  kit.fakeBeam.failNext(/^GET \/api\/v1\/charges$/, 503);
+  const s = await sweep(kit);
+  assert.equal(s.errors, 0);
+  assert.equal(s.released, 1, "the run went on: the expired hold is released");
+  assert.equal(res(kit, h.reservationId).status, "canceled");
+  assert.equal(logged(kit, "beam_deep_scan_failed").length, 1);
+  assert.deepEqual(logged(kit, "beam_sweep_scan").map((l) => l.data?.deep), [false]);
+  assert.equal(await kit.deps.kv.get(keys.beamDeepScan(SCOPE)), null, "no deep pass completed");
+  kit.now.ms += 10 * MIN;
+  await sweep(kit);
+  assert.deepEqual(logged(kit, "beam_sweep_scan").map((l) => l.data?.deep), [false, true], "the next run tries the deep pass again");
+  assert.equal(await kit.deps.kv.get(keys.beamDeepScan(SCOPE)), String(kit.now.ms));
+});
+
+test("a refused scan is told once per HTTP status a day: a 400 and a 403 both, a repeated 400 not, the next day's 400 again", async () => {
+  const kit = makeBeamKit();
+  const { gw, gate } = failingScan(kit, 400, "API_VALIDATION_ERROR");
+  const refused = () => withSubject(kit, /^Beam refused the sweeper's payment scan$/);
+  assert.equal((await sweep(kit, gw)).errors, 0);
+  assert.equal(refused().length, 1);
+  kit.now.ms += 10 * MIN;
+  await sweep(kit, gw);
+  assert.equal(refused().length, 1, "the same status the same day: not again");
+  kit.now.ms += 10 * MIN;
+  Object.assign(gate, { status: 403, errorCode: "NO_PERMISSION_ERROR" });
+  assert.equal((await sweep(kit, gw)).errors, 0);
+  assert.equal(refused().length, 2, "another status: told");
+  assert.match(refused()[1].lines[0], /with NO_PERMISSION_ERROR, HTTP 403, so the sweeper only checks/);
+  assert.equal(await kit.deps.kv.get(keys.beamReported(SCOPE, "scan-refused", "400:2026-10-05")), "1");
+  assert.equal(await kit.deps.kv.get(keys.beamReported(SCOPE, "scan-refused", "403:2026-10-05")), "1");
+  assert.notEqual(await kit.deps.kv.get(keys.alerted(SCOPE, "beam-scan-refused:403")), null, "keyed per status");
+  // The next day (UTC) a refusal that lasts is told again: one lost mail never hides it for good.
+  kit.now.ms = NOW + DAY;
+  Object.assign(gate, { status: 400, errorCode: "API_VALIDATION_ERROR" });
+  await sweep(kit, gw);
+  assert.equal(refused().length, 3);
+  assert.equal(logged(kit, "beam_scan_refused").length, 4, "logged on every run");
+});
+
+test("a released link whose PENDING charge outlives the late watch stays watched until it settles: a success on day 9 (webhook lost) -> CRITICAL", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit, "promptpay");
+  kit.now.ms += 5 * MIN;
+  const qr = kit.fakeBeam.payPending(h.linkId, "QR_PROMPT_PAY");
+  kit.now.ms = expiryOf(kit, h.linkId) + GRACE_MS + MIN;
+  assert.equal((await sweep(kit)).released, 1);
+  kit.now.ms += 10 * MIN;
+  await sweep(kit);
+  const releasedAt = kit.now.ms;
+  assert.equal(await inWatch(kit, h.linkId), true);
+  assert.equal(await inPending(kit, h.linkId), true, "its reading showed the PENDING charge");
+  // Day 8: the late-watch entry is gone; the PENDING charge keeps the link read on every run.
+  kit.now.ms = releasedAt + 8 * DAY;
+  let before = linkGets(kit, h.linkId);
+  await sweep(kit);
+  assert.equal(await inWatch(kit, h.linkId), false);
+  assert.equal(linkGets(kit, h.linkId) - before, 1);
+  // Day 9: the bank confirms the QR; Beam's webhook never arrives. The next run finds it.
+  kit.now.ms = releasedAt + 9 * DAY;
+  kit.fakeBeam.succeed(qr.chargeId);
+  await sweep(kit);
+  const urgent = critical(kit);
+  assert.equal(urgent.length, 1);
+  assert.equal(urgent[0].subject, `URGENT: paid booking ${h.ref} needs attention`);
+  assert.equal(urgent[0].lines[0], lateReason(LIGHTHOUSE(qr.chargeId)));
+  assert.equal(await inPending(kit, h.linkId), false, "settled: no longer watched");
+  kit.now.ms += DAY;
+  before = linkGets(kit, h.linkId);
+  await sweep(kit);
+  assert.equal(linkGets(kit, h.linkId) - before, 0);
+
+  // A charge that fails ends the watch; one that stays PENDING is watched BEAM_PENDING_WATCH_DAYS at most.
+  for (const ending of ["failed", "never settles"] as const) {
+    const kit2 = makeBeamKit();
+    const g = await beamHeld(kit2, "promptpay");
+    kit2.now.ms += 5 * MIN;
+    const pending = kit2.fakeBeam.payPending(g.linkId, "QR_PROMPT_PAY");
+    kit2.now.ms = expiryOf(kit2, g.linkId) + GRACE_MS + MIN;
+    await sweep(kit2);
+    kit2.now.ms += 10 * MIN;
+    await sweep(kit2);
+    const flagged = kit2.now.ms;
+    assert.equal(await inPending(kit2, g.linkId), true, ending);
+    if (ending === "failed") {
+      kit2.now.ms += 10 * DAY;
+      kit2.fakeBeam.failCharge(pending.chargeId);
+      await sweep(kit2);
+      assert.equal(await inPending(kit2, g.linkId), false, ending);
+    } else {
+      kit2.now.ms = flagged + BEAM_PENDING_WATCH_DAYS * DAY - MIN;
+      before = linkGets(kit2, g.linkId);
+      await sweep(kit2);
+      assert.equal(linkGets(kit2, g.linkId) - before, 1, `${ending}: still read on day 29`);
+      kit2.now.ms = flagged + BEAM_PENDING_WATCH_DAYS * DAY + MIN;
+      before = linkGets(kit2, g.linkId);
+      await sweep(kit2);
+      assert.equal(linkGets(kit2, g.linkId) - before, 0, `${ending}: dropped after 30 days`);
+      assert.equal(await inPending(kit2, g.linkId), false, ending);
+    }
+    kit2.now.ms += DAY;
+    before = linkGets(kit2, g.linkId);
+    await sweep(kit2);
+    assert.equal(linkGets(kit2, g.linkId) - before, 0, `${ending}: no longer read`);
+    assert.equal(critical(kit2).length, 0, ending);
+  }
 });
 
 test("an orphan's link (record and hold record lost) that Beam rate-limits keeps its hold until a readable run - SUCCEEDED and non-paid", async () => {
@@ -800,5 +1085,7 @@ test("the card's last digits never reach a log, an alert or Redis through the sw
   await sweep(kit);
   assert.ok(kit.alerts.length >= 2);
   const everything = JSON.stringify([kit.logs, kit.alerts, kv.writes]);
-  for (const digits of ["4729", "5831", "6612"]) assert.ok(!everything.includes(digits), digits);
+  // The digits standing alone, as a leak would show them (random ids can carry them by chance), and no last4 field.
+  for (const digits of ["4729", "5831", "6612"]) assert.equal(cardDigitsShown(everything, digits), false, digits);
+  assert.doesNotMatch(everything, /"last4"/);
 });

@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { ALERT_WINDOW_SECONDS } from "../alerts.ts";
 import { createPaymentLink, isBeamLinkId, BeamApiError } from "../beam.ts";
 import type { BeamCreatePaymentLinkRequest } from "../beam.ts";
-import { BEAM_TEST_ENV, BEAM_LIVE_ENV, BEAM_CLOUDBEDS_METHOD, beamHeld, makeBeamKit } from "../beamTestkit.ts";
+import { BEAM_TEST_ENV, BEAM_LIVE_ENV, BEAM_CLOUDBEDS_METHOD, beamHeld, cardDigitsShown, makeBeamKit } from "../beamTestkit.ts";
 import type { BeamKit } from "../beamTestkit.ts";
 import { resolveCloudbedsPaymentMethod } from "../config.ts";
 import { abandonPayment, alertFulfilPaymentFailure, feeItemFor, fulfilPayment, releasePayment } from "../fulfil.ts";
@@ -814,7 +814,10 @@ test("the card's last digits and the guest's details never reach a log, an alert
   await abandonPayment(h.key, kit.deps, kit.gw, h.ref);
   assert.ok(kit.alerts.length >= 3);
   const everything = JSON.stringify([kit.logs, kit.alerts, kv.writes, kit.fakeCb.calls.filter((c) => c.method !== "postReservation")]);
-  for (const digits of ["4729", "5831"]) assert.ok(!everything.includes(digits), digits);
+  // The digits standing alone, as a leak would show them (random ids can carry them by chance), and no last4 field.
+  assert.ok(cardDigitsShown(JSON.stringify(kit.fakeBeam.chargesOf(h.linkId).map((c) => c.card)), "4729"), "Beam has them");
+  for (const digits of ["4729", "5831"]) assert.equal(cardDigitsShown(everything, digits), false, digits);
+  assert.doesNotMatch(everything, /"last4"/);
   const beamCalls = JSON.stringify(kit.fakeBeam.calls);
   for (const pii of [TEST_EMAIL, "Owner", "952466011", "95 246 6011", "Late dinner"]) assert.ok(!beamCalls.includes(pii), pii);
 });

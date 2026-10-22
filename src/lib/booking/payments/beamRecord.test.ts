@@ -160,7 +160,8 @@ test("every Stripe key name, TTL and hold suffix is byte-identical; the Beam key
     names.filter((n) => n.startsWith("beam")),
     [
       "beamPayment", "beamCharge", "beamPrimary", "beamLinksOpen", "beamLinksWatch", "beamReported", "beamTxn", "beamBadSignatures",
-      "beamRateLimited", "beamDisableFail", "beamReadFailures", "beamPageFail", "beamPaused", "beamDeepScan",
+      "beamRateLimited", "beamDisableFail", "beamReadFailures", "beamPageFail", "beamPaused", "beamDeepScan", "beamSweepFailures",
+      "beamLinksPending",
     ],
   );
   assert.equal(LOCK_TTL_SECONDS, 120);
@@ -174,6 +175,8 @@ test("every Beam key carries 'beam:' right after 'msv:' or the mode scope, and n
   assert.equal(keys.beamLinksOpen("beam-live"), "msv:beam-live:beam:links:open");
   assert.equal(keys.beamLinksWatch("beam-live"), "msv:beam-live:beam:links:watch");
   assert.equal(keys.beamReadFailures("beam-live"), "msv:beam-live:beam:readfail");
+  assert.equal(keys.beamSweepFailures("beam-live"), "msv:beam-live:beam:sweepfail");
+  assert.equal(keys.beamLinksPending("beam-live"), "msv:beam-live:beam:links:pending");
   const stripeKeys = new Set(
     [SESSION_ID, LINK_ID, CHARGE_ID, beamKeyOf(LINK_ID)].flatMap((id) => [
       keys.fulfilLock(id), keys.fulfilDone(id), keys.paidPending(id), keys.abandoned(id), keys.hold(id), keys.releaseDone(id),
@@ -186,7 +189,7 @@ test("every Beam key carries 'beam:' right after 'msv:' or the mode scope, and n
       keys.beamPrimary(LINK_ID),
       keys.beamLinksOpen(scope),
       keys.beamLinksWatch(scope),
-      ...(["dup-charge", "record-missing", "unknown-payment", "foreign-link", "refund-ambiguous", "scan-refused"] as const).map((kind) => keys.beamReported(scope, kind, LINK_ID)),
+      ...(["dup-charge", "record-missing", "unknown-payment", "foreign-link", "refund-ambiguous", "scan-refused", "merchant-switch"] as const).map((kind) => keys.beamReported(scope, kind, LINK_ID)),
       keys.beamTxn(scope, CHARGE_ID),
       keys.beamBadSignatures(scope),
       keys.beamRateLimited(scope),
@@ -195,6 +198,8 @@ test("every Beam key carries 'beam:' right after 'msv:' or the mode scope, and n
       keys.beamPageFail(scope),
       keys.beamPaused(scope),
       keys.beamDeepScan(scope),
+      keys.beamSweepFailures(scope),
+      keys.beamLinksPending(scope),
     ];
     assert.equal(new Set(beamKeys).size, beamKeys.length, `${scope}: every Beam key is distinct`);
     for (const key of beamKeys) {
