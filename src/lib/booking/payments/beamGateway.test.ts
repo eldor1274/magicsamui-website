@@ -21,7 +21,7 @@ import { resolveCloudbedsPaymentMethod } from "../config.ts";
 import { abandonPayment, alertFulfilPaymentFailure, feeItemFor, fulfilPayment, releasePayment } from "../fulfil.ts";
 import { createMemoryKv } from "../kv.ts";
 import { BEAM_RECORD_TTL_SECONDS, keyScope, keys, readJson } from "../lock.ts";
-import { satangToBahtString } from "../quote.ts";
+import { feePctFor, percentOf, satangToBahtString } from "../quote.ts";
 import { NOW, TEST_EMAIL, TOKEN_SECRET, recordingKv } from "../testkit.ts";
 import { beamGateway } from "./beamGateway.ts";
 import type { BeamChargeIndexEntry } from "./beamGateway.ts";
@@ -1060,4 +1060,69 @@ test("every per-id money alert of the gateway is keyed by its id: dup-charge, be
   assert.equal((await releasePayment(e.key, kit4.deps, kit4.gw, "sweeper")).state, "released");
   assert.equal(withSubject(kit4, /^Beam payment still pending/).length, 1);
   assert.notEqual(await alerted(kit4, `beam-pending-released:${e.linkId}`), null);
+});
+
+/* ------------------------------------- round 6: the method group ------------------------------------- */
+
+/** The link's settings widened to every group (a link edited in Lighthouse, or Beam ignoring them). */
+function allowEverything(kit: BeamKit, linkId: string): void {
+  kit.fakeBeam.link(linkId).linkSettings = { card: { isEnabled: true }, qrPromptPay: { isEnabled: true }, eWallets: { isEnabled: true } };
+}
+
+test("a PromptPay link paid by card: confirmed as usual, one warning naming the card fee to collect or waive (round 6)", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit, "promptpay");
+  const record = await readRecord(kit.deps.kv, h.linkId);
+  assert.ok(record);
+  assert.equal(record.feeSatang, 0, "PromptPay is fee-free");
+  allowEverything(kit, h.linkId);
+  const charge = kit.fakeBeam.pay(h.linkId, "CARD");
+  const outcome = await fulfilPayment(h.key, kit.deps, kit.gw);
+  assert.equal(outcome.state, "confirmed");
+  assert.equal(res(kit, h.reservationId).status, "confirmed");
+  const cardFee = percentOf(record.roomsSatang, feePctFor(kit.config, "card_ewallet"));
+  assert.ok(cardFee > 0);
+  const warned = withSubject(kit, /payment page$/);
+  assert.equal(warned.length, 1);
+  assert.equal(warned[0].severity, "warning");
+  assert.equal(warned[0].subject, `Booking ${h.ref}: paid by card on a PromptPay payment page`);
+  assert.deepEqual(warned[0].lines, [
+    `Beam payment link ${h.linkId} (booking ${h.ref}, Cloudbeds reservation ${h.reservationId}) was priced for PromptPay with a ${money(0)} fee, but the guest paid by card (charge ${charge.chargeId}), whose fee would be ${money(cardFee)}. The booking goes ahead as usual: the ${money(record.totalSatang)} paid is the page's amount.`,
+    `The guest paid no card fee while Beam charges its card or e-wallet rate on this payment: collect the ${money(cardFee)} difference from the guest, or waive it.`,
+  ]);
+  assert.equal(await kit.deps.kv.get(keys.beamReported(keyScope("beam-playground"), "method-group", h.linkId)), "1");
+  assert.equal(critical(kit).length, 0, "no needs_attention: the amount is the link's");
+  // Every later reading says nothing more.
+  await kit.gw.get(h.key);
+  await kit.gw.get(h.key);
+  assert.equal(withSubject(kit, /payment page$/).length, 1, "once per link");
+});
+
+test("a card link paid by PromptPay: one warning naming the fee to refund by bank transfer; Alipay on a PromptPay link and a matching group raise nothing (round 6)", async () => {
+  const kit = makeBeamKit();
+  const card = await beamHeld(kit, "card_ewallet");
+  const record = await readRecord(kit.deps.kv, card.linkId);
+  assert.ok(record && record.feeSatang > 0);
+  allowEverything(kit, card.linkId);
+  const charge = kit.fakeBeam.pay(card.linkId, "QR_PROMPT_PAY");
+  assert.equal((await fulfilPayment(card.key, kit.deps, kit.gw)).state, "confirmed");
+  const warned = withSubject(kit, /payment page$/);
+  assert.equal(warned.length, 1);
+  assert.equal(warned[0].subject, `Booking ${card.ref}: paid by PromptPay on a card / e-wallet payment page`);
+  assert.deepEqual(warned[0].lines, [
+    `Beam payment link ${card.linkId} (booking ${card.ref}, Cloudbeds reservation ${card.reservationId}) was priced for card / e-wallet with a ${money(record.feeSatang)} fee, but the guest paid by PromptPay (charge ${charge.chargeId}), whose fee would be ${money(0)}. The booking goes ahead as usual: the ${money(record.totalSatang)} paid is the page's amount.`,
+    `The guest paid a ${money(record.feeSatang)} fee that PromptPay does not carry: refund the ${money(record.feeSatang)} difference by bank transfer (Beam can't refund part of a PromptPay payment), unless the guest agreed to keep it.`,
+  ]);
+  assert.ok(kit.logs.some((l) => l.message === "beam_method_group_mismatch" && l.data?.priced === "card_ewallet" && l.data?.paid === "QR_PROMPT_PAY"));
+
+  // Alipay through the PromptPay QR (its fee is open question 18 for Beam): no false alarm.
+  const alipay = await beamHeld(kit, "promptpay", [{ slug: "garden-suite", ratePlanId: "standard", adults: 2, addonIds: [] }]);
+  allowEverything(kit, alipay.linkId);
+  kit.fakeBeam.pay(alipay.linkId, "ALIPAY");
+  assert.equal((await fulfilPayment(alipay.key, kit.deps, kit.gw)).state, "confirmed");
+  // The group the page was priced for: nothing.
+  const pp = await beamHeld(kit, "promptpay", [{ slug: "sunrise-suite", ratePlanId: "standard", adults: 2, addonIds: [] }]);
+  kit.fakeBeam.pay(pp.linkId, "QR_PROMPT_PAY");
+  assert.equal((await fulfilPayment(pp.key, kit.deps, kit.gw)).state, "confirmed");
+  assert.equal(withSubject(kit, /payment page$/).length, 1, "only the card link paid by PromptPay");
 });

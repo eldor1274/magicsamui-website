@@ -1390,3 +1390,14 @@ test("sweep_step1_failed and sweep_failed log the error redacted (no email, no p
   assert.equal(failedLog[0].data?.phase, "step 1");
   assertRedacted(failedLog[0].data?.error);
 });
+
+test("the Beam run reports what its tracking read (links) in runs[], and at the top level only as the primary; Stripe's run never carries it (round 6)", async () => {
+  for (const primary of ["stripe", "beam"] as const) {
+    const a = await scenario();
+    const answer = await sweepBoth(a.w, primary);
+    assert.equal(answer.status, 200, JSON.stringify(answer.body));
+    assert.deepEqual(runOf(answer, "beam").links, { open: 2, scanned: 1, watched: 0, pendingWatched: 0, watchedRead: 0, watchCovered: 0 }, primary);
+    assert.equal("links" in runOf(answer, "stripe"), false, primary);
+    assert.equal("links" in answer.body, primary === "beam", `${primary}: the top level is the primary run's summary`);
+  }
+});

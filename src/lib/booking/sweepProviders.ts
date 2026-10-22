@@ -38,7 +38,7 @@
 
 import { redactForLog } from "./cloudbedsWrite.ts";
 import type { ListedReservation } from "./cloudbedsWrite.ts";
-import type { PaymentGateway } from "./payments/gateway.ts";
+import type { PaymentGateway, SweepLinkCounts } from "./payments/gateway.ts";
 import type { StripeClient } from "./payments/stripe.ts";
 import { stripeGateway } from "./payments/stripeGateway.ts";
 import { listSweepReservations, runSweep, sweepPaidAndAlerts, sweepRecentPayments } from "./sweep.ts";
@@ -83,6 +83,8 @@ export type SweepRunReport = {
   ok: boolean;
   error?: SweepRunError;
   skipped?: "out of time";
+  /** What the provider's own tracking read in its step 1 (Beam's links, round 6); at the top level too when Beam is the primary. */
+  links?: SweepLinkCounts;
 } & Partial<SweepSummary>;
 
 export interface SweepProvidersAnswer {
@@ -236,7 +238,8 @@ export async function sweepProviders(runs: SweepRun[], opts: SweepTiming & { log
           listed: sharedListing(opened.deps),
           nowMs,
         });
-        s.report = summary.cloudbedsOk ? { provider, mode, ok: true, ...summary } : { provider, mode, ok: false, error: "cloudbeds_unavailable", ...summary };
+        const links = s.recent.links ? { links: s.recent.links } : {};
+        s.report = summary.cloudbedsOk ? { provider, mode, ok: true, ...summary, ...links } : { provider, mode, ok: false, error: "cloudbeds_unavailable", ...summary, ...links };
       } else {
         const cloudbedsOk = await sharedListing(opened.deps)(nowMs).then(
           () => true,

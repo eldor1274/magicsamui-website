@@ -27,7 +27,7 @@ export const BEAM_DISPUTE_WINDOW_DAYS = 120;
 export const BEAM_RECORD_TTL_SECONDS = (BOOKING_WINDOW_MONTHS * 31 + BEAM_DISPUTE_WINDOW_DAYS + 30) * 24 * 3600;
 
 /** The set-once "told the owner" markers of the Beam payment flow (keys.beamReported). */
-export type BeamReportKind = "dup-charge" | "record-missing" | "unknown-payment" | "foreign-link" | "refund-ambiguous" | "scan-refused" | "merchant-switch";
+export type BeamReportKind = "dup-charge" | "record-missing" | "unknown-payment" | "foreign-link" | "refund-ambiguous" | "scan-refused" | "merchant-switch" | "method-group";
 
 /**
  * Key scope of a payment mode: "live" for stripe-live, else the mode itself

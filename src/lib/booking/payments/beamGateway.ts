@@ -44,9 +44,12 @@
 //    BEAM_SCAN_MAX_PAGES ran out). A deep pass that fails is logged and the 72-hour pass runs in its place, so a
 //    deep pass that keeps failing never fails every run (round 5).
 // 2. The links: every links-open entry (trackOpenLink at create time, score = expiresAt; every run, not only
-//    the expired ones), the late-watch entries younger than BEAM_LATE_WATCH_DAYS, and every link the scan
-//    names. A link without a record is read once for its signed note: ours -> tracked (its reading raises the
-//    record-missing warning); not ours -> cached as foreign for 8 days (no read again); not ours but carrying
+//    the expired ones), the late-watch entries younger than BEAM_LATE_WATCH_DAYS (newest first), and every link
+//    the scan names. Round 6: a late-watch link a completed scan covers (no charge of it in the scan, no PENDING
+//    charge watched, our record of this merchant) is not read: a late payment is a new charge, which the scan
+//    lists; while Beam refuses the scan every watched link is read on every run. A link without a record is read
+//    once for its signed note: ours -> tracked (its reading raises the record-missing warning); not ours ->
+//    cached as foreign for 8 days (no read again); not ours but carrying
 //    a SUCCEEDED charge that names an MSV booking -> one CRITICAL 'A Beam payment names booking {ref} but we
 //    have no record of it' (stored and re-sent until delivered: money was taken under our ref). Such a reading
 //    that fails (other than 404) is told to the owner after 60 minutes and throws once every link was looked
@@ -68,6 +71,8 @@
 //    BEAM_PENDING_WATCH_DAYS at most (round 5), so a very late success is found even when its webhook is lost.
 // 5. A sweepRecent that throws is counted (keys.beamSweepFailures, consecutive runs); the
 //    BEAM_SWEEP_FAILURE_ALERT_RUNS-th failed run in a row tells the owner, a good run ends the count (round 5).
+//    A run that lists logs its link counts (beam_sweep_links) and hands them to the sweep route as the list's
+//    links (round 6: runs[].links).
 // The core's step 1 (sweep.ts) then fulfils the paid ones (a late success on a released hold -> the CRITICAL
 // needs_attention of owner decision 3), hands refunded ones to fulfil, and releases the expired ones with the
 // guard and the release note ('unconfirmed' ones with the pending-released warning).
@@ -89,7 +94,7 @@ import type { BeamSettings } from "../config.ts";
 import type { KvStore } from "../kv.ts";
 import { BEAM_RECORD_TTL_SECONDS, beamKeyOf, keyScope, keys, linkIdOf, parseBeamHoldIdentifier } from "../lock.ts";
 import type { BeamReportKind } from "../lock.ts";
-import { satangToBahtString } from "../quote.ts";
+import { feePctFor, percentOf, satangToBahtString } from "../quote.ts";
 import { isBookingRef } from "../ref.ts";
 import type { CoreDeps } from "../stripeDeps.ts";
 import { nowOf } from "../stripeDeps.ts";
@@ -99,7 +104,7 @@ import type { BeamNote, PaymentRecord } from "./beamRecord.ts";
 import { beamPaymentState } from "./beamState.ts";
 import type { BeamPaymentState } from "./beamState.ts";
 import { BEAM_PARTIAL_REFUND_METHODS, BEAM_REFUNDABLE_METHODS, beamGatewayText, beamMethodName } from "./beamText.ts";
-import type { GatewayPayment, GatewayReceipt, GatewayState, PaymentGateway, PaymentMeta, RecentPayment } from "./gateway.ts";
+import type { GatewayPayment, GatewayReceipt, GatewayState, PaymentGateway, PaymentMeta, RecentPayment, SweepLinkCounts } from "./gateway.ts";
 
 const DAY_MS = 86_400_000;
 /** The 7-day charge scan (BEAM_DEEP_SCAN_DAYS) runs once the last complete one is this old. */
@@ -395,6 +400,43 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     );
   }
 
+  /**
+   * A paid link whose charge used another method group than the booking was priced for (round 6, money): PromptPay
+   * fee-free, cards and e-wallets with the card fee (owner decision 1). The booking goes ahead (the amount paid is the
+   * link's); one warning per link (keys.beamReported 'method-group') names the fee difference to collect, waive or
+   * refund. Alipay on a PromptPay link raises nothing: Alipay users can pay through the PromptPay QR, and which fee
+   * Beam charges then is open question 18. Best effort: never fails the reading.
+   */
+  async function reportMethodGroup(read: BeamLinkRead, owner: BeamOwner, meta: PaymentMeta, primaryId: string | null): Promise<void> {
+    if (read.state.state !== "paid" || primaryId === null) return;
+    const { linkId } = read;
+    const methodType = methodTypeOf(read.state.succeeded.find((c) => chargeIdOf(c, linkId) === primaryId));
+    if (methodType === undefined) return;
+    const priced = owner.facts.payMethod;
+    const paid: BeamNote["payMethod"] = methodType === "QR_PROMPT_PAY" || (methodType === "ALIPAY" && priced === "promptpay") ? "promptpay" : "card_ewallet";
+    if (paid === priced) return;
+    try {
+      if (!(await firstReport("method-group", linkId))) return;
+      const fee = owner.facts.feeSatang;
+      const paidFee = percentOf(owner.facts.roomsSatang, feePctFor(deps.config, paid));
+      const diff = Math.abs(paidFee - fee);
+      const label = (group: BeamNote["payMethod"]) => (group === "promptpay" ? "PromptPay" : "card / e-wallet");
+      deps.log("beam_method_group_mismatch", { ref: meta.ref, linkId, priced, paid: methodType });
+      await deps.alert(
+        `Booking ${meta.ref}: paid by ${beamMethodName(methodType)} on a ${label(priced)} payment page`,
+        [
+          `Beam payment link ${linkId} (booking ${meta.ref}, Cloudbeds reservation ${meta.reservationId}) was priced for ${label(priced)} with a ${money(fee)} fee, but the guest paid by ${beamMethodName(methodType)} (charge ${primaryId}), whose fee would be ${money(paidFee)}. The booking goes ahead as usual: the ${money(meta.totalSatang)} paid is the page's amount.`,
+          paid === "card_ewallet"
+            ? `The guest paid no card fee while Beam charges its card or e-wallet rate on this payment: collect the ${money(diff)} difference from the guest, or waive it.`
+            : `The guest paid a ${money(fee)} fee that PromptPay does not carry: refund the ${money(diff)} difference by bank transfer (Beam can't refund part of a PromptPay payment), unless the guest agreed to keep it.`,
+        ],
+        { key: `beam-method-group:${linkId}`, severity: "warning" },
+      );
+    } catch (e) {
+      deps.log("beam_method_alert_failed", { linkId, error: e instanceof Error ? e.message.slice(0, 200) : "unknown" });
+    }
+  }
+
   /** A reading in the gateway's shape, with the record, primary, index and owner-alert work of a payment of ours. */
   async function paymentOf(read: BeamLinkRead): Promise<GatewayPayment> {
     const { key, linkId, state, owner } = read;
@@ -423,6 +465,7 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     await indexCharges(read, meta);
     await reportDuplicates(read, meta, primaryId);
     await reportRefundAmbiguous(read, meta);
+    await reportMethodGroup(read, owner, meta, primaryId);
     const mismatch = mismatchOf(read, owner, meta);
     return { ...base, meta, receipt: receiptOf(linkId, state, primaryId), ...(mismatch ? { mismatch } : {}) };
   }
@@ -484,11 +527,12 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
 
   /**
    * The charge scan: 72 hours, or 7 days once the last complete deep pass is BEAM_DEEP_SCAN_EVERY_MS old (from
-   * sinceMs at the latest). [] when Beam refuses the unfiltered list. A deep pass that fails is logged and the
-   * 72-hour pass runs in its place (its marker is not written, so the next run tries the deep pass again): a deep
-   * pass that keeps failing must not fail every run. The 72-hour pass throws as scanPass does.
+   * sinceMs at the latest). null when Beam refuses the unfiltered list (round 6: the caller tells it from an empty
+   * scan). A deep pass that fails is logged and the 72-hour pass runs in its place (its marker is not written, so
+   * the next run tries the deep pass again): a deep pass that keeps failing must not fail every run. The 72-hour
+   * pass throws as scanPass does.
    */
-  async function scanCharges(nowMs: number, sinceMs: number): Promise<BeamCharge[]> {
+  async function scanCharges(nowMs: number, sinceMs: number): Promise<BeamCharge[] | null> {
     const lastRaw = await deps.kv.get(keys.beamDeepScan(scope));
     const last = lastRaw === null ? Number.NaN : Number(lastRaw);
     if (!(Number.isFinite(last) && nowMs - last < BEAM_DEEP_SCAN_EVERY_MS)) {
@@ -498,13 +542,13 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
       } catch (e) {
         deps.log("beam_deep_scan_failed", { ...beamErrorInfo(e) });
       }
-      if (charges === null) return [];
+      if (charges === null) return null;
       if (charges !== undefined) {
         await deps.kv.set(keys.beamDeepScan(scope), String(nowMs), MARKER_TTL_SECONDS);
         return charges;
       }
     }
-    return (await scanPass(nowMs, Math.min(sinceMs, nowMs - beam.scanLookbackHours * 3_600_000), false)) ?? [];
+    return scanPass(nowMs, Math.min(sinceMs, nowMs - beam.scanLookbackHours * 3_600_000), false);
   }
 
   /** The links whose readings keep failing, as this run starts (one Redis read when there are none). */
@@ -514,8 +558,12 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     return { failing, overdue };
   }
 
-  /** A failed reading: the first one is recorded; one that keeps failing BEAM_FAILURE_ALERT_MS is told to the owner. */
-  async function noteReadFailure(run: ReadFailures, linkId: string, facts: BeamNote | null, e: unknown): Promise<void> {
+  /**
+   * A failed reading: the first one is recorded; one that keeps failing BEAM_FAILURE_ALERT_MS is told to the owner.
+   * `released`: the link's hold was already released (the late or pending watch), so the alert says a late payment on
+   * it can't be checked (round 6) - never that a hold is kept.
+   */
+  async function noteReadFailure(run: ReadFailures, linkId: string, facts: BeamNote | null, e: unknown, released: boolean): Promise<void> {
     if (!run.failing.has(linkId)) {
       run.failing.add(linkId);
       await deps.kv.zadd(readFailKey, nowOf(deps), linkId);
@@ -524,10 +572,15 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     if (!run.overdue.has(linkId)) return;
     await deps.alert(
       `Beam link ${linkId} could not be read for 60 minutes`,
-      [
-        `The sweeper keeps failing to read Beam payment link ${linkId} (${bookingOf(facts)}): ${problemOf(e)}. While Beam does not answer, the hold of its booking is kept, so the unit stays blocked.`,
-        "Check the link in Beam Lighthouse (and status.beamcheckout.com): if the guest paid, confirm the booking by hand; if the link is closed and nobody paid, cancel the reservation in Cloudbeds.",
-      ],
+      released
+        ? [
+            `The sweeper keeps failing to read Beam payment link ${linkId} (${bookingOf(facts)}): ${problemOf(e)}. Its hold was already released, so a late payment on it can't be checked while Beam does not answer.`,
+            "Check the link in Beam Lighthouse (and status.beamcheckout.com): if the guest paid late, re-book the guest if the unit is still free, otherwise refund the full amount there.",
+          ]
+        : [
+            `The sweeper keeps failing to read Beam payment link ${linkId} (${bookingOf(facts)}): ${problemOf(e)}. While Beam does not answer, the hold of its booking is kept, so the unit stays blocked.`,
+            "Check the link in Beam Lighthouse (and status.beamcheckout.com): if the guest paid, confirm the booking by hand; if the link is closed and nobody paid, cancel the reservation in Cloudbeds.",
+          ],
       { key: `beam-read-fail:${linkId}`, severity: "warning" },
     );
   }
@@ -675,7 +728,7 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     } catch (e) {
       const failure = isBeamNotFound(e) ? await missingProblem(t) : e;
       if (failure !== null) {
-        await noteReadFailure(run, t.linkId, t.facts, failure).catch(() => undefined);
+        await noteReadFailure(run, t.linkId, t.facts, failure, t.watched).catch(() => undefined);
         throw failure;
       }
       deps.log("beam_link_missing", { linkId: t.linkId, ref: t.facts.ref });
@@ -754,8 +807,8 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
   }
 
   /** Step 1 for Beam, with its failures counted (round 5): a good run ends the count (one Redis read when there is none). */
-  async function sweepRecent(sinceMs: number): Promise<RecentPayment[]> {
-    let listed: RecentPayment[];
+  async function sweepRecent(sinceMs: number): Promise<RecentPayment[] & { links: SweepLinkCounts }> {
+    let listed: RecentPayment[] & { links: SweepLinkCounts };
     try {
       listed = await listRecent(sinceMs);
     } catch (e) {
@@ -767,10 +820,12 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     return listed;
   }
 
-  async function listRecent(sinceMs: number): Promise<RecentPayment[]> {
+  async function listRecent(sinceMs: number): Promise<RecentPayment[] & { links: SweepLinkCounts }> {
     const nowMs = nowOf(deps);
     const scanned = new Map<string, BeamCharge[]>();
-    for (const c of await scanCharges(nowMs, sinceMs)) {
+    // null: Beam refused the unfiltered list, so every watched link is read on every run (round 6).
+    const scan = await scanCharges(nowMs, sinceMs);
+    for (const c of scan ?? []) {
       if (c.source !== "PAYMENT_LINK" || !isBeamLinkId(c.sourceId)) continue;
       scanned.set(c.sourceId, [...(scanned.get(c.sourceId) ?? []), c]);
     }
@@ -785,6 +840,7 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     const watchedSet = new Set(watched);
     const pendingSet = new Set(pendingWatched);
     const run = await readFailuresAt(nowMs);
+    const counts: SweepLinkCounts = { open: open.length, scanned: 0, watched: watched.length, pendingWatched: pendingWatched.length, watchedRead: 0, watchCovered: 0 };
 
     const tracked = new Map<string, TrackedLink>();
     const considered = new Set<string>();
@@ -806,6 +862,14 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
       const key = beamKeyOf(linkId);
       const fromScan = scanned.get(linkId) ?? [];
       const record = await readRecord(deps.kv, linkId);
+      // Round 6: a released link (the late watch) that a completed charge scan names no charge of, with no PENDING
+      // charge watched (keys.beamLinksPending), made under this merchant (the scan lists this merchant's charges only):
+      // nothing on it can have changed since it was last read - a late payment is a new charge, which the scan lists,
+      // and a PENDING one is in the pending watch. Not read this run (2 Beam calls saved per link and run).
+      if (from === "watch" && scan !== null && fromScan.length === 0 && !pendingSet.has(linkId) && record?.mode === mode && record.merchantId === beam.merchantId) {
+        counts.watchCovered++;
+        return;
+      }
       let facts: BeamNote | null = record;
       // The note carries no merchant: a link read through it was just read with this deployment's API key.
       let merchantId = record?.merchantId ?? beam.merchantId;
@@ -830,7 +894,7 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
             deps.log("beam_sweep_link_unreadable", { linkId, ...beamErrorInfo(e) });
             unreadable.add(linkId);
             firstUnreadable ??= e;
-            await noteReadFailure(run, linkId, null, e).catch(() => undefined);
+            await noteReadFailure(run, linkId, null, e, watching).catch(() => undefined);
             return;
           }
         }
@@ -876,9 +940,10 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     };
     for (const linkId of open) await consider(linkId, "open");
     for (const linkId of scanned.keys()) await consider(linkId, "scan");
-    for (const linkId of watched) await consider(linkId, "watch");
+    // Newest first (round 6): the most recently released links are the likeliest to be paid late.
+    for (const linkId of [...watched].reverse()) await consider(linkId, "watch");
     // Released links still waiting on a PENDING charge, past the late watch (BEAM_PENDING_WATCH_DAYS at most).
-    for (const linkId of pendingWatched) await consider(linkId, "pending");
+    for (const linkId of [...pendingWatched].reverse()) await consider(linkId, "pending");
 
     // Failure records of links this run no longer lists (or that turned out not to be ours) are dropped.
     for (const linkId of [...run.failing]) if (!tracked.has(linkId) && !unreadable.has(linkId)) await clearReadFailure(run, linkId);
@@ -887,7 +952,12 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
 
     const byReservation = new Map<string, TrackedLink[]>();
     for (const t of tracked.values()) byReservation.set(t.facts.reservationId, [...(byReservation.get(t.facts.reservationId) ?? []), t]);
-    return [...byReservation.entries()].map(([reservationId, links]) => recentPaymentOf(run, reservationId, links));
+    counts.scanned = scanned.size;
+    counts.watchedRead = [...tracked.values()].filter((t) => t.watched).length;
+    deps.log("beam_sweep_links", { ...counts, scanRefused: scan === null });
+    const entries = [...byReservation.entries()].map(([reservationId, links]) => recentPaymentOf(run, reservationId, links));
+    // Not enumerable: the entries stay a plain list to every reader that does not ask for the counts.
+    return Object.defineProperty(entries, "links", { value: counts, enumerable: false }) as RecentPayment[] & { links: SweepLinkCounts };
   }
 
   return {

@@ -633,6 +633,9 @@ test("a link of this merchant Beam answers 404 for: kept until its expiry plus t
   let [listed] = await kit.gw.sweepRecent(NOW);
   await assert.rejects(listed.read(), (e: unknown) => e instanceof BeamApiError && e.errorCode === "NOT_FOUND_BEFORE_EXPIRY" && !kit.gw.isMissing(e));
   kit.now.ms = expiresAt + GRACE_MS - MIN;
+  // Round 6 (G2): the guard too, a minute inside the grace.
+  assert.equal(await kit.gw.releaseGuard?.(h.key), false, "inside the grace the guard keeps the hold");
+  assert.equal(await kit.gw.isGone?.(h.key), false, "and abandon's 404 is not final");
   let s = await sweep(kit);
   assert.equal(s.released, 0);
   assert.ok(s.errors >= 1);
@@ -1087,11 +1090,20 @@ test("housekeeping: done links leave links-open, released ones are watched for B
   assert.equal(await inWatch(kit, released.linkId), true);
   assert.equal(await inOpen(kit, refused.linkId), true, "neither done nor released: still tracked");
   const watchedReads = () => linkGets(kit, released.linkId);
-  // Inside the window the released link is read on every run; past it, it is dropped and no longer read.
-  kit.now.ms = releasedAt + 7 * DAY - MIN;
+  // Inside the window the released link is watched. Round 6: a completed charge scan covers it (a late payment is a
+  // new charge, which the scan lists), so it is not read; while Beam refuses the scan it is read on every run. Past the
+  // window it is dropped and no longer read.
+  kit.now.ms = releasedAt + 7 * DAY - 2 * MIN;
   let before = watchedReads();
   await sweep(kit);
-  assert.equal(watchedReads() - before, 1);
+  assert.equal(watchedReads() - before, 0, "covered by the completed charge scan");
+  assert.ok(logged(kit, "beam_sweep_links").some((l) => l.data?.watched === 1 && l.data?.watchCovered === 1 && l.data?.watchedRead === 0 && l.data?.scanRefused === false));
+  kit.fakeBeam.unfilteredListUnsupported();
+  kit.now.ms = releasedAt + 7 * DAY - MIN;
+  before = watchedReads();
+  await sweep(kit);
+  assert.equal(watchedReads() - before, 1, "the scan refused: read on every run");
+  assert.ok(logged(kit, "beam_sweep_links").some((l) => l.data?.watched === 1 && l.data?.watchCovered === 0 && l.data?.watchedRead === 1 && l.data?.scanRefused === true));
   kit.now.ms = releasedAt + 7 * DAY + MIN;
   before = watchedReads();
   await sweep(kit);
@@ -1211,4 +1223,88 @@ test("a disable Beam answers 404 for is no failed disable (no beamDisableFail ma
   assert.deepEqual(await members(kit, keys.beamReadFailures(SCOPE)), [h.linkId]);
   assert.equal(s.released, 0);
   assert.equal(res(kit, h.reservationId).status, "not_confirmed");
+});
+
+/* --------------------------------- round 6: notes, watched links and counts --------------------------------- */
+
+test("a link tracked through its signed note is this merchant's: Beam's 404 after its expiry plus the grace reads as expired, with no merchant-switch alert (G3)", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit);
+  const expiresAt = expiryOf(kit, h.linkId);
+  // Redis lost the record: the link is tracked through its signed note (its first reading); then Beam answers 404.
+  await kit.deps.kv.del(keys.beamPayment(h.linkId));
+  kit.now.ms = expiresAt + GRACE_MS;
+  const { gw, gate } = flakyLinkReads(kit, h.linkId, 404);
+  gate.pass = 1;
+  const [listed] = await gw.sweepRecent(kit.now.ms);
+  assert.equal(listed.reservationId, h.reservationId, "tracked through its note");
+  const p = await listed.read();
+  assert.equal(p.state, "expired");
+  assert.equal(p.meta?.reservationId, h.reservationId);
+  assert.ok(logged(kit, "beam_link_missing").some((l) => l.data?.linkId === h.linkId));
+  assert.equal(logged(kit, "beam_link_other_merchant").length, 0);
+  assert.equal(withSubject(kit, /another Beam merchant$/).length, 0, "no false merchant-switch CRITICAL");
+});
+
+/** A hold released by the sweeper and moved to the late watch by the next run; returns the time it was moved. */
+async function releasedAndWatched(kit: BeamKit, items: CartItemInput[] = GARDEN): Promise<{ h: BeamHeld; watchedAt: number }> {
+  const h = await beamHeld(kit, "card_ewallet", items);
+  kit.now.ms = expiryOf(kit, h.linkId) + GRACE_MS + MIN;
+  await sweep(kit);
+  assert.equal(res(kit, h.reservationId).status, "canceled");
+  kit.now.ms += 10 * MIN;
+  await sweep(kit);
+  assert.equal(await inWatch(kit, h.linkId), true);
+  return { h, watchedAt: kit.now.ms };
+}
+
+test("a merchant switch with a released link watched (no pending charge): still read though the new merchant's scan completes - one CRITICAL that a late payment can't be seen (round 6)", async () => {
+  const kit = makeBeamKit();
+  const { h } = await releasedAndWatched(kit);
+  const after = switchedMerchant(kit);
+  kit.now.ms += 10 * MIN;
+  const before = linkGets(kit, h.linkId);
+  await runSweep(after.deps, after.gw);
+  const urgent = withSubject(kit, /belongs to another Beam merchant$/);
+  assert.equal(urgent.length, 1);
+  assert.ok(urgent[0].lines[0].endsWith("Its hold was already released (no payment had succeeded when its time ran out), but the sweeper can no longer see a late payment on it."), urgent[0].lines[0]);
+  // The old link is read through the new merchant's fake (404 there); the kit's fake was not asked.
+  assert.equal(linkGets(kit, h.linkId), before);
+});
+
+test("a released link whose readings keep failing (the scan refused, so it is read): after 60 minutes the warning says its hold is already released and a late payment can't be checked (round 6)", async () => {
+  const kit = makeBeamKit();
+  const { h } = await releasedAndWatched(kit);
+  kit.fakeBeam.unfilteredListUnsupported();
+  const { gw } = flakyLinkReads(kit, h.linkId, 503);
+  kit.now.ms += 10 * MIN;
+  await sweep(kit, gw);
+  assert.equal(withSubject(kit, /could not be read for 60 minutes$/).length, 0);
+  kit.now.ms += BEAM_FAILURE_ALERT_MS + MIN;
+  await sweep(kit, gw);
+  const told = withSubject(kit, /could not be read for 60 minutes$/);
+  assert.equal(told.length, 1);
+  assert.equal(told[0].subject, `Beam link ${h.linkId} could not be read for 60 minutes`);
+  assert.match(told[0].lines[0], new RegExp(`^The sweeper keeps failing to read Beam payment link ${h.linkId} \\(booking ${h.ref}, Cloudbeds reservation ${h.reservationId}\\): .+\\. Its hold was already released, so a late payment on it can't be checked while Beam does not answer\\.$`));
+  assert.equal(told[0].lines[1], "Check the link in Beam Lighthouse (and status.beamcheckout.com): if the guest paid late, re-book the guest if the unit is still free, otherwise refund the full amount there.");
+  assert.doesNotMatch(told[0].lines.join(" "), /the hold of its booking is kept/);
+});
+
+test("watched links are read newest first while the scan is refused, and each run logs its link counts (beam_sweep_links)", async () => {
+  const kit = makeBeamKit();
+  const older = await releasedAndWatched(kit, GARDEN);
+  kit.now.ms += 30 * MIN;
+  const newer = await releasedAndWatched(kit, [{ slug: "sunrise-suite", ratePlanId: "standard", adults: 2, addonIds: [] }]);
+  assert.ok(newer.watchedAt > older.watchedAt);
+  kit.fakeBeam.unfilteredListUnsupported();
+  kit.now.ms += 10 * MIN;
+  const at = kit.fakeBeam.calls.length;
+  await sweep(kit);
+  const reads = kit.fakeBeam.calls
+    .slice(at)
+    .filter((c) => c.method === "GET" && c.path.startsWith("/api/v1/payment-links/"))
+    .map((c) => c.path.split("/").pop());
+  assert.deepEqual(reads, [newer.h.linkId, older.h.linkId], "the most recently released first");
+  const counts = logged(kit, "beam_sweep_links").at(-1)?.data;
+  assert.deepEqual(counts, { open: 0, scanned: 0, watched: 2, pendingWatched: 0, watchedRead: 2, watchCovered: 0, scanRefused: true });
 });

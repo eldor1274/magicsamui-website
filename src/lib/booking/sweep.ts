@@ -96,7 +96,7 @@ import type { ListedReservation } from "./cloudbedsWrite.ts";
 import { PAID_UNCONFIRMED_ESCALATE_MS, afterPaymentReleased, alertFulfilPaymentFailure, alertPaidPaymentStuck, fulfilPayment, holdRecord, releaseHold } from "./fulfil.ts";
 import { closeHold, closeIntent, keyScope, keys, parseHoldIdentifier, readJson, recordHold } from "./lock.ts";
 import type { HoldIntent, PaidPending } from "./lock.ts";
-import type { GatewayPayment, GatewayText, PaymentGateway } from "./payments/gateway.ts";
+import type { GatewayPayment, GatewayText, PaymentGateway, SweepLinkCounts } from "./payments/gateway.ts";
 import { isLiveMode } from "./payments/provider.ts";
 import type { CheckoutSession, SessionPaymentState } from "./payments/stripe.ts";
 import { stripeGateway } from "./payments/stripeGateway.ts";
@@ -233,6 +233,8 @@ export interface RecentPayments {
   unread?: Map<string, { listedPaid: boolean }>;
   /** Step 1's share of the run's summary. */
   counts: Pick<SweepSummary, "sessionsChecked" | "fulfilled" | "released" | "errors">;
+  /** What the provider's own tracking read (gw.sweepRecent's links; Beam only, round 6). Absent for Stripe. */
+  links?: SweepLinkCounts;
 }
 
 export interface SweepOptions {
@@ -288,7 +290,9 @@ export async function sweepRecentPayments(deps: CoreDeps, gw: PaymentGateway, no
   const unread = new Map<string, { listedPaid: boolean }>();
   const recent: RecentPayments = { text: gw.text, byReservation: new Map(), triedPaid: new Set(), unread, counts: { sessionsChecked: 0, fulfilled: 0, released: 0, errors: 0 } };
   const { byReservation, triedPaid, counts } = recent;
-  for (const listed of await gw.sweepRecent(nowMs - SWEEP_LOOKBACK_MS)) {
+  const all = await gw.sweepRecent(nowMs - SWEEP_LOOKBACK_MS);
+  if (all.links) recent.links = all.links;
+  for (const listed of all) {
     counts.sessionsChecked++;
     let read = false;
     try {

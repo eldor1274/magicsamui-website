@@ -88,6 +88,21 @@ export interface RecentPayment {
   read(): Promise<GatewayPayment>;
 }
 
+/**
+ * The payment pages a provider's step 1 tracked in one sweeper run (Beam, round 6: its links), reported in the sweep
+ * route's runs[]. open: links-open entries; scanned: links the charge scan named; watched / pendingWatched: the late
+ * watch and the pending watch (released links); watchedRead: released links read this run; watchCovered: late-watch
+ * links not read because a completed charge scan covers them.
+ */
+export interface SweepLinkCounts {
+  open: number;
+  scanned: number;
+  watched: number;
+  pendingWatched: number;
+  watchedRead: number;
+  watchCovered: number;
+}
+
 /** The fee line's Cloudbeds item (see fulfil.ts feeItemFor: Cloudbeds keeps the first name/note an appItemID gets). */
 export interface FeeItem {
   appItemId: string;
@@ -174,8 +189,9 @@ export interface PaymentGateway {
   /**
    * The provider's payments of ours (this mode) created since sinceMs, for the sweeper's step 1 (Stripe: the
    * Checkout Sessions of the lookback window, foreign and other-mode ones left out). Throws on network/5xx.
+   * links: what the provider's own tracking read this run (Beam, round 6; Stripe: none).
    */
-  sweepRecent(sinceMs: number): Promise<RecentPayment[]>;
+  sweepRecent(sinceMs: number): Promise<RecentPayment[] & { links?: SweepLinkCounts }>;
   text: GatewayText;
   /**
    * TTL (seconds) of every marker fulfil writes for this provider's payments: the done marker, the paid
