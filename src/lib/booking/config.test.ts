@@ -12,9 +12,11 @@ import {
   resolveDataSource,
   resolvePaymentMode,
 } from "./config.ts";
+import { BEAM_LIVE_ENV, beamRunCheckout, makeBeamKit } from "./beamTestkit.ts";
+import { satangToBaht } from "./quote.ts";
 import { runStatus } from "./status.ts";
-import { createBookingToken } from "./token.ts";
-import type { BookingSummary, StatusResponse } from "./types.ts";
+import { verifyBookingToken } from "./token.ts";
+import type { StatusResponse } from "./types.ts";
 import { allowListedSearch, isAllowedHost, resolveOrigin, resumePaymentPath } from "./urls.ts";
 
 const KEYS = { BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k" };
@@ -90,68 +92,55 @@ test("beam live mode is hard-stopped in code (no Beam fulfilment)", () => {
 
 /**
  * The answer the return page gets for a PAID beam-live booking, with beam-live unlocked as it would be once
- * LIVE_FULFILMENT_READY.beam is true (the code switch is overridden here, as tests only may).
+ * LIVE_FULFILMENT_READY.beam is true (makeBeamKit overrides the code switch, as tests only may). Rewritten in S4.6:
+ * a confirmed hold-first booking - the checkout route's path (runCheckout: the hold, the link), the guest pays by
+ * card on the fake Beam, and the return page's status confirms it in Cloudbeds.
  */
-async function beamLivePaidAnswer(): Promise<StatusResponse> {
-  const now = Date.parse("2026-10-21T03:00:00Z");
-  const env = { ...KEYS, ...SECRET, ...BEAM_WRITES, ...BEAM_LIVE_EXTRA, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production", CLOUDBEDS_API_KEY: "cbat_x" };
-  const config = getBookingConfig(env, { liveFulfilmentReady: true });
-  const booking: BookingSummary = {
-    ref: "MSV-20261021-GQ7K",
-    paymentMode: "beam-live",
-    checkIn: "2026-11-10",
-    checkOut: "2026-11-13",
-    nights: 3,
-    items: [{ slug: "honeymoon-suite", ratePlanId: "standard", adults: 2, addonIds: [] }],
-    itemRoomSatang: [2_700_000],
-    promoCode: null,
-    totalSatang: 2_781_000,
-    cardFeeSatang: 81_000,
-    dueNowSatang: 2_781_000,
-    createdAt: new Date(now).toISOString(),
-    linkExpiresAt: new Date(now + 30 * 60_000).toISOString(),
-  };
-  const linkId = "plinkGuard0001";
-  const t = createBookingToken(booking, null, config.tokenSecret, 48 * 3600, now);
-  const l = createBookingToken(booking, linkId, config.tokenSecret, 48 * 3600, now);
-  // Beam answers that the booking's own payment link is PAID, for exactly its amount (nothing else is asked).
-  const fetchImpl = (async (input: string | URL | Request) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if (!url.endsWith(`/api/v1/payment-links/${linkId}`)) throw new Error(`unexpected Beam call ${url}`);
-    return Response.json({ paymentLinkId: linkId, status: "PAID", order: { netAmount: booking.dueNowSatang, currency: "THB", referenceId: booking.ref } });
-  }) as typeof fetch;
-  const res = await runStatus({ t, p: null, l }, { config, nowMs: now, fetchImpl });
+async function beamLivePaidAnswer(): Promise<{ body: StatusResponse; dueNowSatang: number }> {
+  const kit = makeBeamKit({ env: BEAM_LIVE_ENV });
+  assert.equal(kit.config.paymentMode, "beam-live");
+  assert.equal(kit.config.production, true);
+  const res = await beamRunCheckout(kit);
   assert.equal(res.status, 200, JSON.stringify(res.body));
-  const body = res.body as StatusResponse;
+  assert.ok(res.body.ok);
+  const { linkToken, redirectUrl, quote } = res.body;
+  const linkId = new URL(redirectUrl).pathname.split("/").pop() ?? "";
+  const l = verifyBookingToken(linkToken, kit.config.tokenSecret, kit.now.ms);
+  assert.ok(l.ok);
+  const t = new URL(kit.fakeBeam.link(linkId).redirectUrl ?? "").searchParams.get("t");
+  kit.fakeBeam.pay(linkId, "CARD");
+  const status = await runStatus(
+    { t, p: null, l: linkToken },
+    { config: kit.config, nowMs: kit.now.ms, providerDeps: (provider) => (provider === "beam" ? { deps: kit.deps, gw: kit.gw } : null) },
+  );
+  assert.equal(status.status, 200, JSON.stringify(status.body));
+  const body = status.body as StatusResponse;
   assert.equal(body.status, "paid");
-  return body;
+  return { body, dueNowSatang: quote.dueNowSatang };
 }
 
 // Guard for the Beam work (step S4.5 before S7.1). Since S0.3 the browser sends the GA4 purchase in every mode but
 // the demo ONLY with the server's confirmation (StatusResponse.purchase: the Cloudbeds reservationID as transaction
-// id), and the Beam status path returns none yet: unlocked like this, beam-live would take money and never count
-// a purchase. This test passes while LIVE_FULFILMENT_READY.beam is false and fails as soon as the switch is flipped
-// while Beam's paid answer still carries no purchase.
+// id). Unlocked without it, beam-live would take money and never count a purchase. This test fails as soon as the
+// switch is flipped while Beam's paid answer carries no purchase (it does since S4.6: the test below).
 test("guard: LIVE_FULFILMENT_READY.beam may only be true once Beam's paid status answer carries the purchase", async () => {
-  const body = await beamLivePaidAnswer();
+  const { body } = await beamLivePaidAnswer();
   assert.ok(
     body.purchase !== null || !LIVE_FULFILMENT_READY.beam,
     "LIVE_FULFILMENT_READY.beam is true but a paid beam-live status answer has no purchase: return purchaseFor(config, booking, fulfilment) from the Beam status path first (Beam step S4.5)",
   );
 });
 
-// The same requirement, failing until it is done (node --test reports it as TODO, which does not fail the run).
-test(
-  "Beam's paid status answer carries the GA4 purchase (Cloudbeds reservationID, baht, THB)",
-  { todo: "Beam step S4.5: the Beam status path must return purchaseFor(config, booking, fulfilment) before LIVE_FULFILMENT_READY.beam is set" },
-  async () => {
-    const body = await beamLivePaidAnswer();
-    assert.notEqual(body.purchase, null);
-    assert.equal(body.fulfilment.state, "confirmed");
-    assert.equal(body.purchase?.transactionId, body.fulfilment.reservationId);
-    assert.equal(body.purchase?.currency, "THB");
-  },
-);
+// The same requirement, met since S4.6 (it was a TODO test until then): the hold-first Beam status answers a confirmed
+// beam-live booking on the production deployment with purchaseFor's purchase.
+test("Beam's paid status answer carries the GA4 purchase (Cloudbeds reservationID, baht, THB)", async () => {
+  const { body, dueNowSatang } = await beamLivePaidAnswer();
+  assert.notEqual(body.purchase, null);
+  assert.equal(body.fulfilment.state, "confirmed");
+  assert.equal(body.purchase?.transactionId, body.fulfilment.reservationId);
+  assert.equal(body.purchase?.currency, "THB");
+  assert.equal(body.purchase?.valueBaht, satangToBaht(dueNowSatang));
+});
 
 test("live mode needs live Cloudbeds data", () => {
   const full = { ...KEYS, ...SECRET, ...BEAM_LIVE_EXTRA, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };

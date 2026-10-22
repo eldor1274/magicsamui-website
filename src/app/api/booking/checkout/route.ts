@@ -10,14 +10,15 @@ import {
   logEvent,
   readJsonBody,
 } from "@/lib/booking/routeUtils";
-import { getStripeDeps } from "@/lib/booking/runtime";
+import { getBeamDeps, getStripeDeps } from "@/lib/booking/runtime";
 import { TEST_ACCESS_COOKIE, readCookie } from "@/lib/booking/testAccess";
 import { resolveOrigin } from "@/lib/booking/urls";
 
 // Booking checkout: re-quotes on the server (the client never sends prices),
-// then demo -> simulated payment page; beam -> Beam payment link (preview, no
-// reservation); stripe -> HOLD FIRST in Cloudbeds, assert the price, then a
-// Stripe Checkout Session (see lib/booking/stripeCheckout.ts).
+// then demo -> simulated payment page; stripe and beam -> HOLD FIRST in
+// Cloudbeds, assert the price, then a Stripe Checkout Session (see
+// lib/booking/stripeCheckout.ts) or a Beam payment link of the guest's method
+// group (lib/booking/beamCheckout.ts; Beam design S4.6).
 export const runtime = "nodejs";
 export const maxDuration = 30;
 /** The checkout chain answers by this long after the request arrived (maxDuration minus a margin). */
@@ -45,6 +46,8 @@ export async function POST(request: Request) {
       origin: resolveOrigin(request.headers.get("host"), process.env),
       log: logEvent,
       stripe: getStripeDeps(config) ?? undefined,
+      // Beam modes: every Beam call ends by the route's deadline too (null outside the Beam modes).
+      beam: getBeamDeps(config, { deadlineMs }) ?? undefined,
       clientIp: clientIp(request) === "unknown" ? null : clientIp(request),
       testAccessToken: readCookie(request.headers.get("cookie"), TEST_ACCESS_COOKIE),
       deadlineMs,

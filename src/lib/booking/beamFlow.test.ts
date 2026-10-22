@@ -1,7 +1,7 @@
 // The Beam checkout (design S4.3): startBeamCheckout - the hold-first core (holdFirstCheckout.ts) with
 // beamCheckoutAdapter (payments/beamCheckoutAdapter.ts) - driven directly on the in-repo fake Beam and the fake
-// Cloudbeds (beamTestkit.ts makeBeamKit), with the real Cloudbeds writer, alerter, gateway and sweeper. Not wired
-// into the checkout route yet (S4.6).
+// Cloudbeds (beamTestkit.ts makeBeamKit), with the real Cloudbeds writer, alerter, gateway and sweeper; and, since
+// design S4.6, through runCheckout (checkout.ts, the checkout route's path: beamTestkit.ts beamRunCheckout).
 //
 // Covered: the happy path for card_ewallet and for PromptPay (the hold and its -B-TEST identifier, the folio read
 // back, the link request per group with the fee item only on card_ewallet, the signed note, the PaymentRecord and
@@ -9,18 +9,24 @@
 // mismatch; link 5xx and 4xx; a lost answer retried with the same key; a create lost twice (the hold cancelled, and a
 // charge that ever appears on that link found by the sweeper's charge scan -> the cancelled-hold CRITICAL); afterCreate
 // failures; a crash after the page; the test guard; the PromptPay switch; the circuit breaker; the budget; no personal
-// data anywhere.
+// data anywhere. Through runCheckout (S4.6): both method groups, the method required (and refused while switched off)
+// before anything is read, written or sent, a method/fee mismatch, the maximum charge, DIRECT, a code plan (LONGSTAY),
+// an automatic discount, availability and checkout on the same Cloudbeds reads, the paused answer and missing deps.
+// A Stripe request carrying payMethod is unaffected: feeByMethod.test.ts.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { buildOffers, getInventory, promoAskFor } from "./availability.ts";
 import { BEAM_MAX_CHARGE_SATANG } from "./beam.ts";
 import type { BeamCreatePaymentLinkRequest } from "./beam.ts";
 import { beamCheckoutAdapter, startBeamCheckout } from "./beamCheckout.ts";
-import { BEAM_LIVE_ENV, BEAM_MERCHANT_ID, BEAM_TEST_ENV, beamCheckout, beamHeld, beamQuote, makeBeamKit } from "./beamTestkit.ts";
+import { BEAM_LIVE_ENV, BEAM_MERCHANT_ID, BEAM_TEST_ENV, beamCheckout, beamHeld, beamQuote, beamRequest, beamRunCheckout, beamServerQuote, makeBeamKit } from "./beamTestkit.ts";
 import type { BeamKit } from "./beamTestkit.ts";
 import { POLICY_VERSION } from "./catalogue.ts";
+import { CHOOSE_PAY_METHOD, runCheckout } from "./checkout.ts";
 import type { StripeCheckoutInput } from "./checkoutShared.ts";
-import { todayInBangkok } from "./dates.ts";
+import { getInventoryConfig } from "./config.ts";
+import { addDays, todayInBangkok } from "./dates.ts";
 import { fulfilPayment } from "./fulfil.ts";
 import { DEFAULT_CLOSED_WORD, DEFAULT_HOLD_NOTE_DEADLINE } from "./holdFirstCheckout.ts";
 import type { CheckoutPageInput } from "./holdFirstCheckout.ts";
@@ -28,10 +34,11 @@ import { createMemoryKv } from "./kv.ts";
 import type { KvStore } from "./kv.ts";
 import { keyScope, keys, readJson } from "./lock.ts";
 import type { HoldRecord } from "./lock.ts";
+import { FAKE_DIRECT_PROMO_CODE, FAKE_LONGSTAY_PROMO_CODE, fakeLongStayCodePlan, fakeLongTermPlan } from "./mock/fakeCloudbeds.ts";
 import { BEAM_PAUSED_MESSAGE, beamHoldNoteDeadline } from "./payments/beamCheckoutAdapter.ts";
 import { readRecord, verifyBeamNote } from "./payments/beamRecord.ts";
 import { runSweep } from "./sweep.ts";
-import { FAR_CHECKIN, FAR_CHECKOUT, GUEST, HONEYMOON, NOW, ORIGIN, TEST_EMAIL, TOKEN_SECRET, recordingKv } from "./testkit.ts";
+import { FAR_CHECKIN, FAR_CHECKOUT, GUEST, HONEYMOON, NOW, ORIGIN, ROOM_TYPES, TEST_EMAIL, TOKEN_SECRET, recordingKv } from "./testkit.ts";
 import { idempotencyKeyFor, verifyBookingToken } from "./token.ts";
 import type { BookingSummary, CartItemInput, PayMethod } from "./types.ts";
 import { beamCancelUrl, beamReturnUrl } from "./urls.ts";
@@ -694,4 +701,287 @@ test("a guest arriving after 11 PM: arrivalLate in the record and the signed not
     const paidNote = onlyReservation(kit).notes.find((n) => n.includes("PAID via Beam"));
     assert.ok(paidNote?.endsWith("\nEstimated arrival: after 11 PM."), `${source}: ${paidNote}`);
   }
+});
+
+/* ------------------------- runCheckout: the checkout route's path (design S4.6) ------------------------- */
+
+/** What a Beam checkout without a method group the checkout takes is answered (round-4 amendment). */
+const CHOOSE_HOW_TO_PAY = { status: 400, body: { ok: false, error: "invalid_request", message: CHOOSE_PAY_METHOD, fixStep: "payment" } };
+const SEVEN_NIGHTS = { checkIn: FAR_CHECKIN, checkOut: addDays(FAR_CHECKIN, 7) };
+/** Honeymoon: base 9,000/night. */
+const HM_BASE_7 = 7 * 900_000;
+const cbWrites = (kit: BeamKit) => kit.fakeCb.calls.filter((c) => !c.method.startsWith("get"));
+const postOf = (kit: BeamKit) => kit.fakeCb.calls.find((c) => c.method === "postReservation");
+const linkIdOf = (redirectUrl: string) => new URL(redirectUrl).pathname.split("/").pop() ?? "";
+/** The booking token on the link's return URL (no payment id). */
+const pageTokenOf = (kit: BeamKit, linkId: string) => verifyBookingToken(new URL(kit.fakeBeam.link(linkId).redirectUrl ?? "").searchParams.get("t"), TOKEN_SECRET, kit.now.ms);
+
+test("runCheckout on Beam: card_ewallet and PromptPay go hold-first through startBeamCheckout; both booking tokens carry the method; the guest's details reach Cloudbeds only", async () => {
+  for (const payMethod of ["card_ewallet", "promptpay"] as const) {
+    const { kit, kv } = recordedKit();
+    const res = await beamRunCheckout(kit, HONEYMOON, { payMethod });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.ok(res.body.ok);
+    const body = res.body;
+    assert.equal(body.provider, "beam");
+    assert.equal(body.paymentMode, "beam-playground");
+    assert.equal(body.dataSource, "cloudbeds");
+    // The hold first, with the guest's details (Cloudbeds only), "Confirmation pending".
+    const hold = onlyReservation(kit);
+    assert.equal(hold.reservationID, body.holdReservationId);
+    assert.equal(hold.status, "not_confirmed");
+    assert.equal(hold.thirdPartyIdentifier, `${body.ref}-B-TEST`);
+    assert.equal(postOf(kit)?.params.guestEmail, TEST_EMAIL);
+    // One link of the group, for exactly the quote; PromptPay is fee-free (owner decision 1).
+    const posts = linkPosts(kit);
+    assert.equal(posts.length, 1);
+    const req = posts[0].body as BeamCreatePaymentLinkRequest;
+    assert.equal(req.order.netAmount, body.quote.dueNowSatang);
+    assert.deepEqual(req.linkSettings, payMethod === "card_ewallet" ? { card: { isEnabled: true }, eWallets: { isEnabled: true } } : { qrPromptPay: { isEnabled: true } });
+    assert.equal(body.quote.cardFeeSatang > 0, payMethod === "card_ewallet");
+    assert.equal(body.quote.totalSatang - body.quote.cardFeeSatang, 3 * 900_000);
+    // The booking summary carries the method, in the page's token and in the link token.
+    const linkId = linkIdOf(body.redirectUrl);
+    const page = pageTokenOf(kit, linkId);
+    assert.ok(page.ok);
+    assert.equal(page.payload.paymentLinkId, null);
+    assert.equal(page.payload.booking.payMethod, payMethod);
+    const link = verifyBookingToken(body.linkToken, TOKEN_SECRET, kit.now.ms);
+    assert.ok(link.ok);
+    assert.equal(link.payload.paymentLinkId, linkId);
+    assert.equal(link.payload.booking.payMethod, payMethod);
+    assert.equal((await readRecord(kit.deps.kv, linkId))?.payMethod, payMethod);
+    // No personal data reached Beam, Redis or the logs. Each value must stand alone (never inside a longer random id).
+    const leaked = JSON.stringify([kit.fakeBeam.calls, kv.writes, kit.logs]);
+    for (const pii of [TEST_EMAIL, "Owner", "952466011", "95 246 6011", "Late dinner"]) {
+      const alone = new RegExp(`(?<![A-Za-z0-9])${pii.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`);
+      assert.ok(!alone.test(leaked), `${payMethod}: ${pii}`);
+    }
+  }
+});
+
+test("runCheckout on Beam without a method (absent, null, ''): 400 'Please choose how to pay' (fixStep payment) before the guest's details, any Cloudbeds call, KV write or Beam call", async () => {
+  const { kit, kv } = recordedKit();
+  const base = beamRequest();
+  const quote = await beamServerQuote(kit, base);
+  const priced = { ...base, expectedTotalSatang: quote.totalSatang, expectedDueNowSatang: quote.dueNowSatang };
+  const cbAt = kit.fakeCb.calls.length;
+  const writesAt = kv.writes.length;
+  const noMethod: Record<string, unknown> = { ...priced };
+  delete noMethod.payMethod;
+  for (const [label, body] of [
+    ["absent", noMethod],
+    ["null", { ...priced, payMethod: null }],
+    ["empty", { ...priced, payMethod: "" }],
+    ["absent, and no guest details either (the method is asked for first)", { ...noMethod, guest: undefined }],
+  ] as const) {
+    assert.deepEqual(await runCheckout(body, kit.checkoutDeps()), CHOOSE_HOW_TO_PAY, label);
+  }
+  assert.deepEqual(kit.fakeCb.calls.slice(cbAt), [], "no Cloudbeds call");
+  assert.deepEqual(kv.writes.slice(writesAt), [], "no KV write");
+  assert.equal(kit.fakeBeam.calls.length, 0, "no Beam call");
+  assert.equal(kit.fakeCb.reservations.size, 0);
+  assert.equal(kit.alerts.length, 0);
+});
+
+test("runCheckout with BEAM_PROMPTPAY=off: promptpay gets the same 400 with nothing read, written, held or sent; card_ewallet books normally", async () => {
+  const now = { ms: NOW };
+  const kv = recordingKv(createMemoryKv(() => now.ms));
+  const kit = makeBeamKit({ env: { ...BEAM_TEST_ENV, BEAM_PROMPTPAY: "off" }, kv, now });
+  assert.deepEqual(await runCheckout(beamRequest(HONEYMOON, { payMethod: "promptpay", expectedTotalSatang: 2_700_000, expectedDueNowSatang: 2_700_000 }), kit.checkoutDeps()), CHOOSE_HOW_TO_PAY);
+  assert.deepEqual(kit.fakeCb.calls, [], "no Cloudbeds call");
+  assert.deepEqual(kv.writes, [], "no KV write");
+  assert.equal(kit.fakeBeam.calls.length, 0, "no Beam call");
+  assert.equal(kit.alerts.length, 0, "no page-failed alert: nothing was held");
+  const res = await beamRunCheckout(kit, HONEYMOON, { payMethod: "card_ewallet" });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.deepEqual((linkPosts(kit)[0].body as BeamCreatePaymentLinkRequest).linkSettings, { card: { isEnabled: true }, eWallets: { isEnabled: true } });
+});
+
+test("runCheckout on Beam: a page priced for the other method group gets the usual 409 price_changed with this group's quote; nothing held or sent", async () => {
+  const kit = makeBeamKit();
+  const card = await beamServerQuote(kit, beamRequest(HONEYMOON, { payMethod: "card_ewallet" }));
+  const qr = await beamServerQuote(kit, beamRequest(HONEYMOON, { payMethod: "promptpay" }));
+  assert.ok(card.cardFeeSatang > 0);
+  assert.equal(qr.cardFeeSatang, 0);
+  assert.equal(card.totalSatang - card.cardFeeSatang, qr.totalSatang);
+  for (const [sent, shown, fresh] of [
+    ["promptpay", card, qr],
+    ["card_ewallet", qr, card],
+  ] as const) {
+    const res = await runCheckout({ ...beamRequest(HONEYMOON, { payMethod: sent }), expectedTotalSatang: shown.totalSatang, expectedDueNowSatang: shown.dueNowSatang }, kit.checkoutDeps());
+    assert.equal(res.status, 409, sent);
+    assert.ok(!res.body.ok);
+    assert.equal(res.body.error, "price_changed", sent);
+    assert.deepEqual(res.body.quote, fresh, sent);
+  }
+  assert.deepEqual(cbWrites(kit), []);
+  assert.equal(kit.fakeCb.reservations.size, 0);
+  assert.equal(kit.fakeBeam.calls.length, 0);
+});
+
+test("runCheckout on Beam: a stay above Beam's maximum charge is refused (422) after the re-quote and before any Cloudbeds write, KV write or Beam call", async () => {
+  const now = { ms: NOW };
+  const kv = recordingKv(createMemoryKv(() => now.ms));
+  // 30 nights at 40,000 baht: THB 1,236,000 with the 3% fee, above BEAM_MAX_CHARGE_SATANG (THB 999,999.99).
+  const kit = makeBeamKit({ cb: { roomTypes: { ...ROOM_TYPES, "462958": { ...ROOM_TYPES["462958"], rate: 40_000 } } }, kv, now });
+  const stay = { checkIn: FAR_CHECKIN, checkOut: addDays(FAR_CHECKIN, 30) };
+  const quote = await beamServerQuote(kit, beamRequest(HONEYMOON, stay));
+  assert.ok(quote.dueNowSatang > BEAM_MAX_CHARGE_SATANG);
+  const reads = kit.fakeCb.calls.length;
+  const res = await runCheckout({ ...beamRequest(HONEYMOON, stay), expectedTotalSatang: quote.totalSatang, expectedDueNowSatang: quote.dueNowSatang }, kit.checkoutDeps());
+  assert.deepEqual(res, {
+    status: 422,
+    body: {
+      ok: false,
+      error: "payment_unavailable",
+      message: "A stay of this size can't be paid online in one payment. Nothing has been reserved or charged - please message us on WhatsApp and we'll book it for you.",
+    },
+  });
+  assert.deepEqual(cbWrites(kit), [], "no Cloudbeds write");
+  assert.ok(
+    kit.fakeCb.calls.slice(reads).every((c) => c.method === "getAvailableRoomTypes" || (c.method === "getRatePlans" && c.params.roomTypeID === undefined)),
+    "only the re-quote's reads (no stay-rule read under a lock)",
+  );
+  assert.deepEqual(kv.writes, [], "no KV write");
+  assert.equal(kit.fakeBeam.calls.length, 0, "no Beam call");
+  assert.ok(logged(kit, "checkout_refused_over_max_charge").some((l) => l.data?.amount === quote.dueNowSatang));
+});
+
+test("runCheckout on Beam: DIRECT sells Cloudbeds' Direct rate (held on its roomRateID with the promo code), the link for its total; an unknown code is ignored (base rate), never refused", async () => {
+  const kit = makeBeamKit({ cb: { roomTypes: { ...ROOM_TYPES, "462958": { ...ROOM_TYPES["462958"], directRateId: "rate-hm-direct" } } } });
+  assert.equal(kit.config.promo.mode, "direct-rate");
+  const res = await beamRunCheckout(kit, HONEYMOON, { promo: " direct " });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.ok(res.body.ok);
+  const { quote } = res.body;
+  const direct = 3 * 720_000;
+  assert.equal(quote.roomsSubtotalSatang, direct);
+  assert.deepEqual(quote.directRate, { code: "DIRECT", label: "Direct rate - code DIRECT", baseRoomsSatang: 3 * 900_000, savingSatang: 3 * 900_000 - direct });
+  assert.equal(quote.cardFeeSatang, Math.round(direct * 0.03));
+  const post = postOf(kit);
+  assert.equal(post?.params["rooms[0][roomRateID]"], "rate-hm-direct");
+  assert.equal(post?.params.promoCode, FAKE_DIRECT_PROMO_CODE);
+  assert.match(onlyReservation(kit).notes.join("\n"), /Direct rate \(code DIRECT\)\./);
+  assert.equal((linkPosts(kit)[0].body as BeamCreatePaymentLinkRequest).order.netAmount, quote.dueNowSatang);
+  const page = pageTokenOf(kit, linkIdOf(res.body.redirectUrl));
+  assert.ok(page.ok);
+  assert.equal(page.payload.booking.promoCode, "DIRECT");
+  assert.deepEqual(page.payload.booking.itemDiscounts, [{ kind: "direct", label: "Direct rate - code DIRECT", listSatang: 3 * 900_000 }]);
+
+  // Until S4.6 a code sent to a Beam checkout was refused (promo_invalid); now an unknown one is ignored, as on Stripe.
+  const other = await beamRunCheckout(kit, GARDEN, { promo: "NOPE" });
+  assert.equal(other.status, 200, JSON.stringify(other.body));
+  assert.ok(other.body.ok);
+  assert.equal(other.body.quote.promo, null);
+  assert.equal(other.body.quote.directRate, null);
+  assert.equal(other.body.quote.roomsSubtotalSatang, 3 * 300_000);
+});
+
+test("runCheckout on Beam: a code plan (LONGSTAY, 7 nights) is held on its roomRateID with Cloudbeds' promo code and labelled with the plan's name", async () => {
+  const kit = makeBeamKit({ cb: { roomTypes: { ...ROOM_TYPES, "462958": { ...ROOM_TYPES["462958"], plans: [fakeLongStayCodePlan("rate-hm-ls")] } } } });
+  const res = await beamRunCheckout(kit, HONEYMOON, { ...SEVEN_NIGHTS, promo: "longstay" });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.ok(res.body.ok);
+  const { quote } = res.body;
+  const longStay = 7 * 666_000;
+  assert.equal(quote.roomsSubtotalSatang, longStay);
+  assert.deepEqual(quote.directRate, { code: "LONGSTAY", label: "Long term - code LONGSTAY", baseRoomsSatang: HM_BASE_7, savingSatang: HM_BASE_7 - longStay });
+  const post = postOf(kit);
+  assert.equal(post?.params["rooms[0][roomRateID]"], "rate-hm-ls");
+  assert.equal(post?.params.promoCode, FAKE_LONGSTAY_PROMO_CODE);
+  assert.match(onlyReservation(kit).notes.join("\n"), /Long term \(code LONGSTAY\)\./);
+  assert.equal((linkPosts(kit)[0].body as BeamCreatePaymentLinkRequest).order.netAmount, quote.dueNowSatang);
+  const page = pageTokenOf(kit, linkIdOf(res.body.redirectUrl));
+  assert.ok(page.ok);
+  assert.equal(page.payload.booking.promoCode, "LONGSTAY");
+});
+
+test("runCheckout on Beam: an automatic discount (Long term booking, 7 nights) is held on its roomRateID with no promo code", async () => {
+  const kit = makeBeamKit({ cb: { roomTypes: { ...ROOM_TYPES, "462958": { ...ROOM_TYPES["462958"], plans: [fakeLongTermPlan("rate-hm-lt")] } } } });
+  const res = await beamRunCheckout(kit, HONEYMOON, SEVEN_NIGHTS);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.ok(res.body.ok);
+  const { quote } = res.body;
+  const longTerm = 7 * 846_000;
+  assert.equal(quote.roomsSubtotalSatang, longTerm);
+  assert.deepEqual(quote.autoDiscount, { names: ["Long term booking"], baseRoomsSatang: HM_BASE_7, savingSatang: HM_BASE_7 - longTerm });
+  assert.equal(quote.directRate, null);
+  const post = postOf(kit);
+  assert.equal(post?.params["rooms[0][roomRateID]"], "rate-hm-lt");
+  assert.equal(post?.params.promoCode, undefined, "an automatic discount needs no code");
+  assert.match(onlyReservation(kit).notes.join("\n"), /Automatic discount: Long term booking\./);
+  assert.equal((linkPosts(kit)[0].body as BeamCreatePaymentLinkRequest).order.netAmount, quote.dueNowSatang);
+});
+
+test("availability and checkout on Beam read Cloudbeds with the same baseRateOnly and plans: the search's price is the checkout's, with and without a code", async () => {
+  const roomTypes = {
+    ...ROOM_TYPES,
+    "462958": { ...ROOM_TYPES["462958"], directRateId: "rate-hm-direct", plans: [fakeLongTermPlan("rate-hm-lt"), fakeLongStayCodePlan("rate-hm-ls")] },
+  };
+  const kit = makeBeamKit({ cb: { roomTypes } });
+  const inv = getInventoryConfig(BEAM_TEST_ENV);
+  assert.deepEqual(inv.cloudbeds, kit.config.cloudbeds);
+  assert.equal(inv.cloudbeds?.baseRateOnly, true);
+  assert.ok((inv.cloudbeds?.autoDiscountPlans ?? []).length > 0);
+  assert.deepEqual(inv.promo, kit.config.promo);
+  assert.deepEqual(inv.ratePlans, kit.config.ratePlans);
+  for (const [code, expected] of [
+    [null, 7 * 846_000],
+    ["DIRECT", 7 * 720_000],
+    ["LONGSTAY", 7 * 666_000],
+  ] as const) {
+    // The availability route's own steps (route.ts): promoAskFor -> getInventory -> buildOffers.
+    const ask = promoAskFor(code, inv.promo);
+    const search = await getInventory(SEVEN_NIGHTS.checkIn, SEVEN_NIGHTS.checkOut, inv, {
+      fetchImpl: kit.fakeCb.fetch,
+      allowDemoFallback: false,
+      cacheTtlMs: 0,
+      autoDiscountsBestEffort: true,
+      ...(ask ? { promo: ask } : {}),
+    });
+    const offer = buildOffers(search.inventory, 2, inv.ratePlans).find((o) => o.slug === "honeymoon-suite");
+    const quote = await beamServerQuote(kit, beamRequest(HONEYMOON, { ...SEVEN_NIGHTS, ...(code ? { promo: code } : {}) }));
+    assert.equal(offer?.rates[0].totalSatang, expected, `${code}: search`);
+    assert.equal(quote.roomsSubtotalSatang, expected, `${code}: checkout`);
+  }
+});
+
+test("runCheckout on Beam: the circuit breaker's paused answer is passed through unchanged (503, no fixStep) and nothing is held", async () => {
+  const kit = makeBeamKit();
+  await kit.deps.kv.set(keys.beamPaused(SCOPE), String(NOW), 300);
+  const res = await beamRunCheckout(kit);
+  assert.deepEqual(res, { status: 503, body: { ok: false, error: "payment_unavailable", message: BEAM_PAUSED_MESSAGE } });
+  assert.equal(kit.fakeCb.reservations.size, 0);
+  assert.equal(kit.fakeBeam.calls.length, 0);
+});
+
+test("runCheckout on Beam without the route's Beam deps: 503 before anything is held (a Stripe or demo config never builds them)", async () => {
+  const { kit, kv } = recordedKit();
+  const req = beamRequest();
+  const quote = await beamServerQuote(kit, req);
+  const deps = { ...kit.checkoutDeps(), beam: undefined };
+  const res = await runCheckout({ ...req, expectedTotalSatang: quote.totalSatang, expectedDueNowSatang: quote.dueNowSatang }, deps);
+  assert.deepEqual(res, { status: 503, body: { ok: false, error: "payment_unavailable", message: "Online payment is not available right now. Nothing has been charged." } });
+  assert.deepEqual(cbWrites(kit), []);
+  assert.deepEqual(kv.writes, []);
+  assert.equal(kit.fakeBeam.calls.length, 0);
+});
+
+test("runCheckout on Beam: a failing Cloudbeds read counts against the Beam deps (noteCheckoutReadFailure): the third refusal within half an hour tells the owner; nothing reaches Beam", async () => {
+  const kit = makeBeamKit();
+  const down = (async () => new Response("down", { status: 500 })) as unknown as typeof fetch;
+  for (let i = 0; i < 3; i++) {
+    const res = await runCheckout({ ...beamRequest(), expectedTotalSatang: 1, expectedDueNowSatang: 1 }, { ...kit.checkoutDeps(), fetchImpl: down });
+    assert.equal(res.status, 503, `refusal ${i + 1}`);
+    assert.ok(!res.body.ok);
+    assert.equal(res.body.error, "payment_unavailable");
+  }
+  assert.equal(await kit.deps.kv.get(keys.checkoutReadFailures(SCOPE)), "3");
+  assert.deepEqual(
+    kit.alerts.map((a) => a.subject),
+    ["Online bookings failing: Cloudbeds availability can't be read"],
+  );
+  assert.equal(logged(kit, "checkout_refused_cloudbeds_down").length, 3);
+  assert.equal(kit.fakeBeam.calls.length, 0);
 });

@@ -97,10 +97,12 @@ test("the abandon, sweep and Stripe webhook routes never load the Beam client (b
   }
 });
 
-test("the walk finds beam.ts where a route does load it (checkout, status) and skips type-only imports", () => {
+test("the walk finds beam.ts where a route does load it (checkout; status no more since S4.6) and skips type-only imports", () => {
   // The checkout and status routes loaded beam.ts already at production main (checkout.ts, status.ts).
   assert.deepEqual(chainTo(loadedBy("app/api/booking/checkout/route.ts"), BEAM_CLIENT)?.slice(-2), ["lib/booking/checkout.ts", BEAM_CLIENT]);
-  assert.deepEqual(chainTo(loadedBy("app/api/booking/status/route.ts"), BEAM_CLIENT)?.slice(-2), ["lib/booking/status.ts", BEAM_CLIENT]);
+  // Rewritten in S4.6: the legacy link-only Beam status (status.ts's only use of beam.ts) is gone; a Beam booking's
+  // status goes through the gateway runtime.ts loads on its first Beam call, so the status route loads beam.ts no more.
+  assert.equal(chainTo(loadedBy("app/api/booking/status/route.ts"), BEAM_CLIENT), null);
   // beamRecord.ts names beam.ts in a type-only import only: not a load.
   const record = path.join(SRC, "lib/booking/payments/beamRecord.ts");
   assert.ok(readFileSync(record, "utf8").includes('import type { BeamMethodGroup } from "../beam.ts";'));

@@ -29,9 +29,14 @@ export function isTestMode(mode: PaymentMode): boolean {
   return mode === "beam-playground" || mode === "stripe-test";
 }
 
-/** Stripe modes create a Cloudbeds hold before payment (hold-first) and need the guest's details. */
+/**
+ * The Stripe and Beam modes create a Cloudbeds hold before payment (hold-first) and need the guest's details (Beam
+ * design S4.6; it agrees with config.ts rulesProviderOf: beam-playground and beam-live are hold-first, the demo -
+ * BOOKING_PAYMENT_PROVIDER=beam without Beam keys included - is not).
+ */
 export function isHoldFirstMode(mode: PaymentMode): boolean {
-  return providerOf(mode) === "stripe";
+  const provider = providerOf(mode);
+  return provider === "stripe" || provider === "beam";
 }
 
 /**

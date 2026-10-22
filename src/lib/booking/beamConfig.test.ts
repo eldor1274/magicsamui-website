@@ -200,9 +200,11 @@ test("Beam is hold-first like Stripe: Standard only, 100% up front, no add-ons, 
   assert.equal(locked.provider, "beam");
   assert.equal(locked.requiresGuestDetails, true);
   assert.equal(locked.depositPct, 100);
-  // Not flipped in this step: checkout, status and abandon still treat Beam the old way until S4.6.
-  assert.equal(isHoldFirstMode("beam-playground"), false);
-  assert.equal(isHoldFirstMode("beam-live"), false);
+  // Rewritten in S4.6, which flips it: checkout, status and abandon treat the Beam modes as hold-first, as this shape does;
+  // the demo (BOOKING_PAYMENT_PROVIDER=beam without Beam keys included) is not.
+  assert.equal(isHoldFirstMode("beam-playground"), true);
+  assert.equal(isHoldFirstMode("beam-live"), true);
+  assert.equal(isHoldFirstMode(getBookingConfig({ BOOKING_PAYMENT_PROVIDER: "beam" }).paymentMode), false);
 });
 
 test("Beam with live Cloudbeds rates: the direct-rate promo, the automatic discount plans and baseRateOnly, in getBookingConfig and getInventoryConfig alike", () => {

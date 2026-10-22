@@ -579,6 +579,8 @@ export async function startHoldFirstCheckout<Info extends object>(
       createdAt: new Date(nowMs).toISOString(),
       linkExpiresAt: new Date(nowMs + PAYMENT_LINK_TTL_MINUTES * 60_000).toISOString(),
       ...(input.theme ? { theme: input.theme } : {}),
+      // Beam only (design S4.6): the method group the booking was priced and linked for. Never on a Stripe booking.
+      ...(input.payMethod ? { payMethod: input.payMethod } : {}),
     };
     const ttl = TOKEN_TTL_HOURS * 3600;
     const token = createBookingToken(booking, null, config.tokenSecret, ttl, nowMs);

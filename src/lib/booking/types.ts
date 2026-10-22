@@ -440,8 +440,11 @@ export interface ApiError {
   message: string;
   /** Field-level problems for invalid_request (guest-facing sentences). */
   issues?: string[];
-  /** invalid_request: the step where the guest can fix it ("addons" = an add-on no longer fits the stay). */
-  fixStep?: "addons";
+  /**
+   * invalid_request: the step where the guest can fix it ("addons" = an add-on no longer fits the stay; "payment" =
+   * Beam: choose how to pay, design S4.6).
+   */
+  fixStep?: "addons" | "payment";
   /** rate_limited: roughly how long the guest should wait before trying again. */
   retryAfterMinutes?: number;
 }
@@ -506,10 +509,11 @@ export interface CheckoutRequest {
    */
   payMethod?: PayMethod;
   /**
-   * Guest details. REQUIRED when config.requiresGuestDetails (stripe modes):
-   * passed to Cloudbeds (the reservation) and Stripe (receipt email) only -
-   * never stored by us, never put in tokens, URLs, logs or analytics. Ignored
-   * (not read) in demo/beam modes.
+   * Guest details. REQUIRED when config.requiresGuestDetails (the hold-first
+   * modes: Stripe, and Beam from design S4.6): passed to Cloudbeds (the
+   * reservation) and Stripe (receipt email) only - never to Beam, never stored
+   * by us, never put in tokens, URLs, logs or analytics. Ignored (not read) in
+   * demo mode.
    */
   guest?: GuestDetails;
 }
@@ -524,15 +528,16 @@ export interface CheckoutSuccess {
   quote: Quote;
   expiresAt: string;
   /**
-   * Beam modes only: a signed token that also carries the Beam payment link
-   * id (unknown when the redirect URLs were built). Store it in sessionStorage
-   * (see rememberLinkToken in apiClient.ts) BEFORE redirecting; the return
-   * page sends it to /api/booking/status as `l`. null in demo mode.
+   * The hold-first modes: a signed token that also carries the payment id (the
+   * Stripe session id, or the bare Beam payment link id), unknown when the
+   * redirect URLs were built. Store it in sessionStorage (see rememberLinkToken
+   * in apiClient.ts) BEFORE redirecting; the return page sends it to
+   * /api/booking/status as `l`. null in demo mode.
    */
   linkToken: string | null;
   /** demo | beam | stripe. */
   provider: PaymentProvider;
-  /** Cloudbeds reservation id of the hold (stripe modes; null otherwise). Not PII. */
+  /** Cloudbeds reservation id of the hold (the hold-first modes: Stripe, Beam; null in demo mode). Not PII. */
   holdReservationId: string | null;
 }
 
@@ -594,8 +599,8 @@ export interface BookingItemDiscount {
 }
 
 /**
- * Whether the paid booking is confirmed in Cloudbeds (stripe modes).
- * - not_applicable: demo/beam (no reservation is written).
+ * Whether the paid booking is confirmed in Cloudbeds (the hold-first modes: Stripe, Beam).
+ * - not_applicable: demo (no reservation is written), or a payment that is not this booking's.
  * - awaiting_payment: the hold exists, payment not (yet) complete.
  * - confirming: payment received, the Cloudbeds confirmation is still running or retrying.
  * - confirmed: Cloudbeds reservation confirmed with the payment recorded.
@@ -654,7 +659,7 @@ export interface AbandonRequest {
  * paid: the session was already paid - nothing was cancelled (show the return page instead).
  * pending: the payment is still processing - nothing was cancelled.
  * closed: nothing to do (already released or unknown session).
- * not_applicable: demo/beam modes.
+ * not_applicable: demo mode.
  */
 export type AbandonState = "released" | "paid" | "pending" | "closed" | "not_applicable";
 

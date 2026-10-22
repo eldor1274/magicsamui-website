@@ -11,8 +11,9 @@ import type { ApiError, StatusResponse } from "@/lib/booking/types";
 // Server body of the return page, shared by /booking-preview/return and
 // /booking/return. The payment page (Stripe Checkout, Beam, or the simulated /
 // MOCK pages) sends the guest here. The status is verified on the server from
-// the signed token - never from the query string alone - and, on Stripe, a
-// paid Checkout Session is confirmed in Cloudbeds during this render.
+// the signed token - never from the query string alone - and, in the hold-first
+// modes (Stripe, Beam), a paid payment is confirmed in Cloudbeds during this
+// render.
 
 export type ReturnSearchParams = { [key: string]: string | string[] | undefined };
 
@@ -25,18 +26,22 @@ function one(v: string | string[] | undefined): string | null {
 // shares the status API's brake: a per-IP limit, after which the client polls
 // the (separately limited) API instead.
 const isRateLimited = createRateLimiter(30, 60_000);
+/** Every Beam call of this render's status check ends by this long after it started (the pages' maxDuration minus a margin; Stripe ignores it). */
+const STATUS_BUDGET_MS = 25_000;
 
 async function initialStatus(t: string | null, p: string | null, s: string | null): Promise<StatusResponse | ApiError | null> {
   if (!t) return null;
   if (isRateLimited(ipFromHeaders(await headers()))) {
     return { ok: false, error: "rate_limited", message: "We're checking this payment very often - please wait a moment and check again." };
   }
+  // Request time (after the dynamic headers() read).
+  const deadlineMs = Date.now() + STATUS_BUDGET_MS;
   try {
     // getFulfilmentConfig: the emergency stop (BOOKING_ALLOW_LIVE_PAYMENTS=false) blocks NEW charges only;
     // a guest who already paid must still see (and get) a confirmed booking.
     // The provider's deps are picked by the booking's provider, exactly as the status API does.
     const config = getFulfilmentConfig();
-    const result = await runStatus({ t, p, l: null, s }, { config, providerDeps: providerDepsFor(config) });
+    const result = await runStatus({ t, p, l: null, s }, { config, providerDeps: providerDepsFor(config, process.env, { deadlineMs }) });
     return result.body;
   } catch {
     return { ok: false, error: "payment_unavailable", message: "We couldn't check this payment right now. Please refresh in a moment." };

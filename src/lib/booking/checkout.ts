@@ -1,32 +1,28 @@
 // Checkout orchestration (server). Re-quotes on the server from the cart's
 // identifiers only (no cache), then per provider:
 // - demo: signed token + the simulated payment page (nothing reserved);
-// - beam: Beam payment link (preview: no reservation is created);
-// - stripe: HOLD FIRST - Cloudbeds reservation, price assertion, then a
-//   Stripe Checkout Session (stripeCheckout.ts).
+// - stripe and beam (the hold-first modes, from the payment mode: Beam design
+//   S4.6): HOLD FIRST - Cloudbeds reservation, price assertion, then the
+//   provider's payment page: a Stripe Checkout Session (stripeCheckout.ts) or
+//   a Beam payment link of the guest's method group (beamCheckout.ts).
 
 import { InventoryUnavailableError, buildOffers, getCartInventory, promoAskFor } from "./availability.ts";
-import { createPaymentLink, buildPaymentLinkRequest, BeamApiError } from "./beam.ts";
+import { BEAM_MAX_CHARGE_SATANG } from "./beam.ts";
+import { startBeamCheckout } from "./beamCheckout.ts";
 import { POLICY_VERSION, getCatalogueRoom } from "./catalogue.ts";
-import {
-  BOOKING_WINDOW_MONTHS,
-  MAX_CART_ITEMS,
-  MAX_NIGHTS,
-  MAX_SEARCH_ADULTS,
-  MERCHANT_NAME,
-  PAYMENT_LINK_TTL_MINUTES,
-  TOKEN_TTL_HOURS,
-} from "./config.ts";
+import type { StripeCheckoutInput } from "./checkoutShared.ts";
+import { BOOKING_WINDOW_MONTHS, MAX_CART_ITEMS, MAX_NIGHTS, MAX_SEARCH_ADULTS, PAYMENT_LINK_TTL_MINUTES, TOKEN_TTL_HOURS } from "./config.ts";
 import type { BookingConfig } from "./config.ts";
 import { todayInBangkok } from "./dates.ts";
-import { MIN_CHARGE_SATANG, QuoteError, computeQuote, resolvePromo, resolvePromoFor } from "./quote.ts";
-import { createBookingToken, generateBookingRef, generateNonce, idempotencyKeyFor } from "./token.ts";
-import { providerOf } from "./payments/provider.ts";
+import type { BeamGatewayDeps } from "./payments/beamGateway.ts";
+import { MIN_CHARGE_SATANG, QuoteError, computeQuote, feePctFor, payMethodOffered, resolvePromo, resolvePromoFor } from "./quote.ts";
+import { createBookingToken, generateBookingRef } from "./token.ts";
+import { isHoldFirstMode, providerOf } from "./payments/provider.ts";
 import { STRIPE_MAX_CHARGE_SATANG } from "./payments/stripe.ts";
 import { noteCheckoutReadFailure, startStripeCheckout } from "./stripeCheckout.ts";
-import type { StripeDeps } from "./stripeDeps.ts";
+import type { CoreDeps, StripeDeps } from "./stripeDeps.ts";
 import type { BookingSummary, CheckoutFailure, CheckoutResponse, DataSource, PromoResult, Quote } from "./types.ts";
-import { cancelUrl, demoPayUrl, returnUrl } from "./urls.ts";
+import { demoPayUrl } from "./urls.ts";
 import { parseCheckoutRequest, parseGuestInput, unavailableCartSlugs } from "./validate.ts";
 import type { ValidationLimits } from "./validate.ts";
 
@@ -37,12 +33,17 @@ export interface CheckoutDeps {
   nowMs?: number;
   fetchImpl?: typeof fetch;
   pickRefChar?: (max: number) => number;
-  /** Random salt for the Beam idempotency key (tests pin it). */
+  /** Random salt for the payment provider's idempotency key, one per attempt (tests pin it). */
   nonce?: () => string;
   log?: (message: string, data?: Record<string, unknown>) => void;
   /** Stripe modes: Stripe client, Cloudbeds writer, KV, alerts (runtime.ts builds them). */
   stripe?: StripeDeps;
-  /** Client IP (stripe: hashed per-client hold brake; never stored in clear). */
+  /**
+   * Beam modes (design S4.6): the Beam gateway's deps - Cloudbeds writer, KV, alerts, Beam's settings and fetch, the
+   * route's deadline (runtime.ts getBeamDeps builds them).
+   */
+  beam?: BeamGatewayDeps;
+  /** Client IP (hold-first modes: hashed per-client hold brake; never stored in clear). */
   clientIp?: string | null;
   /** Stage B staff cookie value (testAccess.ts). */
   testAccessToken?: string | null;
@@ -50,7 +51,7 @@ export interface CheckoutDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Overrides how long a checkout waits for a unit another checkout holds (tests). */
   unitLockWaitMs?: number;
-  /** Wall-clock deadline (`clock` ms) by which the route must answer; stripe sizes its writes to it. */
+  /** Wall-clock deadline (`clock` ms) by which the route must answer; the hold-first modes size their writes and calls to it. */
   deadlineMs?: number;
   /** Wall clock for the deadline (default Date.now; tests move it). */
   clock?: () => number;
@@ -78,6 +79,11 @@ function fail(status: number, body: Omit<CheckoutFailure, "ok">): CheckoutResult
 const LIVE_AVAILABILITY_UNCONFIRMED = "We could not confirm live availability. Nothing has been charged - please try again in a moment.";
 export const TERMS_CHANGED =
   "Our booking terms were just updated. Nothing has been reserved or charged - please refresh the page, review the terms and tick the box again.";
+/** Beam: the answer to a checkout without a payment method group the checkout takes (design S4.6). */
+export const CHOOSE_PAY_METHOD = "Please choose how to pay";
+const PAYMENT_NOT_AVAILABLE = "Online payment is not available right now. Nothing has been charged.";
+const OVER_MAX_CHARGE =
+  "A stay of this size can't be paid online in one payment. Nothing has been reserved or charged - please message us on WhatsApp and we'll book it for you.";
 
 /**
  * Whether real money may be taken at prices from this data source. Simulated
@@ -107,11 +113,23 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
   }
   const req = parsed.value;
   const provider = providerOf(config.paymentMode);
+  // Stripe and Beam hold the room in Cloudbeds before payment (design S4.6: decided from the payment mode, so
+  // BOOKING_PAYMENT_PROVIDER=beam without Beam keys stays the demo). The demo holds nothing.
+  const holdFirst = isHoldFirstMode(config.paymentMode);
+  /** The active hold-first provider's deps (Stripe's or Beam's), when the route built them. */
+  const core: CoreDeps | undefined = provider === "stripe" ? deps.stripe : provider === "beam" ? deps.beam : undefined;
 
-  // Stripe: the guest's details go to Cloudbeds (the hold) and Stripe (receipt).
-  // Demo/Beam never read them (they stay in the browser).
+  // Beam: the guest's method group prices the fee and sets the link's methods. None chosen (undefined, null, ""), or
+  // PromptPay while BEAM_PROMPTPAY is off, is refused here: before the guest's details, any Cloudbeds read or write,
+  // the hold or any Beam call (round-4 amendment; the adapter refuses such a link again: S4.3).
+  if (provider === "beam" && !payMethodOffered(config, req.payMethod)) {
+    return fail(400, { error: "invalid_request", message: CHOOSE_PAY_METHOD, fixStep: "payment" });
+  }
+
+  // Hold-first: the guest's details go to Cloudbeds (the hold) and to the provider where it takes them (Stripe's
+  // receipt). The demo never reads them (they stay in the browser).
   let guest = null;
-  if (provider === "stripe") {
+  if (holdFirst) {
     const g = parseGuestInput((rawBody as Record<string, unknown>).guest);
     if (!g.ok) return fail(400, { error: "invalid_request", message: "Please check your details.", issues: g.issues });
     guest = g.value;
@@ -132,18 +150,18 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
     }
   }
 
-  // Demo / Beam: the site-side % (an unknown code is refused, as before). Stripe: the guest's code sells a
-  // Cloudbeds promo-code rate (direct-rate) - the Direct rate for DIRECT, or the plan of any other code set
+  // Demo: the site-side % (an unknown code is refused, as before). Hold-first (Stripe, Beam): the guest's code sells
+  // a Cloudbeds promo-code rate (direct-rate) - the Direct rate for DIRECT, or the plan of any other code set
   // up in Cloudbeds - re-quoted from Cloudbeds below like every price: the browser sends only the code,
-  // never a rate. A code no sellable plan carries (or a Stripe page that can't apply codes, e.g.
+  // never a rate. A code no sellable plan carries (or a page that can't apply codes, e.g.
   // ?promo=DIRECT from an old ad link) is ignored, never an error.
   let promo: PromoResult | null = null;
-  if (provider !== "stripe") {
+  if (!holdFirst) {
     promo = resolvePromo(req.promo, config.promoPct, config.promo.code);
     if (promo && !promo.valid) return fail(400, { error: "promo_invalid", message: promo.message });
   }
-  /** Stripe, direct-rate: how Cloudbeds is asked for the code (DIRECT as configured; any other code looked up in the rate-plan index). */
-  const promoAsk = provider === "stripe" ? promoAskFor(req.promo, config.promo) : null;
+  /** Hold-first, direct-rate: how Cloudbeds is asked for the code (DIRECT as configured; any other code looked up in the rate-plan index). */
+  const promoAsk = holdFirst ? promoAskFor(req.promo, config.promo) : null;
 
   if (!dataSourceAllowsPayment(config.paymentMode, config.dataSource)) {
     deps.log?.("checkout_refused_data_source", { mode: config.paymentMode, dataSource: config.dataSource });
@@ -163,12 +181,12 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
   } catch (e) {
     if (!(e instanceof InventoryUnavailableError)) throw e;
     deps.log?.("checkout_refused_cloudbeds_down", { mode: config.paymentMode, error: e.message });
-    if (provider === "stripe" && deps.stripe) await noteCheckoutReadFailure(deps.stripe, "re-quote", e.message);
+    if (holdFirst && core) await noteCheckoutReadFailure(core, "re-quote", e.message);
     return fail(503, { error: "payment_unavailable", message: LIVE_AVAILABILITY_UNCONFIRMED });
   }
   const { inventory, dataSource } = inventoryResult;
   /**
-   * Stripe: the code's verdict on the re-quote's own rate-plan read, and the promo code Cloudbeds was asked with (its
+   * Hold-first: the code's verdict on the re-quote's own rate-plan read, and the promo code Cloudbeds was asked with (its
    * rows sold, and sent with the hold): CLOUDBEDS_PROMO_CODE for DIRECT, Cloudbeds' own spelling of any other code.
    */
   let cloudbedsPromo: { cloudbedsCode: string } | undefined;
@@ -223,7 +241,8 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
         checkOut: req.checkOut,
         items: req.items,
         promo: promo && promo.valid ? { code: promo.code, pct: promo.pct, label: promo.label } : null,
-        pricing: { cardFeePct: config.cardFeePct, depositPct: config.depositPct },
+        // Beam: the fee of the guest's method group (feePctFor), so a page priced for the other group gets price_changed.
+        pricing: { cardFeePct: provider === "beam" ? feePctFor(config, req.payMethod) : config.cardFeePct, depositPct: config.depositPct },
       },
       offers,
     );
@@ -249,18 +268,17 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
 
   const today = limits.today;
 
-  if (provider === "stripe") {
-    if (!deps.stripe || !guest) {
-      return fail(503, { error: "payment_unavailable", message: "Online payment is not available right now. Nothing has been charged." });
+  if (holdFirst) {
+    // The provider's deps and, on Beam, the guest's method group (payMethodOffered above refused a missing one).
+    if (!core || !guest || (provider === "beam" && !req.payMethod)) {
+      return fail(503, { error: "payment_unavailable", message: PAYMENT_NOT_AVAILABLE });
     }
-    // Stripe's largest single charge (8 digits). Checked BEFORE any Cloudbeds write: a long stay in a
-    // large villa must never create a hold that Stripe will then refuse.
-    if (quote.dueNowSatang > STRIPE_MAX_CHARGE_SATANG || quote.lines.some((l) => l.roomSatang > STRIPE_MAX_CHARGE_SATANG)) {
+    // The provider's largest single charge (Stripe: 8 digits; Beam: BEAM_MAX_CHARGE_SATANG). Checked BEFORE any
+    // Cloudbeds write: a long stay in a large villa must never create a hold that the provider will then refuse.
+    const maxChargeSatang = provider === "beam" ? BEAM_MAX_CHARGE_SATANG : STRIPE_MAX_CHARGE_SATANG;
+    if (quote.dueNowSatang > maxChargeSatang || quote.lines.some((l) => l.roomSatang > maxChargeSatang)) {
       deps.log?.("checkout_refused_over_max_charge", { amount: quote.dueNowSatang });
-      return fail(422, {
-        error: "payment_unavailable",
-        message: "A stay of this size can't be paid online in one payment. Nothing has been reserved or charged - please message us on WhatsApp and we'll book it for you.",
-      });
+      return fail(422, { error: "payment_unavailable", message: OVER_MAX_CHARGE });
     }
     // Re-read under the unit lock just before the hold: another checkout may have taken the unit since.
     // It reads WITHOUT the code and without the automatic discounts even for a discounted cart: it only
@@ -288,22 +306,35 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
       quote.directRate && cloudbedsPromo
         ? { code: quote.directRate.code, cloudbedsCode: cloudbedsPromo.cloudbedsCode, ...(promoAsk && "code" in promoAsk ? { generic: true as const } : {}) }
         : null;
-    return startStripeCheckout(
-      { checkIn: req.checkIn, checkOut: req.checkOut, items: req.items, guest, quote, inventory, dataSource, theme: req.theme, today, recheckAvailability, promo: directPromo },
-      {
-        deps: deps.stripe,
-        origin: deps.origin,
-        nowMs,
-        pickRefChar: deps.pickRefChar,
-        nonce: deps.nonce,
-        clientIp: deps.clientIp ?? null,
-        testAccessToken: deps.testAccessToken ?? null,
-        sleep: deps.sleep,
-        unitLockWaitMs: deps.unitLockWaitMs,
-        deadlineMs: deps.deadlineMs,
-        clock: deps.clock,
-      },
-    );
+    const input: StripeCheckoutInput = {
+      checkIn: req.checkIn,
+      checkOut: req.checkOut,
+      items: req.items,
+      guest,
+      quote,
+      inventory,
+      dataSource,
+      theme: req.theme,
+      today,
+      recheckAvailability,
+      promo: directPromo,
+    };
+    const ctx = {
+      origin: deps.origin,
+      nowMs,
+      pickRefChar: deps.pickRefChar,
+      nonce: deps.nonce,
+      clientIp: deps.clientIp ?? null,
+      testAccessToken: deps.testAccessToken ?? null,
+      sleep: deps.sleep,
+      unitLockWaitMs: deps.unitLockWaitMs,
+      deadlineMs: deps.deadlineMs,
+      clock: deps.clock,
+    };
+    // Beam: a payment link of the guest's method group (the booking summary carries the group).
+    if (provider === "beam" && deps.beam && req.payMethod) return startBeamCheckout(input, { ...ctx, deps: deps.beam }, req.payMethod);
+    if (provider === "stripe" && deps.stripe) return startStripeCheckout(input, { ...ctx, deps: deps.stripe });
+    return fail(503, { error: "payment_unavailable", message: PAYMENT_NOT_AVAILABLE });
   }
 
   const ref = generateBookingRef(today, deps.pickRefChar);
@@ -345,52 +376,6 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
     };
   }
 
-  if (!config.beam) {
-    return fail(503, { error: "payment_unavailable", message: "Online payment is not available right now." });
-  }
-
-  try {
-    const body = buildPaymentLinkRequest({
-      ref,
-      quote,
-      merchantName: MERCHANT_NAME,
-      redirectUrl: returnUrl(deps.origin, ref, token, booking.theme),
-      cancelUrl: cancelUrl(deps.origin, ref, token, booking.theme),
-      nowMs,
-      ttlMinutes: PAYMENT_LINK_TTL_MINUTES,
-    });
-    // One key per booking attempt: the salt keeps two same-day bookings whose
-    // 4-character refs happen to collide from sharing a key (Beam would answer
-    // 412 for the same key with a different body).
-    const idempotencyKey = idempotencyKeyFor(ref, config.paymentMode, (deps.nonce ?? generateNonce)());
-    const link = await createPaymentLink(config.beam, body, idempotencyKey, deps.fetchImpl);
-    const linkToken = createBookingToken(booking, link.id, config.tokenSecret, ttl, nowMs);
-    deps.log?.("beam_link_created", { ref, mode: config.paymentMode, paymentLinkId: link.id, amount: quote.dueNowSatang });
-    return {
-      status: 200,
-      body: {
-        ok: true,
-        ref,
-        redirectUrl: link.url,
-        paymentMode: config.paymentMode,
-        dataSource,
-        quote,
-        expiresAt: linkExpiresAt,
-        linkToken,
-        provider: "beam",
-        holdReservationId: null,
-      },
-    };
-  } catch (e) {
-    deps.log?.("beam_link_failed", {
-      ref,
-      status: e instanceof BeamApiError ? e.status : null,
-      errorCode: e instanceof BeamApiError ? e.errorCode : null,
-      message: e instanceof Error ? e.message : String(e),
-    });
-    return fail(502, {
-      error: "upstream_error",
-      message: "We couldn't reach our payment provider. Nothing has been charged - please try again in a moment.",
-    });
-  }
+  // Every other mode is hold-first (above): the legacy no-hold Beam link is gone (design S4.6).
+  return fail(503, { error: "payment_unavailable", message: "Online payment is not available right now." });
 }

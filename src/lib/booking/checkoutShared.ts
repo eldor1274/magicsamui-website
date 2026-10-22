@@ -20,7 +20,7 @@ import type { HoldRecord, Lock } from "./lock.ts";
 import { isLiveMode } from "./payments/provider.ts";
 import type { CoreDeps, StripeDeps } from "./stripeDeps.ts";
 import { STALE_HOLD_MS, SWEEP_STALE_ALERT_MS } from "./sweep.ts";
-import type { CartItemInput, CheckoutFailure, CheckoutResponse, DataSource, IsoDate, Quote, RoomInventory, ThemeName } from "./types.ts";
+import type { CartItemInput, CheckoutFailure, CheckoutResponse, DataSource, IsoDate, PayMethod, Quote, RoomInventory, ThemeName } from "./types.ts";
 
 /** A unit lock outlives the slowest restrictions + postReservation chain. */
 export const UNIT_LOCK_TTL_SECONDS = 90;
@@ -74,6 +74,12 @@ export interface StripeCheckoutInput {
    * no promo-code rate.
    */
   promo?: { code: string; cloudbedsCode: string; generic?: true } | null;
+  /**
+   * Beam only (design S4.6): the guest's payment method group, which the booking summary (and so the booking token)
+   * carries. startBeamCheckout sets it to the link's group; a Stripe checkout never has it, so its booking and tokens
+   * are unchanged.
+   */
+  payMethod?: PayMethod;
 }
 
 export interface StripeCheckoutContext {

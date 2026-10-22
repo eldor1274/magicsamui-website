@@ -8,12 +8,16 @@
 // payments/beamCheckoutAdapter.ts, design S4.3): the link of the guest's method group with our signed note,
 // created on the fake Beam, its PaymentRecord and its links-open entry (which the sweeper reads: S4.2), behind
 // the circuit breaker. beamHeld gives the gateway, sweep and flow tests a real Beam hold to fulfil, release,
-// abandon and sweep.
+// abandon and sweep. beamRunCheckout runs the checkout route's own path (checkout.ts runCheckout with the kit's
+// checkoutDeps, design S4.6): the request's validation, the payment method refusal, the re-quote with the method's
+// fee, then startBeamCheckout.
 
 import { createAlerter } from "./alerts.ts";
 import { getCartInventory, buildOffers } from "./availability.ts";
 import { startBeamCheckout } from "./beamCheckout.ts";
 import type { BeamCheckoutContext } from "./beamCheckout.ts";
+import { runCheckout } from "./checkout.ts";
+import type { CheckoutDeps, CheckoutResult } from "./checkout.ts";
 import { cloudbedsRestrictions } from "./cloudbedsProvider.ts";
 import { createCloudbedsWriter } from "./cloudbedsWrite.ts";
 import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, getBookingConfig } from "./config.ts";
@@ -32,8 +36,8 @@ import type { BeamGateway, BeamGatewayDeps } from "./payments/beamGateway.ts";
 import { computeQuote, feePctFor } from "./quote.ts";
 import type { StripeCheckoutResult } from "./checkoutShared.ts";
 import { testAccessCookieValue } from "./testAccess.ts";
-import { FAR_CHECKIN, FAR_CHECKOUT, GUEST, HONEYMOON, NOW, ORIGIN, ROOM_TYPES, TEST_ACCESS_KEY, TEST_EMAIL, TOKEN_SECRET } from "./testkit.ts";
-import type { CartItemInput, CheckoutSuccess, DataSource, PayMethod, Quote, RoomInventory } from "./types.ts";
+import { FAR_CHECKIN, FAR_CHECKOUT, GUEST, HONEYMOON, NOW, ORIGIN, ROOM_TYPES, TEST_ACCESS_KEY, TEST_EMAIL, TOKEN_SECRET, request } from "./testkit.ts";
+import type { CartItemInput, CheckoutRequest, CheckoutSuccess, DataSource, PayMethod, Quote, RoomInventory } from "./types.ts";
 
 /** The property's custom Cloudbeds method for Beam money, as getPaymentMethods lists it (the fake refuses any other type). */
 export const BEAM_CLOUDBEDS_METHOD = "Beam(website)";
@@ -88,6 +92,8 @@ export interface BeamKit {
   now: { ms: number };
   /** The Beam checkout's context (the hold-first core's, with the gateway deps) for a checkout at the kit's time. */
   checkoutContext(): BeamCheckoutContext;
+  /** runCheckout's deps as the checkout route builds them (Cloudbeds reads on the fake, the Beam deps), at the kit's time. */
+  checkoutDeps(): CheckoutDeps;
 }
 
 export function makeBeamKit(
@@ -191,7 +197,38 @@ export function makeBeamKit(
       testAccessToken: config.testGuard?.accessKey ? testAccessCookieValue(config.tokenSecret, config.testGuard.accessKey) : null,
       sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, Math.min(ms, 5))),
     }),
+    checkoutDeps: () => ({
+      config,
+      origin: ORIGIN,
+      nowMs: now.ms,
+      fetchImpl: fakeCb.fetch,
+      log,
+      beam: deps,
+      ...(options.pickRefChar ? { pickRefChar: options.pickRefChar } : {}),
+      nonce: () => `kit-nonce-${++nonces}`,
+      testAccessToken: config.testGuard?.accessKey ? testAccessCookieValue(config.tokenSecret, config.testGuard.accessKey) : null,
+      sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, Math.min(ms, 5))),
+    }),
   };
+}
+
+/** A Beam checkout request body (testkit.ts request: the far stay, the guest, the terms version) with a method group. */
+export function beamRequest(items: CartItemInput[] = HONEYMOON, extra: Partial<CheckoutRequest> = {}): CheckoutRequest & { guest: GuestDetails } {
+  return request(items, { payMethod: "card_ewallet", ...extra });
+}
+
+/** The server's quote for a Beam request through runCheckout (asked with a wrong total: the price_changed answer). */
+export async function beamServerQuote(kit: BeamKit, req: CheckoutRequest): Promise<Quote> {
+  const res = await runCheckout({ ...req, expectedTotalSatang: 1, expectedDueNowSatang: 1 }, kit.checkoutDeps());
+  if (res.body.ok || res.body.error !== "price_changed" || !res.body.quote) throw new Error(`no quote: ${JSON.stringify(res.body)}`);
+  return res.body.quote;
+}
+
+/** runCheckout (the checkout route's path) at the server's price for the request's method group. */
+export async function beamRunCheckout(kit: BeamKit, items: CartItemInput[] = HONEYMOON, extra: Partial<CheckoutRequest> = {}): Promise<CheckoutResult> {
+  const req = beamRequest(items, extra);
+  const quote = await beamServerQuote(kit, req);
+  return runCheckout({ ...req, expectedTotalSatang: quote.totalSatang, expectedDueNowSatang: quote.dueNowSatang }, kit.checkoutDeps());
 }
 
 /** The server's quote for a cart, priced with the fee of the guest's method group (feePctFor, design S3.2). */

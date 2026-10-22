@@ -1,15 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildOffers, getCartInventory, getInventory, InventoryUnavailableError } from "./availability.ts";
+import type { BeamCreatePaymentLinkRequest } from "./beam.ts";
+import { beamRunCheckout, makeBeamKit } from "./beamTestkit.ts";
+import { POLICY_VERSION } from "./catalogue.ts";
 import { runCheckout } from "./checkout.ts";
 import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, getBookingConfig } from "./config.ts";
 import { addDays } from "./dates.ts";
 import { runDemoPay } from "./demoPay.ts";
 import { demoInventory } from "./demoProvider.ts";
 import { computeQuote } from "./quote.ts";
-import { BEAM_PREVIEW_STATUS_BUDGET_MS, runStatus } from "./status.ts";
+import { runStatus } from "./status.ts";
+import { GUEST } from "./testkit.ts";
 import { verifyBookingToken } from "./token.ts";
-import type { CartItemInput, CheckoutRequest, RoomOffer } from "./types.ts";
+import type { CartItemInput, CheckoutRequest, RoomOffer, StatusResponse } from "./types.ts";
 import { parseCheckoutRequest, parseSearch } from "./validate.ts";
 
 const TEST_SECRET = "test-only-7f3K9qLm2xVw8RtY4pZn6bHc1dJe5gUa";
@@ -34,6 +38,14 @@ function requestFor(slug: string, items?: CartItemInput[]): CheckoutRequest {
   const cart = items ?? [{ slug, ratePlanId: "standard", adults: 2, addonIds: [] }];
   const quote = computeQuote({ checkIn, checkOut, items: cart, promo: null, pricing: { cardFeePct: demoConfig.cardFeePct, depositPct: demoConfig.depositPct } }, offers);
   return { checkIn, checkOut, items: cart, expectedTotalSatang: quote.totalSatang, expectedDueNowSatang: quote.dueNowSatang };
+}
+
+/**
+ * requestFor as a hold-first Beam checkout sends it since design S4.6: the guest's method group (card_ewallet, priced
+ * at the same 3% as the demo), the guest's details and the terms version the page showed.
+ */
+function beamRequestFor(slug: string): CheckoutRequest {
+  return { ...requestFor(slug), payMethod: "card_ewallet", guest: GUEST, termsVersion: POLICY_VERSION };
 }
 
 test("demo checkout re-quotes on the server and returns the simulated Beam page", async () => {
@@ -161,189 +173,53 @@ test("demo pay never accepts card data and is 404 outside demo mode", async () =
   assert.equal(runDemoPay({ t, outcome: "paid" }, { config: pg, origin: ORIGIN, nowMs: NOW }).status, 404);
 });
 
-test("beam-playground checkout creates a payment link from the server quote", async () => {
-  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m1", BEAM_API_KEY: "k1", BOOKING_TOKEN_SECRET: TEST_SECRET });
-  const req = requestFor("sunrise-suite");
-  let sent: Record<string, unknown> | null = null;
-  let headers: Record<string, string> = {};
-  const fakeFetch = (async (_url: string, init: RequestInit) => {
-    sent = JSON.parse(String(init.body)) as Record<string, unknown>;
-    headers = init.headers as Record<string, string>;
-    return new Response(JSON.stringify({ id: "pl_1", url: "https://playground-pay.beamcheckout.com/m1/pl_1" }), { status: 201 });
-  }) as unknown as typeof fetch;
-  const res = await runCheckout(req, { config: pg, origin: ORIGIN, nowMs: NOW, fetchImpl: fakeFetch });
-  assert.equal(res.status, 200);
+// Rewritten in S4.6 (Beam goes hold-first): the Beam link tests of the legacy no-hold preview are replaced by this one; the
+// legacy preview status tests ("status: no terminal 'expired' without Beam's own link status; a paid charge on a closed
+// link wins" and "Beam preview status: its Beam reads share one 12 s budget, ...") went with the legacy status code -
+// beamReturn.test.ts covers every hold-first Beam status, and keeps its reads inside the route's deadline.
+test("beam-playground checkout holds the room first, then creates the payment link of the guest's method from the server quote", async () => {
+  const kit = makeBeamKit();
+  const res = await beamRunCheckout(kit);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.ok(res.body.ok);
-  if (!res.body.ok || !sent) return;
-  const body = sent as { order: { netAmount: number; referenceId: string }; redirectUrl: string; cancelUrl: string };
-  assert.equal(body.order.netAmount, req.expectedTotalSatang);
+  if (!res.body.ok) return;
+  // The hold comes first (Cloudbeds), then exactly one link for the server's quote.
+  const methods = kit.fakeCb.calls.map((c) => c.method);
+  assert.ok(methods.includes("postReservation"));
+  assert.equal(res.body.holdReservationId, [...kit.fakeCb.reservations.keys()][0]);
+  const posts = kit.fakeBeam.calls.filter((c) => c.method === "POST" && c.path === "/api/v1/payment-links");
+  assert.equal(posts.length, 1);
+  const body = posts[0].body as BeamCreatePaymentLinkRequest;
+  assert.equal(body.order.netAmount, res.body.quote.dueNowSatang);
   assert.equal(body.order.referenceId, res.body.ref);
   assert.match(body.redirectUrl, /^https:\/\/magicsamui\.com\/booking-preview\/return\?ref=MSV-/);
-  assert.match(body.cancelUrl, /^https:\/\/magicsamui\.com\/booking-preview\?resume=payment&ref=MSV-/);
-  assert.match(headers["x-beam-idempotency-key"], /^[0-9a-f-]{36}$/);
-  assert.equal(res.body.redirectUrl, "https://playground-pay.beamcheckout.com/m1/pl_1");
-  const link = verifyBookingToken(res.body.linkToken, pg.tokenSecret, NOW);
-  assert.equal(link.ok && link.payload.paymentLinkId, "pl_1");
+  assert.match(body.cancelUrl, /^https:\/\/magicsamui\.com\/booking-preview\?resume=payment&reason=cancelled&ref=MSV-/);
+  assert.match(posts[0].idempotencyKey ?? "", /^[0-9a-f-]{36}$/);
+  assert.equal(res.body.redirectUrl, kit.fakeBeam.link(new URL(res.body.redirectUrl).pathname.split("/").pop() ?? "").url);
+  const link = verifyBookingToken(res.body.linkToken, kit.config.tokenSecret, kit.now.ms);
+  assert.ok(link.ok);
+  if (!link.ok) return;
+  assert.equal(link.payload.paymentLinkId, new URL(res.body.redirectUrl).pathname.split("/").pop());
+  assert.equal(link.payload.booking.payMethod, "card_ewallet");
 
-  // Status asks Beam for the link and checks amount + reference.
+  // Status asks Beam for the link through the gateway: open, the hold awaiting payment.
   const t = new URL(body.redirectUrl).searchParams.get("t");
-  const statusFetch = (async () =>
-    new Response(
-      JSON.stringify({ paymentLinkId: "pl_1", status: "PAID", order: { netAmount: req.expectedTotalSatang, currency: "THB", referenceId: res.body.ok ? res.body.ref : "" } }),
-      { status: 200 },
-    )) as unknown as typeof fetch;
-  const st = await runStatus({ t, p: null, l: res.body.linkToken }, { config: pg, nowMs: NOW + 5000, fetchImpl: statusFetch });
-  assert.equal(st.body.ok && st.body.status, "paid");
-
-  const wrongAmount = (async () =>
-    new Response(JSON.stringify({ paymentLinkId: "pl_1", status: "PAID", order: { netAmount: 100, currency: "THB" } }), { status: 200 })) as unknown as typeof fetch;
-  const st2 = await runStatus({ t, p: null, l: res.body.linkToken }, { config: pg, nowMs: NOW + 5000, fetchImpl: wrongAmount });
-  assert.equal(st2.body.ok && st2.body.status, "failed");
+  const st = await runStatus({ t, p: null, l: res.body.linkToken }, { config: kit.config, nowMs: kit.now.ms, providerDeps: () => ({ deps: kit.deps, gw: kit.gw }) });
+  assert.equal(st.status, 200);
+  assert.equal((st.body as StatusResponse).status, "pending");
+  assert.deepEqual((st.body as StatusResponse).fulfilment, { state: "awaiting_payment", reservationId: null });
 });
 
-test("status: no terminal 'expired' without Beam's own link status; a paid charge on a closed link wins", async () => {
-  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m1", BEAM_API_KEY: "k1", BOOKING_TOKEN_SECRET: TEST_SECRET });
-  const req = requestFor("sunrise-suite");
-  let sent: { redirectUrl: string } | null = null;
-  const create = (async (_url: string, init: RequestInit) => {
-    sent = JSON.parse(String(init.body)) as { redirectUrl: string };
-    return new Response(JSON.stringify({ id: "pl_9", url: "https://playground-pay.beamcheckout.com/m1/pl_9" }), { status: 201 });
-  }) as unknown as typeof fetch;
-  const res = await runCheckout(req, { config: pg, origin: ORIGIN, nowMs: NOW, fetchImpl: create });
-  if (!res.body.ok || !sent) throw new Error("checkout failed");
-  const t = new URL((sent as { redirectUrl: string }).redirectUrl).searchParams.get("t");
-  const ref = res.body.ref;
-  const linkToken = res.body.linkToken;
-  const afterExpiry = NOW + 30 * 60_000 + 1000;
-
-  // Server render of the return page (no link id): the charges list is empty
-  // (not listed yet, or no referenceId on the charge) -> still pending.
-  const asked: string[] = [];
-  const nothing = (async (url: string) => {
-    asked.push(url);
-    return new Response(JSON.stringify({ data: [] }), { status: 200 });
-  }) as unknown as typeof fetch;
-  const fallback = await runStatus({ t, p: null, l: null }, { config: pg, nowMs: afterExpiry, fetchImpl: nothing });
-  assert.equal(fallback.body.ok && fallback.body.status, "pending");
-  assert.match(asked[0], /referenceId=MSV-/);
-
-  // With the link id: Beam says EXPIRED, but a charge on this link succeeded -> paid (looked up by sourceId).
-  const due = req.expectedDueNowSatang;
-  const lookedUp: string[] = [];
-  const closedButPaid = (async (url: string) => {
-    lookedUp.push(url);
-    if (url.includes("/payment-links/")) {
-      return new Response(JSON.stringify({ paymentLinkId: "pl_9", status: "EXPIRED", order: { netAmount: due, currency: "THB", referenceId: ref } }), {
-        status: 200,
-      });
-    }
-    return new Response(
-      JSON.stringify({ data: [{ chargeId: "ch_1", status: "SUCCEEDED", amount: due, currency: "THB", source: "PAYMENT_LINK", sourceId: "pl_9" }] }),
-      { status: 200 },
-    );
-  }) as unknown as typeof fetch;
-  const paid = await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: closedButPaid });
-  assert.equal(paid.body.ok && paid.body.status, "paid");
-  assert.ok(lookedUp.some((u) => u.includes("sourceId=pl_9")));
-
-  // EXPIRED and no successful charge on the link -> expired.
-  const closed = (async (url: string) =>
-    url.includes("/payment-links/")
-      ? new Response(JSON.stringify({ paymentLinkId: "pl_9", status: "EXPIRED", order: { netAmount: due, currency: "THB", referenceId: ref } }), { status: 200 })
-      : new Response(JSON.stringify({ data: [{ chargeId: "ch_2", status: "FAILED", amount: due, currency: "THB" }] }), { status: 200 })) as unknown as typeof fetch;
-  const expired = await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: closed });
-  assert.equal(expired.body.ok && expired.body.status, "expired");
-});
-
-test("Beam preview status: its Beam reads share one 12 s budget, so a slow Beam answers 502 well inside the route's 30 s", async () => {
-  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m1", BEAM_API_KEY: "k1", BOOKING_TOKEN_SECRET: TEST_SECRET });
-  const req = requestFor("sunrise-suite");
-  let sent: { redirectUrl: string } | null = null;
-  const create = (async (_url: string, init: RequestInit) => {
-    sent = JSON.parse(String(init.body)) as { redirectUrl: string };
-    return new Response(JSON.stringify({ id: "pl_7", url: "https://playground-pay.beamcheckout.com/m1/pl_7" }), { status: 201 });
-  }) as unknown as typeof fetch;
-  const res = await runCheckout(req, { config: pg, origin: ORIGIN, nowMs: NOW, fetchImpl: create });
-  if (!res.body.ok || !sent) throw new Error("checkout failed");
-  const t = new URL((sent as { redirectUrl: string }).redirectUrl).searchParams.get("t");
-  const { ref, linkToken } = res.body;
-  const due = req.expectedDueNowSatang;
-  const afterExpiry = NOW + 30 * 60_000 + 1000;
-  const expiredLink = () =>
-    new Response(JSON.stringify({ paymentLinkId: "pl_7", status: "EXPIRED", order: { netAmount: due, currency: "THB", referenceId: ref } }), { status: 200 });
-  assert.equal(BEAM_PREVIEW_STATUS_BUDGET_MS, 12_000);
-
-  // The link read answers after 11.5 s: the charge read gets the 0.5 s left, one attempt and no retry, and
-  // the guest gets the 502 "couldn't check" answer at about 12 s (it was up to 30 s: two 15 s reads).
-  let clock = 0;
-  const calls: string[] = [];
-  const slowLink = (async (url: string) => {
-    calls.push(url);
-    if (url.includes("/payment-links/")) {
-      clock += 11_500;
-      return expiredLink();
-    }
-    clock += 400;
-    return new Response("{}", { status: 503 });
-  }) as unknown as typeof fetch;
-  const late = await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: slowLink, clock: () => clock });
-  assert.equal(late.status, 502);
-  assert.equal(calls.length, 2, "the charge read is not retried: no room left in the budget");
-  assert.ok(clock <= BEAM_PREVIEW_STATUS_BUDGET_MS, `answered at ${clock} ms`);
-
-  // A link read that uses the whole budget: the charge read is never started.
-  clock = 0;
-  calls.length = 0;
-  const slowest = (async (url: string) => {
-    calls.push(url);
-    clock += BEAM_PREVIEW_STATUS_BUDGET_MS;
-    return expiredLink();
-  }) as unknown as typeof fetch;
-  assert.equal((await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: slowest, clock: () => clock })).status, 502);
-  assert.equal(calls.length, 1);
-
-  // Inside the budget the reads still retry: a 503 after 6 s is retried, and the charge read gets what is left.
-  clock = 0;
-  calls.length = 0;
-  let linkReads = 0;
-  const flaky = (async (url: string) => {
-    calls.push(url);
-    if (url.includes("/payment-links/")) {
-      clock += 3_000;
-      if (++linkReads === 1) {
-        clock += 3_000;
-        return new Response("{}", { status: 503 });
-      }
-      return expiredLink();
-    }
-    clock += 1_000;
-    return new Response(JSON.stringify({ data: [{ chargeId: "ch_7", status: "SUCCEEDED", amount: due, currency: "THB", source: "PAYMENT_LINK", sourceId: "pl_7" }] }), {
-      status: 200,
-    });
-  }) as unknown as typeof fetch;
-  const paid = await runStatus({ t, p: null, l: linkToken }, { config: pg, nowMs: afterExpiry, fetchImpl: flaky, clock: () => clock });
-  assert.equal(paid.body.ok && paid.body.status, "paid");
-  assert.equal(calls.length, 3);
-  assert.equal(clock, 10_000);
-
-  // The fallback without the link id (one charge read) runs on the same budget.
-  clock = 0;
-  const byRef = (async () => {
-    clock += BEAM_PREVIEW_STATUS_BUDGET_MS - 500;
-    return new Response("{}", { status: 503 });
-  }) as unknown as typeof fetch;
-  assert.equal((await runStatus({ t, p: null, l: null }, { config: pg, nowMs: afterExpiry, fetchImpl: byRef, clock: () => clock })).status, 502);
-  assert.equal(clock, BEAM_PREVIEW_STATUS_BUDGET_MS - 500, "one attempt: no room for the retry");
-});
-
-test("Beam outage -> 502 upstream_error, nothing charged", async () => {
-  const pg = getBookingConfig({ BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID: "m1", BEAM_API_KEY: "k1", BOOKING_TOKEN_SECRET: TEST_SECRET });
-  const down = (async () => {
+// Rewritten in S4.6: the hold-first Beam checkout (the hold, then the link) with Beam down.
+test("Beam outage -> 502 upstream_error, the hold given back, nothing charged", async () => {
+  const kit = makeBeamKit();
+  kit.deps.fetchImpl = (async () => {
     throw new TypeError("fetch failed");
   }) as unknown as typeof fetch;
-  const res = await runCheckout(requestFor("garden-suite"), { config: pg, origin: ORIGIN, nowMs: NOW, fetchImpl: down });
+  const res = await beamRunCheckout(kit);
   assert.equal(res.status, 502);
   if (!res.body.ok) assert.equal(res.body.error, "upstream_error");
+  assert.deepEqual([...kit.fakeCb.reservations.values()].map((r) => r.status), ["canceled"]);
 });
 
 test("Cloudbeds failure falls back to demo data and says so", async () => {
@@ -377,7 +253,8 @@ test("Cloudbeds failure in a Beam mode never falls back and never reaches Beam",
     return new Response("down", { status: 500 });
   }) as unknown as typeof fetch;
   const logs: string[] = [];
-  const res = await runCheckout(requestFor("garden-suite"), { config: pg, origin: ORIGIN, nowMs: NOW, fetchImpl, log: (m) => logs.push(m) });
+  // Rewritten in S4.6: the request a hold-first Beam checkout sends (the method, the guest's details, the terms version).
+  const res = await runCheckout(beamRequestFor("garden-suite"), { config: pg, origin: ORIGIN, nowMs: NOW, fetchImpl, log: (m) => logs.push(m) });
   assert.equal(res.status, 503);
   if (!res.body.ok) assert.equal(res.body.error, "payment_unavailable");
   assert.equal(calls.some((u) => u.includes("beamcheckout")), false, "Beam must not be called");
@@ -421,7 +298,8 @@ test("beam-live refuses simulated inventory at checkout (defence in depth)", asy
     called = true;
     return new Response("{}", { status: 201 });
   }) as unknown as typeof fetch;
-  const res = await runCheckout(requestFor("garden-suite"), { config: drifted, origin: ORIGIN, nowMs: NOW, fetchImpl });
+  // Rewritten in S4.6: the request a hold-first Beam checkout sends (the method, the guest's details, the terms version).
+  const res = await runCheckout(beamRequestFor("garden-suite"), { config: drifted, origin: ORIGIN, nowMs: NOW, fetchImpl });
   assert.equal(res.status, 503);
   assert.equal(called, false);
 });

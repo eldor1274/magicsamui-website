@@ -1,19 +1,19 @@
 // Payment status for the return page (server). Never trusts the query
 // string alone: the booking token is verified, then the status comes from a
-// signed demo proof (demo mode), from Beam itself (the beam-* link preview)
-// or, in the hold-first modes (stripe-*), from the provider itself through
-// its PaymentGateway. The deps and gateway are picked by the BOOKING's
-// provider (deps.providerDeps: the active config's, or that provider's
-// drain). There a paid payment is also FULFILLED (Stripe recommends the
-// return page triggers fulfilment too): the answer says whether the Cloudbeds
-// reservation is confirmed yet.
+// signed demo proof (demo mode) or, in the hold-first modes (stripe-*, and
+// beam-* since Beam design S4.6), from the provider itself through its
+// PaymentGateway. The deps and gateway are picked by the BOOKING's provider
+// (deps.providerDeps: the active config's, or that provider's drain). There a
+// paid payment is also FULFILLED (Stripe recommends the return page triggers
+// fulfilment too): the answer says whether the Cloudbeds reservation is
+// confirmed yet. A finished Beam booking is answered from its done marker
+// without calling Beam (gap review 16).
 
-import { getPaymentLink, listPaymentLinkCharges, mapLinkStatus } from "./beam.ts";
-import type { BeamCallOptions, BeamCharge } from "./beam.ts";
 import { redactForLog } from "./cloudbedsWrite.ts";
 import type { BookingConfig } from "./config.ts";
 import { alertFulfilPaymentFailure, bookingPointer, fulfilPayment, releasePayment } from "./fulfil.ts";
-import { keys } from "./lock.ts";
+import type { FulfilDone } from "./fulfil.ts";
+import { keys, readJson } from "./lock.ts";
 import { isLiveMode, providerOf } from "./payments/provider.ts";
 import { holdFirstProvider, providerDepsOf, requestPaymentKey } from "./providerDispatch.ts";
 import { satangToBaht } from "./quote.ts";
@@ -32,33 +32,23 @@ export interface StatusParams {
 export interface StatusDeps {
   config: BookingConfig;
   nowMs?: number;
-  fetchImpl?: typeof fetch;
   log?: (message: string, data?: Record<string, unknown>) => void;
   /**
    * Hold-first modes: the deps and gateway that finish a provider's payments,
    * the active config's for its own provider, else that provider's drain
    * (after BOOKING_PAYMENT_PROVIDER moved away from it, its bookings already
    * started are still checked and confirmed with its credentials). The routes
-   * pass runtime.ts providerDepsFor(config).
+   * pass runtime.ts providerDepsFor(config, env, {deadlineMs}): every Beam call
+   * of the request ends by the route's deadline.
    */
   providerDeps?: ProviderDepsFn;
   /** Stripe shorthand, used only without providerDeps: the active config's Stripe deps. */
   stripe?: StripeDeps;
   /** Stripe shorthand, used only without providerDeps: the Stripe drain (runtime.ts getStripeFulfilmentDeps). */
   stripeDrain?: () => StripeDeps | null;
-  /** Wall clock of the Beam preview's read budget (default Date.now; tests move it). */
-  clock?: () => number;
 }
 
 const NOT_APPLICABLE: FulfilmentView = { state: "not_applicable", reservationId: null };
-
-/**
- * The Beam preview's (beam-* link, no hold) budget for all its Beam reads of one status request together:
- * the link, then maybe its charges, each read with its one retry inside what is left. Well inside the status
- * route's maxDuration of 30 s, so a slow Beam gets the guest the 502 "couldn't check" answer, never a
- * platform timeout.
- */
-export const BEAM_PREVIEW_STATUS_BUDGET_MS = 12_000;
 
 // The provider-dispatch helpers (holdFirstProvider, providerDepsOf, requestPaymentKey) live in
 // providerDispatch.ts, which abandon.ts imports too (Beam design step S2.0). Re-exported here, so every
@@ -112,14 +102,9 @@ export function purchaseFor(
     : null;
 }
 
-/** Demo mode only (no Beam to ask): the simulated link simply lapses after its 30 minutes. */
+/** Demo mode only (no provider to ask): the simulated link simply lapses after its 30 minutes. */
 function pendingOrExpired(booking: BookingSummary, nowMs: number): PaymentStatus {
   return Date.parse(booking.linkExpiresAt) <= nowMs ? "expired" : "pending";
-}
-
-/** A charge that pays exactly this booking (amount and currency as quoted). */
-function paysBooking(c: BeamCharge, booking: BookingSummary): boolean {
-  return c.status === "SUCCEEDED" && c.amount === booking.dueNowSatang && c.currency === "THB";
 }
 
 export async function runStatus(params: StatusParams, deps: StatusDeps): Promise<StatusResult> {
@@ -175,59 +160,8 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
     return holdFirstStatus(booking, params, deps, active, nowMs);
   }
 
-  if (!config.beam) {
-    return { status: 503, body: { ok: false, error: "payment_unavailable", message: "Payment status is unavailable." } };
-  }
-
-  // One budget for every Beam read of this request (BEAM_PREVIEW_STATUS_BUDGET_MS).
-  const clock = deps.clock ?? Date.now;
-  const started = clock();
-  const readOpts = (): BeamCallOptions => ({ budgetMs: Math.max(0, BEAM_PREVIEW_STATUS_BUDGET_MS - (clock() - started)), now: clock });
-
-  try {
-    let paymentLinkId: string | null = null;
-    if (params.l) {
-      const link = verifyBookingToken(params.l, config.tokenSecret, nowMs);
-      if (link.ok && link.payload.booking.ref === booking.ref) paymentLinkId = link.payload.paymentLinkId;
-    }
-
-    if (paymentLinkId) {
-      const link = await getPaymentLink(config.beam, paymentLinkId, deps.fetchImpl, readOpts());
-      const refMatches = !link.order?.referenceId || link.order.referenceId === booking.ref;
-      if (!refMatches || link.order?.netAmount !== booking.dueNowSatang || link.order?.currency !== "THB") {
-        deps.log?.("beam_status_mismatch", { ref: booking.ref, paymentLinkId });
-        return ok(booking, "failed", "AMOUNT_OR_REFERENCE_MISMATCH", nowMs);
-      }
-      const status = mapLinkStatus(link.status);
-      if (status === "expired" || status === "cancelled") {
-        // These answers offer "Try again", which is a second payment. Beam only
-        // redirects here after a successful payment, so first make sure no
-        // charge on this exact link (sourceId = paymentLinkId) succeeded, e.g.
-        // a PromptPay QR or a slow 3-D Secure step that finished at the deadline.
-        const charges = await listPaymentLinkCharges(config.beam, { sourceId: paymentLinkId }, deps.fetchImpl, readOpts());
-        if (charges.some((c) => paysBooking(c, booking))) {
-          deps.log?.("beam_status_paid_after_link_closed", { ref: booking.ref, paymentLinkId, linkStatus: link.status });
-          return ok(booking, "paid", null, nowMs);
-        }
-      }
-      return ok(booking, status, null, nowMs);
-    }
-
-    // Fallback without the link id (the server render of the return page, or
-    // a new tab): look for a succeeded charge for this ref. Whether Beam copies
-    // order.referenceId onto the charge is undocumented and the list may lag,
-    // so "nothing found" is NOT proof of non-payment. Never answer "expired"
-    // from here: it offers "Try again", which could charge the guest twice.
-    // Only the payment link's own status can say EXPIRED. Until the browser
-    // supplies the link id the guest sees "pending" and, after the polling
-    // budget, "please don't pay again - message us".
-    const charges = await listPaymentLinkCharges(config.beam, { referenceId: booking.ref }, deps.fetchImpl, readOpts());
-    const paid = charges.some((c) => paysBooking(c, booking) && c.referenceId === booking.ref);
-    return ok(booking, paid ? "paid" : "pending", null, nowMs);
-  } catch (e) {
-    deps.log?.("beam_status_failed", { ref: booking.ref, message: e instanceof Error ? e.message : String(e) });
-    return { status: 502, body: { ok: false, error: "upstream_error", message: "We couldn't check the payment just now." } };
-  }
+  // Every other mode is hold-first (above): the legacy link-only Beam status is gone (design S4.6).
+  return { status: 503, body: { ok: false, error: "payment_unavailable", message: "Payment status is unavailable." } };
 }
 
 /* ----------------------------- hold-first ----------------------------- */
@@ -246,6 +180,12 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
  * at the bank (pendingReason "unconfirmed") is released, best effort, but
  * answered pending/unconfirmed - never "expired" or "cancelled", which offer
  * "Try again", a second payment (money review 8).
+ *
+ * Beam only (design S4.6, gap review 16): a booking fulfil has finished is
+ * answered from its done marker before any Beam call - paid, with the marker's
+ * confirmed or needs_attention and the GA4 purchase (purchaseFor) - when the
+ * marker's ref and amount are the token's. Anything else (no marker, or one
+ * that is not this booking's) is read from Beam as above.
  */
 async function holdFirstStatus(
   booking: BookingSummary,
@@ -259,6 +199,15 @@ async function holdFirstStatus(
     let key = requestPaymentKey(params.s, params.l, booking, ctx.config.tokenSecret, gw, nowMs);
     if (!key) key = (await bookingPointer(deps, booking.ref))?.sessionId ?? null;
     if (!key) return ok(booking, "pending", null, nowMs, { state: "awaiting_payment", reservationId: null });
+
+    // Beam: a finished booking needs no Beam call (rate limits, gap review 16). Stripe never takes this path.
+    if (gw.provider === "beam") {
+      const done = await readJson<FulfilDone>(deps.kv, keys.fulfilDone(key));
+      if (done && done.ref === booking.ref && done.totalSatang === booking.dueNowSatang) {
+        const fulfilment: FulfilmentView = { state: done.state, reservationId: done.reservationId };
+        return ok(booking, "paid", null, nowMs, fulfilment, purchaseFor(ctx.config, booking, fulfilment));
+      }
+    }
 
     const payment = await gw.get(key);
     const meta = payment.meta;

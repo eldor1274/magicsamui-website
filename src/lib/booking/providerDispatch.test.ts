@@ -3,14 +3,15 @@
 // out for the BOOKING's provider - the active config's for its own provider, else that provider's drain -
 // and through nothing else:
 // - the drain is asked only for a booking of another mode, and used only when it is of the booking's mode;
-// - no deps for the active hold-first provider -> 503, as before; demo and the Beam preview never ask;
+// - no deps for the active hold-first provider -> 503, as before; the demo never asks (and Beam, hold-first since
+//   design S4.6, asks for its own provider: beamReturn.test.ts covers its answers);
 // - the payment key comes from the request (Stripe ids only), else the booking pointer;
 // - every read, cancel, Redis key, release reason and log name follows the gateway handed in;
 // - the Stripe shorthand (deps.stripe, deps.stripeDrain) maps onto the same dispatch;
 // - runtime.ts providerDepsFor builds the active deps at once and a drain only when a booking asks.
-// Only Stripe has a gateway so far: the other provider here is "Acme" (the Stripe gateway under another
-// provider, brand and wording), as in sweepOwnership.test.ts. Live Stripe answers are pinned by the golden
-// snapshot (stripeGolden.test.ts), which runs both the shorthand and the routes' providerDepsFor.
+// The other provider here is "Acme" (the Stripe gateway under another provider, brand and wording), as in
+// sweepOwnership.test.ts; the real Beam gateway is driven in beamReturn.test.ts. Live Stripe answers are pinned by
+// the golden snapshot (stripeGolden.test.ts), which runs both the shorthand and the routes' providerDepsFor.
 
 import { test } from "node:test";
 import type { TestContext } from "node:test";
@@ -69,9 +70,11 @@ function acmeGateway(kit: Kit, calls: string[]): PaymentGateway {
   };
 }
 
-test("holdFirstProvider: only the hold-first modes (Stripe so far) have a gateway provider", () => {
+test("holdFirstProvider: the hold-first modes have a gateway provider (Stripe, and Beam since S4.6); the demo has none", () => {
   for (const mode of ["stripe-test", "stripe-live", "stripe-mock"] as const) assert.equal(holdFirstProvider(mode), "stripe", mode);
-  for (const mode of ["demo", "beam-playground", "beam-live"] as const) assert.equal(holdFirstProvider(mode), null, mode);
+  // Rewritten in S4.6 (Beam goes hold-first): the Beam modes were null until then.
+  for (const mode of ["beam-playground", "beam-live"] as const) assert.equal(holdFirstProvider(mode), "beam", mode);
+  assert.equal(holdFirstProvider("demo"), null);
 });
 
 test("requestPaymentKey: the redirect's id, else this booking's link token; Stripe ids only", async () => {
@@ -117,7 +120,7 @@ test("providerDepsOf: providerDeps wins; else stripe for an active Stripe config
   assert.equal(providerDepsOf({ config: kit.config })("stripe"), null);
 });
 
-test("status: the active hold-first config asks for its own provider once; without deps -> 503; demo and the Beam preview never ask", async () => {
+test("status: the active hold-first config asks for its own provider once; without deps -> 503; the demo never asks; Beam asks for its own (S4.6)", async () => {
   const kit = makeKit();
   const a = await opened(kit);
   const r = recording(stripeOf(kit));
@@ -140,13 +143,21 @@ test("status: the active hold-first config asks for its own provider once; witho
   assert.equal(((await runStatus({ t: demoToken, p: null, l: null }, { config: demo, providerDeps: d.fn, nowMs: NOW })).body as StatusResponse).status, "pending");
   assert.deepEqual((await runAbandon({ t: demoToken }, { config: demo, providerDeps: d.fn, nowMs: NOW })).body, { ok: true, state: "not_applicable" });
 
+  assert.deepEqual(d.asked, [], "the demo never asks for provider deps");
+
+  // Rewritten in S4.6: Beam is hold-first, so its status and abandon ask for Beam's deps (none here: 503, as for Stripe).
   const beam = getBookingConfig(BEAM_ENV);
   const beamToken = tokenIn(a.booking, "beam-playground");
-  const nothing = (async () => new Response(JSON.stringify({ data: [] }), { status: 200 })) as unknown as typeof fetch;
-  const pb = await runStatus({ t: beamToken, p: null, l: null }, { config: beam, providerDeps: d.fn, nowMs: NOW, fetchImpl: nothing });
-  assert.equal((pb.body as StatusResponse).status, "pending", "the Beam preview answers as before");
-  assert.deepEqual((await runAbandon({ t: beamToken }, { config: beam, providerDeps: d.fn, nowMs: NOW })).body, { ok: true, state: "not_applicable" });
-  assert.deepEqual(d.asked, [], "demo and the Beam preview never ask for provider deps");
+  const b = recording(stripeOf(kit));
+  assert.deepEqual(await runStatus({ t: beamToken, p: null, l: null }, { config: beam, providerDeps: b.fn, nowMs: NOW }), {
+    status: 503,
+    body: { ok: false, error: "payment_unavailable", message: "Payment status is unavailable." },
+  });
+  assert.deepEqual(await runAbandon({ t: beamToken }, { config: beam, providerDeps: b.fn, nowMs: NOW }), {
+    status: 503,
+    body: { ok: false, error: "payment_unavailable", message: "Please try again in a moment." },
+  });
+  assert.deepEqual(b.asked, ["beam", "beam"], "Beam asks for its own provider, never Stripe's");
 });
 
 test("drain: a booking of another mode is finished with its provider's deps, only when they are of its mode", async () => {

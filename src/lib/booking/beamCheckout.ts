@@ -1,7 +1,7 @@
 // Hold-first Beam checkout (design S4.3): the hold-first core (holdFirstCheckout.ts) with a Beam payment link as
-// the payment page (payments/beamCheckoutAdapter.ts). Not wired into the checkout route yet: S4.6 calls it from
-// runCheckout once the request is validated, re-quoted with the fee of the guest's method group (feePctFor) and
-// refused when that group is not offered (payMethodOffered).
+// the payment page (payments/beamCheckoutAdapter.ts). runCheckout (checkout.ts) calls it since S4.6, once the request
+// is validated, refused when the guest's method group is not offered (payMethodOffered) and re-quoted with that
+// group's fee (feePctFor). The booking summary (and so the booking token) carries the group.
 
 import { NOTHING_CHARGED, fail } from "./checkoutShared.ts";
 import type { StripeCheckoutInput, StripeCheckoutResult } from "./checkoutShared.ts";
@@ -22,5 +22,9 @@ export async function startBeamCheckout(input: StripeCheckoutInput, ctx: BeamChe
   if (!beam || ctx.deps.config.provider !== "beam") {
     return fail(503, { error: "payment_unavailable", message: `Online payment is not available right now. ${NOTHING_CHARGED}` });
   }
-  return startHoldFirstCheckout(input, ctx, beamCheckoutAdapter(ctx.deps, beam, { origin: ctx.origin, nowMs: ctx.nowMs, theme: input.theme, payMethod }));
+  return startHoldFirstCheckout(
+    { ...input, payMethod },
+    ctx,
+    beamCheckoutAdapter(ctx.deps, beam, { origin: ctx.origin, nowMs: ctx.nowMs, theme: input.theme, payMethod }),
+  );
 }

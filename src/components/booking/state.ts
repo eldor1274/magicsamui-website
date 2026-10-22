@@ -85,8 +85,8 @@ export interface CheckoutErrorView {
   occupancySlugs?: string[];
   /** For invalid_request: what exactly the server rejected (e.g. "Check-in can't be in the past."). */
   issues?: string[];
-  /** For invalid_request: the step where the guest can fix it. */
-  fixStep?: "addons";
+  /** For invalid_request: the step where the guest can fix it ("payment": Beam, choose how to pay - wired in design S5.2). */
+  fixStep?: "addons" | "payment";
   /** For rate_limited: roughly how long to wait. */
   retryAfterMinutes?: number;
 }
