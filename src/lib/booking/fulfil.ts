@@ -764,8 +764,10 @@ export async function abandonPayment(key: string, deps: CoreDeps, gw: PaymentGat
   try {
     first = await gw.get(key);
   } catch (e) {
-    // No such payment (in this account and mode): nothing can be paid or cancelled. Network/5xx errors rethrow.
-    if (gw.isMissing(e)) return { state: "closed" };
+    // No such payment (in this account and mode): nothing can be paid or cancelled. Network/5xx errors rethrow,
+    // and so does a "missing" the gateway does not hold final (gw.isGone; Beam: another merchant's link, or one
+    // before its expiry plus the grace - it may still be payable). Stripe has no such hook: unchanged.
+    if (gw.isMissing(e) && (!gw.isGone || (await gw.isGone(key)))) return { state: "closed" };
     throw e;
   }
   if (!first.meta || (expectedRef !== null && first.meta.ref !== expectedRef)) return { state: "closed" };

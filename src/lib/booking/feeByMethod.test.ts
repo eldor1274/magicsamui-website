@@ -16,7 +16,7 @@ import { readFileSync } from "node:fs";
 import { buildOffers } from "./availability.ts";
 import { buildPaymentLinkRequest } from "./beam.ts";
 import { runCheckout } from "./checkout.ts";
-import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, getBookingConfig, getPublicBookingConfig, toPublicConfig } from "./config.ts";
+import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, getBookingConfig, getFulfilmentConfig, getPublicBookingConfig, toPublicConfig } from "./config.ts";
 import type { BookingConfig, Env } from "./config.ts";
 import { addDays } from "./dates.ts";
 import { demoInventory } from "./demoProvider.ts";
@@ -460,7 +460,7 @@ const SUMMARY: BookingSummary = {
 };
 const NOW = Date.parse("2026-10-05T03:00:00Z");
 
-test("isBookingSummary: payMethod is optional, one of the two when present; a token carrying it round-trips", () => {
+test("isBookingSummary: payMethod is optional and never judged by the token check (mode-blind, as on production main); a token carrying it round-trips", () => {
   assert.equal(isBookingSummary(SUMMARY), true);
   for (const m of METHODS) {
     const booking = { ...SUMMARY, payMethod: m };
@@ -469,14 +469,14 @@ test("isBookingSummary: payMethod is optional, one of the two when present; a to
     assert.ok(v.ok, m);
     assert.deepEqual(v.payload.booking, booking);
   }
+  // Round 6: a Beam booking's payMethod is judged only where Beam handles it (runStatus and runAbandon, once the Beam
+  // deps or the Beam drain are found: beamReturn.test.ts), so the token check answers every deployment as main did.
   for (const bad of [null, "", "bitcoin", "PROMPTPAY", 1, {}, ["promptpay"]]) {
     const booking = { ...SUMMARY, payMethod: bad };
-    assert.equal(isBookingSummary(booking), false, JSON.stringify(bad));
-    assert.deepEqual(
-      verifyBookingToken(createBookingToken(booking as unknown as BookingSummary, null, TOKEN_SECRET, 3600, NOW), TOKEN_SECRET, NOW + 1000),
-      { ok: false, reason: "malformed" },
-      JSON.stringify(bad),
-    );
+    assert.equal(isBookingSummary(booking), true, JSON.stringify(bad));
+    const v = verifyBookingToken(createBookingToken(booking as unknown as BookingSummary, null, TOKEN_SECRET, 3600, NOW), TOKEN_SECRET, NOW + 1000);
+    assert.ok(v.ok, JSON.stringify(bad));
+    assert.deepEqual(v.payload.booking, booking, JSON.stringify(bad));
   }
 });
 
@@ -502,8 +502,8 @@ test("old tokens without payMethod still verify: every booking token the golden 
   }
 });
 
-test("a Stripe or demo token carrying any payMethod verifies, and status and abandon answer it exactly like one without (only Beam tokens are strict)", async () => {
-  // The shape check: on Stripe and the demo the field is never judged (production main had no such check at all).
+test("a Stripe or demo token carrying any payMethod verifies, and status and abandon answer it exactly like one without (a Beam booking's payMethod is judged only where Beam handles it)", async () => {
+  // The shape check: the field is never judged (production main had no such check at all).
   for (const paymentMode of ["stripe-live", "stripe-test", "stripe-mock", "demo"] as const) {
     for (const v of ANY_PAY_METHOD) {
       const booking = { ...SUMMARY, paymentMode, payMethod: v };
@@ -511,8 +511,9 @@ test("a Stripe or demo token carrying any payMethod verifies, and status and aba
       assert.ok(verifyBookingToken(createBookingToken(booking as unknown as BookingSummary, null, TOKEN_SECRET, 3600, NOW), TOKEN_SECRET, NOW + 1000).ok, paymentMode);
     }
   }
+  // Round 6: mode-blind for Beam tokens too (runStatus and runAbandon judge them once the Beam deps are found).
   for (const paymentMode of ["beam-playground", "beam-live"] as const) {
-    assert.equal(isBookingSummary({ ...SUMMARY, paymentMode, payMethod: "bogus" }), false, `${paymentMode}: strict`);
+    assert.equal(isBookingSummary({ ...SUMMARY, paymentMode, payMethod: "bogus" }), true, `${paymentMode}: mode-blind`);
     assert.equal(isBookingSummary({ ...SUMMARY, paymentMode, payMethod: "promptpay" }), true, paymentMode);
   }
 
@@ -565,4 +566,30 @@ test("a Stripe or demo token carrying any payMethod verifies, and status and aba
     demoRuns.push(shown({ status, abandon }));
   }
   for (const run of demoRuns.slice(1)) assert.equal(run, demoRuns[0]);
+});
+
+test("a Beam token with any payMethod, in a Stripe or demo deployment with no Beam config: status 409 and abandon not_applicable, exactly as production main answers it (round 6)", async () => {
+  const deployments: [string, Env][] = [
+    ["stripe-live", STRIPE_LIVE_ENV],
+    ["stripe-test", STRIPE_TEST_ENV],
+    ["stripe-mock", { ...MOCK_ENV, BOOKING_TOKEN_SECRET: TOKEN_SECRET }],
+    ["demo", { BOOKING_TOKEN_SECRET: TOKEN_SECRET }],
+  ];
+  const DIFFERENT_MODE = { status: 409, body: { ok: false, error: "invalid_token", message: "This booking was made in a different payment mode." } };
+  const NOT_APPLICABLE = { status: 200, body: { ok: true, state: "not_applicable" } };
+  for (const [name, env] of deployments) {
+    const config = getFulfilmentConfig(env);
+    assert.equal(config.paymentMode, name);
+    assert.equal(config.beam, null, `${name}: no Beam config`);
+    for (const paymentMode of ["beam-playground", "beam-live"] as const) {
+      for (const payMethod of [undefined, "promptpay", "card_ewallet", "bogus", 0, null, "", ["promptpay"], {}]) {
+        const booking = (payMethod === undefined ? { ...SUMMARY, paymentMode } : { ...SUMMARY, paymentMode, payMethod }) as unknown as BookingSummary;
+        const label = `${name} ${paymentMode} ${JSON.stringify(payMethod)}`;
+        const t = createBookingToken(booking, null, TOKEN_SECRET, 3600, NOW);
+        const l = createBookingToken(booking, "plink_1", TOKEN_SECRET, 3600, NOW);
+        assert.deepEqual(await runStatus({ t, p: null, l }, { config, nowMs: NOW + 1000 }), DIFFERENT_MODE, label);
+        assert.deepEqual(await runAbandon({ t, l }, { config, nowMs: NOW + 1000 }), NOT_APPLICABLE, label);
+      }
+    }
+  }
 });

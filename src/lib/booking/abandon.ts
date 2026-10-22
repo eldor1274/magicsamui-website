@@ -10,8 +10,11 @@
 import { redactForLog } from "./cloudbedsWrite.ts";
 import type { BookingConfig } from "./config.ts";
 import { abandonPayment, bookingPointer } from "./fulfil.ts";
+import type { FulfilDone } from "./fulfil.ts";
+import { keys, readJson } from "./lock.ts";
 import { holdFirstProvider, providerDepsOf, requestPaymentKey } from "./providerDispatch.ts";
-import type { ProviderDeps, ProviderDepsFn, StripeDeps } from "./stripeDeps.ts";
+import { isPayMethod } from "./quote.ts";
+import type { CoreDeps, ProviderDeps, ProviderDepsFn, StripeDeps } from "./stripeDeps.ts";
 import { verifyBookingToken } from "./token.ts";
 import type { AbandonResponse } from "./types.ts";
 
@@ -30,6 +33,21 @@ export interface AbandonDeps {
 export interface AbandonResult {
   status: number;
   body: AbandonResponse;
+}
+
+/**
+ * Beam only (round 6, status-cost hardening): a booking already finished or released needs no Beam call and no
+ * disable. Its done marker (this booking's) answers "paid": the return page shows the marker's state. Its hold's
+ * release marker (the pointer's reservation, for this very payment) answers "pending": the guest goes to the return
+ * page, which reads the link once and tells "expired" (Try again) from "still being confirmed" (never pay twice) -
+ * abandon can't tell them apart without that reading. null: ask Beam as before.
+ */
+async function settledBeamBooking(deps: CoreDeps, key: string, ref: string): Promise<{ state: "paid" | "pending"; by: "done" | "released" } | null> {
+  const done = await readJson<FulfilDone>(deps.kv, keys.fulfilDone(key));
+  if (done) return done.ref === ref ? { state: "paid", by: "done" } : null;
+  const pointer = await bookingPointer(deps, ref);
+  if (pointer && pointer.sessionId === key && (await deps.kv.get(keys.releaseDone(pointer.reservationId))) !== null) return { state: "pending", by: "released" };
+  return null;
 }
 
 export async function runAbandon(raw: unknown, deps: AbandonDeps): Promise<AbandonResult> {
@@ -58,12 +76,22 @@ export async function runAbandon(raw: unknown, deps: AbandonDeps): Promise<Aband
   }
   const pd = drained ?? providerDeps(provider);
   if (!pd) return { status: 503, body: { ok: false, error: "payment_unavailable", message: "Please try again in a moment." } };
+  // Beam only (design S3.2, round 6): a payMethod that is not one of the two groups is refused before anything is
+  // read. The token check itself is mode-blind (as on production main), so Stripe and demo tokens never reach this.
+  if (pd.gw.provider === "beam" && booking.payMethod !== undefined && !isPayMethod(booking.payMethod)) {
+    return { status: 400, body: { ok: false, error: "invalid_token", message: "This booking link is not valid." } };
+  }
 
   // The key: the redirect's own id (Stripe: s), else the link token, else (below) what checkout recorded for the ref.
   let key = requestPaymentKey(body.s, body.l, booking, config.tokenSecret, pd.gw, nowMs);
   try {
     if (!key) key = (await bookingPointer(pd.deps, booking.ref))?.sessionId ?? null;
     if (!key) return { status: 200, body: { ok: true, state: "closed" } };
+    const settled = pd.gw.provider === "beam" ? await settledBeamBooking(pd.deps, key, booking.ref) : null;
+    if (settled) {
+      deps.log?.("booking_abandoned", { ref: booking.ref, state: settled.state, settled: settled.by });
+      return { status: 200, body: { ok: true, state: settled.state } };
+    }
     const outcome = await abandonPayment(key, pd.deps, pd.gw, booking.ref);
     deps.log?.("booking_abandoned", { ref: booking.ref, state: outcome.state });
     return { status: 200, body: { ok: true, state: outcome.state } };

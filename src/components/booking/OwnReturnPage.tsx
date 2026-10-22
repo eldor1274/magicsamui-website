@@ -1,10 +1,9 @@
 import { headers } from "next/headers";
 import BookingThemeRoot from "@/components/booking/BookingThemeRoot";
 import ReturnStatus from "@/components/booking/return/ReturnStatus";
-import { getFulfilmentConfig, getPublicBookingConfig } from "@/lib/booking/config";
+import { getPublicBookingConfig } from "@/lib/booking/config";
+import { returnPageStatus } from "@/lib/booking/returnPageStatus";
 import { createRateLimiter, ipFromHeaders } from "@/lib/booking/routeUtils";
-import { providerDepsFor } from "@/lib/booking/runtime";
-import { runStatus } from "@/lib/booking/status";
 import { parseTheme } from "@/lib/booking/theme";
 import type { ApiError, StatusResponse } from "@/lib/booking/types";
 
@@ -26,26 +25,14 @@ function one(v: string | string[] | undefined): string | null {
 // shares the status API's brake: a per-IP limit, after which the client polls
 // the (separately limited) API instead.
 const isRateLimited = createRateLimiter(30, 60_000);
-/** Every Beam call of this render's status check ends by this long after it started (the pages' maxDuration minus a margin; Stripe ignores it). */
-const STATUS_BUDGET_MS = 25_000;
 
 async function initialStatus(t: string | null, p: string | null, s: string | null): Promise<StatusResponse | ApiError | null> {
   if (!t) return null;
   if (isRateLimited(ipFromHeaders(await headers()))) {
     return { ok: false, error: "rate_limited", message: "We're checking this payment very often - please wait a moment and check again." };
   }
-  // Request time (after the dynamic headers() read).
-  const deadlineMs = Date.now() + STATUS_BUDGET_MS;
-  try {
-    // getFulfilmentConfig: the emergency stop (BOOKING_ALLOW_LIVE_PAYMENTS=false) blocks NEW charges only;
-    // a guest who already paid must still see (and get) a confirmed booking.
-    // The provider's deps are picked by the booking's provider, exactly as the status API does.
-    const config = getFulfilmentConfig();
-    const result = await runStatus({ t, p, l: null, s }, { config, providerDeps: providerDepsFor(config, process.env, { deadlineMs }) });
-    return result.body;
-  } catch {
-    return { ok: false, error: "payment_unavailable", message: "We couldn't check this payment right now. Please refresh in a moment." };
-  }
+  // Request time (after the dynamic headers() read): the config, the Beam calls' deadline and runStatus.
+  return returnPageStatus(t, p, s);
 }
 
 export default async function OwnReturnPage({

@@ -165,6 +165,13 @@ export interface PaymentGateway {
   /** The provider answered that the payment does not exist (in this account and mode): it can never be paid. */
   isMissing(e: unknown): boolean;
   /**
+   * Whether the provider's "does not exist" (isMissing) for this payment is final (round 6): asked by abandon
+   * before it answers "closed". Beam: only for a link our record says this BEAM_MERCHANT_ID created, once its
+   * expiry plus the pending grace is over (another merchant's link, or one before that, may still be payable).
+   * false makes abandon throw (the guest keeps the attempt). Absent (Stripe): always final, as before.
+   */
+  isGone?(key: string): Promise<boolean>;
+  /**
    * The provider's payments of ours (this mode) created since sinceMs, for the sweeper's step 1 (Stripe: the
    * Checkout Sessions of the lookback window, foreign and other-mode ones left out). Throws on network/5xx.
    */

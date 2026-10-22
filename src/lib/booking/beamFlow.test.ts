@@ -553,6 +553,27 @@ test("three failed payment pages in a row pause Beam checkout for 5 minutes: the
   assert.equal(await kv.get(keys.beamPageFail(SCOPE)), null);
 });
 
+test("a create Beam answers 429 (its one retry too) is no outage: never counted toward the pause, even three in a row (round 6)", async () => {
+  const kit = makeBeamKit();
+  for (let i = 1; i <= 3; i++) {
+    kit.fakeBeam.rateLimitNext(2, POST_LINK);
+    const res = await beamCheckout(kit);
+    assert.equal(res.status, 502, `429 ${i}`);
+    assert.equal(await kit.deps.kv.get(keys.beamPageFail(SCOPE)), null, `429 ${i}: not counted`);
+    assert.equal(await kit.deps.kv.get(keys.beamPaused(SCOPE)), null, `429 ${i}: no pause`);
+    kit.now.ms += MIN;
+  }
+  assert.equal(withSubject(kit, PAUSED_ALERT).length, 0);
+  assert.ok(withSubject(kit, PAGE_FAILED)[0]?.lines[0].includes("TOO_MANY_REQUESTS_ERROR, HTTP 429"), kit.alerts.map((a) => a.lines[0]).join(" | "));
+  assert.equal(linkPosts(kit).length, 6, "each create and its one retry");
+  // Any other failure still counts.
+  kit.fakeBeam.failNext(POST_LINK, 422, "MERCHANT_STATUS_INVALID_ERROR");
+  assert.equal((await beamCheckout(kit)).status, 502);
+  assert.equal(await kit.deps.kv.get(keys.beamPageFail(SCOPE)), "1");
+  const h = await beamHeld(kit);
+  assert.equal(kit.fakeBeam.link(h.linkId).status, "ACTIVE", "Beam checkout was never paused");
+});
+
 test("only failures in a row inside 5 minutes count: a created link, or a failure outside the window, starts again", async () => {
   const kit = makeBeamKit();
   const failOnce = async () => {

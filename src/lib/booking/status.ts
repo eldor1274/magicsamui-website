@@ -16,7 +16,7 @@ import type { FulfilDone } from "./fulfil.ts";
 import { keys, readJson } from "./lock.ts";
 import { isLiveMode, providerOf } from "./payments/provider.ts";
 import { holdFirstProvider, providerDepsOf, requestPaymentKey } from "./providerDispatch.ts";
-import { satangToBaht } from "./quote.ts";
+import { isPayMethod, satangToBaht } from "./quote.ts";
 import type { ProviderDeps, ProviderDepsFn, StripeDeps } from "./stripeDeps.ts";
 import { verifyBookingToken, verifyDemoProof } from "./token.ts";
 import type { ApiError, BookingSummary, FulfilmentView, PaymentStatus, PurchaseView, StatusResponse } from "./types.ts";
@@ -185,7 +185,11 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
  * answered from its done marker before any Beam call - paid, with the marker's
  * confirmed or needs_attention and the GA4 purchase (purchaseFor) - when the
  * marker's ref and amount are the token's. Anything else (no marker, or one
- * that is not this booking's) is read from Beam as above.
+ * that is not this booking's) is read from Beam as above. A hold already
+ * released (its release marker) is not released again: no second Beam
+ * reading (round 6). A Beam token whose payMethod is present but not one of
+ * the two groups is refused before anything is read (design S3.2, round 6:
+ * the token check itself is mode-blind, as on production main).
  */
 async function holdFirstStatus(
   booking: BookingSummary,
@@ -194,6 +198,9 @@ async function holdFirstStatus(
   { deps, gw }: ProviderDeps,
   nowMs: number,
 ): Promise<StatusResult> {
+  if (gw.provider === "beam" && booking.payMethod !== undefined && !isPayMethod(booking.payMethod)) {
+    return { status: 400, body: { ok: false, error: "invalid_token", message: "This booking link is not valid." } };
+  }
   try {
     // The key: the redirect's own id (Stripe: the success_url's {CHECKOUT_SESSION_ID}), else the link token, else what checkout recorded for the ref.
     let key = requestPaymentKey(params.s, params.l, booking, ctx.config.tokenSecret, gw, nowMs);
@@ -228,10 +235,13 @@ async function holdFirstStatus(
       return ok(booking, "pending", null, nowMs, { state: "awaiting_payment", reservationId: null }, null, payment.pendingReason);
     }
     if (state === "expired" || state === "failed") {
-      // Best effort: the webhook/sweeper release it too.
-      await releasePayment(key, deps, gw, state === "expired" ? `${gw.text.sessionLabel.short} expired` : "delayed payment failed").catch((e) =>
-        ctx.log?.(`${gw.provider}_status_release_failed`, { ref: booking.ref, error: e instanceof Error ? e.message : String(e) }),
-      );
+      // Best effort: the webhook/sweeper release it too. Beam: a hold already released is not asked of Beam again.
+      const released = gw.provider === "beam" && (await deps.kv.get(keys.releaseDone(meta.reservationId))) !== null;
+      if (!released) {
+        await releasePayment(key, deps, gw, state === "expired" ? `${gw.text.sessionLabel.short} expired` : "delayed payment failed").catch((e) =>
+          ctx.log?.(`${gw.provider}_status_release_failed`, { ref: booking.ref, error: e instanceof Error ? e.message : String(e) }),
+        );
+      }
       const fulfilment: FulfilmentView = { state: "released", reservationId: null };
       // The window is over but a payment was still waiting for the bank's answer: it may yet succeed, so the
       // guest is told not to pay again (pending/unconfirmed), whatever the Cancel button did (money review 8).

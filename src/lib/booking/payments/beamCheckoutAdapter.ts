@@ -15,7 +15,11 @@
 //   the cancelled-hold CRITICAL (owner decision 3).
 // - Circuit breaker (gap review 19): every failed create call counts in keys.beamPageFail (a 5-minute window); the
 //   third in a row pauses Beam checkout for 5 minutes (keys.beamPaused) and tells the owner. While paused,
-//   beforeHold refuses every checkout before anything is written. A created link ends the run of failures.
+//   beforeHold refuses every checkout before anything is written. A created link ends the run of failures. A
+//   create Beam answered 429 (after its one retry) is not counted (round 6): a rate limit is not an outage, and
+//   counting it would turn a burst of 429s (our own status reads, if Beam limits per merchant) into a 5-minute
+//   checkout pause; the runtime's 429 counter ("Beam is rate-limiting the booking engine") and the page-failed
+//   alert still tell the owner.
 // - afterCreate writes the PaymentRecord (708 days) and the links-open entry (score = the link's expiresAt), which
 //   the sweeper reads on every run; a failure of either makes the core disable the link and cancel the hold.
 //   cancelPage is the gateway's disable with a fresh idempotency key.
@@ -168,7 +172,9 @@ export function beamCheckoutAdapter(deps: BeamGatewayDeps, beam: BeamSettings, a
       try {
         link = await createPaymentLink(beam, body, idempotencyKeyFor(ref, mode, nonce()), deps.fetchImpl, opts);
       } catch (e) {
-        await countPageFailure(beamErrorInfo(e));
+        const info = beamErrorInfo(e);
+        // A rate limit is no outage: never counted towards the pause (round 6).
+        if (info.status !== 429) await countPageFailure(info);
         throw e;
       }
       // A created link ends a run of failures (best effort: a stale count only brings a pause forward).

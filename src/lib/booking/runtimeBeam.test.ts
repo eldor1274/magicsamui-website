@@ -247,6 +247,9 @@ test("getProviderDeps and providerDepsFor: an active Beam config gets its deps w
     assert.deepEqual(await gw.get(h.key), await kit.gw.get(h.key));
     assert.deepEqual((await gw.readLink(h.key)).state, (await kit.gw.readLink(h.key)).state);
     assert.equal(await gw.releaseGuard?.(h.key), false, "an open link is never released");
+    // Round 6: abandon's 404 judgement, the real gateway's too.
+    assert.deepEqual([await gw.isGone?.(h.key), await gw.isGone?.("cs_test_notbeam")], [await kit.gw.isGone?.(h.key), await kit.gw.isGone?.("cs_test_notbeam")]);
+    assert.deepEqual([await gw.isGone?.(h.key), await gw.isGone?.("cs_test_notbeam")], [false, true]);
     const listed = await gw.sweepRecent(NOW - 3_600_000);
     assert.deepEqual(listed.map((p) => [p.key, p.reservationId, p.listedPaid]), [[h.key, h.reservationId, false]]);
     await assert.rejects(gw.get(beamKeyOf("NoSuchLnk1")), (e: unknown) => gw.isMissing(e), "a link Beam does not know reads as missing");

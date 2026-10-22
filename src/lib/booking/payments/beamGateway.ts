@@ -630,6 +630,16 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     return null;
   }
 
+  /**
+   * Whether Beam's 404 for one of our links means it can never be paid (releaseGuard, isGone): only when our record
+   * says this BEAM_MERCHANT_ID created it and its expiry plus the pending grace is over (see missingProblem).
+   * Without a record nothing says so.
+   */
+  async function missingIsFinal(linkId: string): Promise<boolean> {
+    const record = await readRecord(deps.kv, linkId);
+    return record !== null && record.merchantId === beam.merchantId && nowOf(deps) >= record.expiresAt + graceMs;
+  }
+
   /** A released link stays watched while its last reading shows a PENDING charge (keys.beamLinksPending). Best effort. */
   async function notePendingWatch(t: TrackedLink, pending: boolean): Promise<void> {
     if (pending === t.pendingWatched) return;
@@ -904,9 +914,13 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
         if (!isBeamNotFound(e)) throw e;
         // A link Beam does not know can never be paid only when our record says it is this merchant's and its
         // expiry plus the grace is over (see missingProblem); without a record nothing says so: the hold stays.
-        const record = await readRecord(deps.kv, linkId);
-        return record !== null && record.merchantId === beam.merchantId && nowOf(deps) >= record.expiresAt + graceMs;
+        return missingIsFinal(linkId);
       }
+    },
+    // Abandon's 404 (round 6): final only as the guard's is. A key that is not a Beam key names no Beam payment at all.
+    async isGone(key) {
+      const linkId = linkIdOf(key);
+      return linkId === null ? true : missingIsFinal(linkId);
     },
     parseHoldId: parseBeamHoldIdentifier,
     isPaymentId: isBeamLinkId,

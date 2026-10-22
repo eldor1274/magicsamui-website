@@ -88,16 +88,21 @@ test("the Beam gateway: provider, brand, keys, ids, hold identifiers and the 708
   assert.deepEqual(await gw.sweepRecent(NOW - 3_600_000), [], "S4.2: nothing tracked and no charge on Beam - an empty listing (beamSweep.test.ts covers the rest)");
 });
 
-test("a key that is not a Beam key, and a link Beam does not know, read as missing: abandon answers closed", async () => {
+test("a key that is not a Beam key, and a link Beam does not know, read as missing: abandon answers closed only for the key that is not a Beam key (gw.isGone)", async () => {
   const kit = makeBeamKit();
   const before = kit.fakeBeam.calls.length;
   for (const key of ["cs_test_a1b2c3", "beam:", "beam:a/b", "rGtqz6DafS"]) {
     await assert.rejects(kit.gw.get(key), (e: unknown) => kit.gw.isMissing(e), key);
     await assert.rejects(kit.gw.cancel(key), (e: unknown) => kit.gw.isMissing(e), key);
+    assert.equal(await kit.gw.isGone?.(key), true, `${key}: names no Beam payment at all`);
   }
   assert.equal(kit.fakeBeam.calls.length, before, "no Beam call for a key that is not a Beam key");
+  assert.deepEqual(await abandonPayment("cs_test_a1b2c3", kit.deps, kit.gw, null), { state: "closed" });
   await assert.rejects(kit.gw.get("beam:NoSuchLnk1"), (e: unknown) => kit.gw.isMissing(e) && e instanceof BeamApiError && e.status === 404);
-  assert.deepEqual(await abandonPayment("beam:NoSuchLnk1", kit.deps, kit.gw, null), { state: "closed" });
+  // Round 6: Beam's 404 is final only for a link our record says this merchant made, past its expiry plus the grace;
+  // one we hold no record of may be another merchant's or still payable, so abandon throws (the route answers 502).
+  assert.equal(await kit.gw.isGone?.("beam:NoSuchLnk1"), false);
+  await assert.rejects(abandonPayment("beam:NoSuchLnk1", kit.deps, kit.gw, null), (e: unknown) => kit.gw.isMissing(e));
 });
 
 test("every Beam call is sized to the caller's deadline: a spent budget makes no call; a 429 is counted", async () => {

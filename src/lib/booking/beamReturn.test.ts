@@ -11,6 +11,11 @@
 // finished booking with no Beam call, only when the marker is this booking's; the reads stay inside the deadline.
 // Abandon: ACTIVE -> disabled and released; PAID -> fulfilled; PENDING -> 'pending', the hold kept; unconfirmed ->
 // 'pending'; booking A's token can't cancel booking B.
+// Round 6: a Beam token whose payMethod is not one of the two groups gets 400 before anything is read (active and
+// drain); the done shortcut is this booking's only (CK2); a released hold costs one link reading, never a second
+// release; abandon on a finished booking answers 'paid' and on a released one 'pending' with no Beam call; a 404 is
+// final for abandon only as for the release guard (this merchant's record, past the expiry plus the grace); the
+// return page's server render (returnPageStatus) keeps the 25-second deadline.
 
 import { test } from "node:test";
 import type { TestContext } from "node:test";
@@ -33,6 +38,7 @@ import { beamKeyOf, keys } from "./lock.ts";
 import { createFakeBeam } from "./mock/fakeBeam.ts";
 import { createFakeCloudbeds } from "./mock/fakeCloudbeds.ts";
 import type { FakeCloudbeds } from "./mock/fakeCloudbeds.ts";
+import { readRecord, writeRecord } from "./payments/beamRecord.ts";
 import { satangToBaht } from "./quote.ts";
 import { canRetryPayment } from "./returnView.ts";
 import { purchaseFor, runStatus } from "./status.ts";
@@ -374,6 +380,126 @@ test("abandon: booking A's token can't cancel booking B (B's link token and B's 
   assert.equal(await kit.deps.kv.get(keys.abandoned(b.key)), null);
 });
 
+/* ------------------------------------------------ round 6 ------------------------------------------------ */
+
+/** The page's booking token of `b` (and its link token) with `payMethod` in the booking, signed as the server signs it. */
+function withPayMethod(kit: BeamKit, b: Booked, payMethod: unknown): Pick<Booked, "t" | "l"> {
+  const booking = { ...b.booking, payMethod } as unknown as BookingSummary;
+  return { t: createBookingToken(booking, null, TOKEN_SECRET, 3600, kit.now.ms), l: createBookingToken(booking, b.linkId, TOKEN_SECRET, 3600, kit.now.ms) };
+}
+
+const NOT_VALID = { status: 400, body: { ok: false, error: "invalid_token", message: "This booking link is not valid." } };
+
+test("a Beam token whose payMethod is not one of the two groups: status and abandon answer 400 before anything is read, on the active Beam deps and on the Beam drain", async () => {
+  const kit = makeBeamKit();
+  const b = await booked(kit);
+  // A Stripe deployment whose Beam drain finishes the booking (the kit's deps as the drain).
+  const stripeActive = getBookingConfig({ BOOKING_PAYMENT_PROVIDER: "stripe", BOOKING_STRIPE_MOCK: "true", BOOKING_TOKEN_SECRET: TOKEN_SECRET });
+  assert.equal(stripeActive.paymentMode, "stripe-mock");
+  const drained = { config: stripeActive, providerDeps: providerDepsOfKit(kit), nowMs: kit.now.ms, log: kit.deps.log };
+  for (const bad of ["bogus", "PROMPTPAY", "", 0, null, ["promptpay"], {}]) {
+    const tok = withPayMethod(kit, b, bad);
+    const at = { beam: kit.fakeBeam.calls.length, cb: kit.fakeCb.calls.length };
+    assert.deepEqual(await statusOf(kit, tok), NOT_VALID, `active ${JSON.stringify(bad)}`);
+    assert.deepEqual(await abandon(kit, tok), NOT_VALID, `active ${JSON.stringify(bad)}`);
+    assert.deepEqual(await runStatus({ ...tok, p: null }, drained), NOT_VALID, `drain ${JSON.stringify(bad)}`);
+    assert.deepEqual(await runAbandon(tok, drained), NOT_VALID, `drain ${JSON.stringify(bad)}`);
+    assert.deepEqual([kit.fakeBeam.calls.length, kit.fakeCb.calls.length], [at.beam, at.cb], "nothing read");
+  }
+  // The two groups (and no payMethod, as on older tokens) are answered from Beam as usual.
+  for (const good of ["card_ewallet", "promptpay", undefined]) {
+    const tok = withPayMethod(kit, b, good);
+    assert.equal(answer(await statusOf(kit, tok)).status, "pending", String(good));
+    assert.equal(answer(await runStatus({ ...tok, p: null }, drained)).status, "pending", `drain ${String(good)}`);
+  }
+  assert.equal(reservation(kit, b.reservationId).status, "not_confirmed");
+});
+
+test("the done shortcut is this booking's only: a token for another ref naming the paid link gets the mismatch from Beam's own reading (CK2)", async () => {
+  const kit = makeBeamKit();
+  const b = await booked(kit);
+  kit.fakeBeam.pay(b.linkId, "CARD");
+  assert.deepEqual(answer(await statusOf(kit, b)).fulfilment, { state: "confirmed", reservationId: b.reservationId });
+  const otherRef = b.ref.endsWith("ZZZZ") ? b.ref.replace(/ZZZZ$/, "YYYY") : b.ref.replace(/-[A-Z2-9]{4}$/, "-ZZZZ");
+  assert.notEqual(otherRef, b.ref);
+  const other = { ...b.booking, ref: otherRef };
+  const forged = { t: createBookingToken(other, null, TOKEN_SECRET, 3600, kit.now.ms), l: createBookingToken(other, b.linkId, TOKEN_SECRET, 3600, kit.now.ms) };
+  const at = kit.fakeBeam.calls.length;
+  const body = answer(await statusOf(kit, forged));
+  assert.equal(body.status, "failed");
+  assert.equal(body.failureCode, "AMOUNT_OR_REFERENCE_MISMATCH");
+  assert.ok(kit.fakeBeam.calls.length > at, "the done marker names another ref: Beam is asked");
+});
+
+test("a released Beam hold is not released again: the next status reads the link once (2 Beam calls), never the release's reading", async () => {
+  const kit = makeBeamKit();
+  const b = await booked(kit);
+  kit.now.ms = b.expiresAt + GRACE_MS + MIN;
+  assert.equal(answer(await statusOf(kit, b)).status, "expired");
+  assert.equal(reservation(kit, b.reservationId).status, "canceled");
+  assert.notEqual(await kit.deps.kv.get(keys.releaseDone(b.reservationId)), null);
+  const at = kit.fakeBeam.calls.length;
+  const cbAt = kit.fakeCb.calls.length;
+  const again = answer(await statusOf(kit, b));
+  assert.equal(again.status, "expired");
+  assert.deepEqual(again.fulfilment, { state: "released", reservationId: null });
+  assert.deepEqual(beamCallsSince(kit, at), [`GET /api/v1/payment-links/${b.linkId}`, "GET /api/v1/charges"]);
+  assert.deepEqual(kit.fakeCb.calls.slice(cbAt), [], "no Cloudbeds call");
+});
+
+test("abandon on a finished Beam booking answers 'paid', on a released one 'pending' (the return page tells which), with no Beam call and no disable", async () => {
+  const kit = makeBeamKit();
+  const paid = await booked(kit);
+  kit.fakeBeam.pay(paid.linkId, "CARD");
+  assert.equal(answer(await statusOf(kit, paid)).fulfilment.state, "confirmed");
+  let at = kit.fakeBeam.calls.length;
+  assert.deepEqual(await abandon(kit, { t: paid.t, l: paid.l }), { status: 200, body: { ok: true, state: "paid" } });
+  assert.deepEqual(await abandon(kit, { t: paid.t }), { status: 200, body: { ok: true, state: "paid" } }, "found by the pointer too");
+  assert.deepEqual(beamCallsSince(kit, at), [], "no Beam call for a finished booking");
+  assert.ok(logged(kit, "booking_abandoned").some((l) => l.data?.ref === paid.ref && l.data?.settled === "done"));
+
+  const released = await booked(kit, "promptpay", GARDEN);
+  kit.now.ms = released.expiresAt + GRACE_MS + MIN;
+  assert.equal(answer(await statusOf(kit, released)).status, "expired");
+  at = kit.fakeBeam.calls.length;
+  assert.deepEqual(await abandon(kit, { t: released.t, l: released.l }), { status: 200, body: { ok: true, state: "pending" } });
+  assert.deepEqual(beamCallsSince(kit, at), [], "no Beam call, no disable for a released hold");
+  assert.equal(await kit.deps.kv.get(keys.abandoned(released.key)), null);
+
+  // A token for booking A naming B's finished link: B's marker is not A's answer, and B's link is never touched.
+  const a = await booked(kit, "card_ewallet", SUNRISE);
+  const forged = createBookingToken(a.booking, paid.linkId, TOKEN_SECRET, 3600, kit.now.ms);
+  assert.deepEqual((await abandon(kit, { t: a.t, l: forged })).body, { ok: true, state: "closed" });
+  assert.equal(kit.fakeBeam.link(paid.linkId).status, "PAID");
+});
+
+test("abandon on a Beam link Beam answers 404 for: an error (the guest keeps the attempt) unless our record says this merchant made it and its expiry plus the grace is over", async () => {
+  const UPSTREAM = { status: 502, body: { ok: false, error: "upstream_error", message: "We couldn't cancel the payment just now - it will expire on its own within 30 minutes." } };
+  // Before its expiry plus the grace: may still be payable.
+  const kit = makeBeamKit();
+  const early = await booked(kit);
+  kit.fakeBeam.links.delete(early.linkId);
+  assert.deepEqual(await abandon(kit, { t: early.t, l: early.l }), UPSTREAM);
+  kit.now.ms = early.expiresAt + GRACE_MS - MIN;
+  assert.deepEqual(await abandon(kit, { t: early.t, l: early.l }), UPSTREAM, "inside the grace");
+  assert.equal(reservation(kit, early.reservationId).status, "not_confirmed", "the hold is kept");
+  // From the expiry plus the grace, a link of this merchant that Beam does not know can never be paid: closed.
+  kit.now.ms = early.expiresAt + GRACE_MS;
+  assert.deepEqual(await abandon(kit, { t: early.t, l: early.l }), { status: 200, body: { ok: true, state: "closed" } });
+
+  // Another merchant's link (our record says so): never final, whatever the time.
+  const kit2 = makeBeamKit();
+  const other = await booked(kit2);
+  const record = await readRecord(kit2.deps.kv, other.linkId);
+  assert.ok(record);
+  await writeRecord(kit2.deps.kv, { ...record, merchantId: "m_OtherMerchantBeforeSwitch00" });
+  kit2.fakeBeam.links.delete(other.linkId);
+  kit2.now.ms = other.expiresAt + GRACE_MS + 60 * MIN;
+  assert.deepEqual(await abandon(kit2, { t: other.t, l: other.l }), UPSTREAM);
+  assert.equal(reservation(kit2, other.reservationId).status, "not_confirmed");
+  assert.ok(logged(kit2, "booking_abandon_failed").some((l) => l.data?.ref === other.ref));
+});
+
 /* ------------------------------------------------- routes ------------------------------------------------- */
 
 // The route handlers import "@/..." paths and runtime.ts imports "next/server", which plain Node can't resolve: a
@@ -405,6 +531,7 @@ async function loadRoutes() {
     checkout: await import("../../app/api/booking/checkout/route.ts"),
     status: await import("../../app/api/booking/status/route.ts"),
     abandon: await import("../../app/api/booking/abandon/route.ts"),
+    returnPage: await import("./returnPageStatus.ts"),
     NextRequest: (await import("next/server")).NextRequest,
   };
 }
@@ -536,6 +663,11 @@ test("routes: checkout, status and abandon on Beam through the real handlers and
     const slow = await getStatus({ t: c.t, l: c.l });
     assert.deepEqual(slow, COULD_NOT_CHECK);
     assert.deepEqual(fakeBeam.calls.slice(before).map((x) => `${x.method} ${x.path}`), [`GET /api/v1/payment-links/${c.linkId}`]);
+    // Round 6: the return page's server render (returnPageStatus) gives its Beam calls the same 25-second deadline.
+    const pageAt = fakeBeam.calls.length;
+    assert.deepEqual(await routes.returnPage.returnPageStatus(c.t, null, null), COULD_NOT_CHECK.body);
+    assert.deepEqual(fakeBeam.calls.slice(pageAt).map((x) => `${x.method} ${x.path}`), [`GET /api/v1/payment-links/${c.linkId}`]);
+    assert.equal(routes.returnPage.RETURN_PAGE_STATUS_BUDGET_MS, 25_000);
     // The abandon route's deadline too: no time is left to disable the link after a 26-second link read.
     const abandonAt = fakeBeam.calls.length;
     const late = await routes.abandon.POST(post("/api/booking/abandon", { t: c.t, l: c.l }));
