@@ -2,14 +2,16 @@
 // Runs after checkout.ts has validated the cart and re-quoted it from Cloudbeds with no cache, and keeps the
 // chain stripeCheckout.ts describes:
 //
-//   payment-method refusal -> test-mode guard -> sweeper freshness -> open-holds brake -> fresh ref and
-//   hold INTENT -> unit locks -> checkBeforeHold -> client brakes -> time budget -> postReservation (the
-//   HOLD) -> hold record -> unlock -> folio assert -> "not_confirmed" -> guest note -> the provider's
-//   payment page -> hold record and pointer name it -> redirect.
+//   payment-method refusal -> test-mode guard -> the adapter's beforeHold (if any) -> sweeper freshness ->
+//   open-holds brake -> fresh ref and hold INTENT -> unit locks -> checkBeforeHold -> client brakes -> time
+//   budget -> postReservation (the HOLD) -> hold record -> unlock -> folio assert -> "not_confirmed" -> guest
+//   note -> the provider's payment page -> hold record and pointer name it -> redirect.
 //
 // Only the payment page belongs to the provider. Its CheckoutAdapter creates the page within the time that
 // is left, checks the page's URL, closes it again (cancelPage) and words the owner's alert when it can't be
-// created. The page's key names the payment in Redis (the hold record and the msv:booking:{ref} pointer);
+// created. Its optional members (Beam design step S2.6) are the hold note's deadline (holdNoteDeadline), what
+// closing the page is called in the crash alert (closedWord) and a last check before anything is written
+// (beforeHold); without them the core writes the Stripe words it always wrote. The page's key names the payment in Redis (the hold record and the msv:booking:{ref} pointer);
 // its paymentId goes into the booking token. Once the page exists, any failure closes it and then gives the
 // hold back, and so does the crash catch. startStripeCheckout (stripeCheckout.ts) is this core with the
 // Stripe adapter.
@@ -99,6 +101,11 @@ export interface CheckoutPage {
   redirectUrl: string | null;
 }
 
+/** The hold note's deadline when the adapter names none: "after 30 minutes" (the Stripe wording). */
+export const DEFAULT_HOLD_NOTE_DEADLINE = `after ${PAYMENT_LINK_TTL_MINUTES} minutes`;
+/** What the crash alert says happened to the payment page when the adapter names nothing: "expired" (the Stripe wording). */
+export const DEFAULT_CLOSED_WORD = "expired";
+
 /** The provider side of the hold-first checkout (stripeCheckoutAdapter in stripeCheckout.ts). */
 export interface CheckoutAdapter<Info extends object = object> {
   provider: Exclude<PaymentProvider, "demo">;
@@ -106,6 +113,22 @@ export interface CheckoutAdapter<Info extends object = object> {
   brand: string;
   /** The largest single charge the provider takes. runCheckout refuses a larger stay before anything is held. */
   maxChargeSatang: number;
+  /**
+   * When staff may expect an unpaid hold to go, in the hold's Cloudbeds note: "... the hold is cancelled
+   * automatically if unpaid {holdNoteDeadline}." (Stripe: "after 30 minutes"). Absent: DEFAULT_HOLD_NOTE_DEADLINE.
+   */
+  holdNoteDeadline?: string;
+  /**
+   * What cancelPage did to the page, in the crash alert: "The {brand} payment page {id} was {closedWord}, ..."
+   * (Stripe: "expired"). Absent: DEFAULT_CLOSED_WORD.
+   */
+  closedWord?: string;
+  /**
+   * Asked right after the test-mode guard, before any Redis or Cloudbeds write of the checkout (Beam: its circuit
+   * breaker). An answer refuses the checkout with it as it is; null goes ahead. A throw refuses with a 503 and
+   * nothing held. Absent (Stripe): no such check.
+   */
+  beforeHold?(): Promise<StripeCheckoutResult | null>;
   /** Creates the payment page within input.budgetMs. A throw cancels the hold and alerts (pageFailedAlert). */
   createPage(input: CheckoutPageInput): Promise<CheckoutPage>;
   /** True when the URL is the provider's hosted page (the guest is never sent anywhere else). */
@@ -163,6 +186,21 @@ export async function startHoldFirstCheckout<Info extends object>(
   if (refusal) {
     deps.log("checkout_test_guard_refused", { access, configured: Boolean(config.testGuard?.guestEmail && config.testGuard?.accessKey) });
     return fail(403, { error: "test_mode_restricted", message: refusal });
+  }
+
+  // The provider's own last word before anything is written (Beam: its circuit breaker). Stripe has none.
+  if (adapter.beforeHold) {
+    let refused: StripeCheckoutResult | null;
+    try {
+      refused = await adapter.beforeHold();
+    } catch (e) {
+      deps.log("checkout_before_hold_failed", { provider: adapter.provider, error: redactForLog(e instanceof Error ? e.message : String(e)) });
+      return fail(503, { error: "payment_unavailable", message: `We couldn't start your booking safely just now. ${NOTHING_CHARGED} Please try again in a moment.` });
+    }
+    if (refused) {
+      deps.log("checkout_refused_before_hold", { provider: adapter.provider, status: refused.status });
+      return refused;
+    }
   }
 
   const rooms = input.items.map((item) => {
@@ -502,7 +540,7 @@ export async function startHoldFirstCheckout<Info extends object>(
     // "After 11 PM" (estimatedArrivalTime null) and the guest's requests reach Cloudbeds ONLY through this note.
     const guestFlags = { arrivalLate: input.guest.arrivalTime === "late", hasRequests: input.guest.specialRequests.trim() !== "", noteSaved: false };
     const noteParts = [
-      `${testLabel}Online booking ${ref} via magicsamui.com (${adapter.brand}). Awaiting payment - the hold is cancelled automatically if unpaid after ${PAYMENT_LINK_TTL_MINUTES} minutes.`,
+      `${testLabel}Online booking ${ref} via magicsamui.com (${adapter.brand}). Awaiting payment - the hold is cancelled automatically if unpaid ${adapter.holdNoteDeadline ?? DEFAULT_HOLD_NOTE_DEADLINE}.`,
       guestFlags.arrivalLate ? "Estimated arrival: after 11 PM." : "",
       // The promo-code rate: "Direct rate (code DIRECT)." / "Long term (code LONGSTAY)."
       quote.directRate ? `${codeRateNames(quote).join(", ") || "Direct rate"} (code ${quote.directRate.code}).` : "",
@@ -622,7 +660,7 @@ export async function startHoldFirstCheckout<Info extends object>(
       [
         `Booking ${ref} (Cloudbeds reservation ${reservationId}) failed on our side after the hold was created: ${message}`,
         page?.key
-          ? `The ${adapter.brand} payment page ${page.paymentId} was expired, the hold was cancelled and nothing was charged.`
+          ? `The ${adapter.brand} payment page ${page.paymentId} was ${adapter.closedWord ?? DEFAULT_CLOSED_WORD}, the hold was cancelled and nothing was charged.`
           : "No payment page existed yet; the hold was cancelled and nothing was charged.",
         "If this repeats, online bookings are failing on our side: check the Vercel logs for checkout_crashed_after_hold.",
       ],

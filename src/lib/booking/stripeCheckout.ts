@@ -66,6 +66,10 @@ export function stripeCheckoutAdapter(
     provider: "stripe",
     brand: "Stripe",
     maxChargeSatang: STRIPE_MAX_CHARGE_SATANG,
+    // The hold note and the crash alert keep their exact words: "... cancelled automatically if unpaid after
+    // 30 minutes." and "... was expired, ..." (a Checkout Session is expired). No beforeHold.
+    holdNoteDeadline: `after ${PAYMENT_LINK_TTL_MINUTES} minutes`,
+    closedWord: "expired",
     async createPage({ ref, reservationId, quote, guest, token, basePath, guestFlags, budgetMs, nonce }) {
       // Sized to the budget: Stripe's own timeout, and its one network retry only when that still fits.
       const requestOptions = Number.isFinite(budgetMs) ? { timeout: Math.min(15_000, Math.floor(budgetMs)), maxNetworkRetries: budgetMs > 20_000 ? 1 : 0 } : {};

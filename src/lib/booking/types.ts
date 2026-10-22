@@ -578,6 +578,13 @@ export interface StatusResponse {
   paymentMode: PaymentMode;
   provider: PaymentProvider;
   status: PaymentStatus;
+  /**
+   * Why a "pending" payment is not settled yet, present only when the provider's payment says so (never for
+   * Stripe). processing: still being confirmed by the bank or wallet. unconfirmed: the payment window is over
+   * and the hold was released, but a payment was still waiting for the bank's answer: the guest must NOT pay
+   * again, and is never offered "Try again" (money review 8).
+   */
+  pendingReason?: "processing" | "unconfirmed";
   failureCode: string | null;
   booking: BookingSummary;
   fulfilment: FulfilmentView;

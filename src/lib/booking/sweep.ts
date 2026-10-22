@@ -8,7 +8,9 @@
 //
 // 1. The provider's payments created in the last 48 h that are ours (this
 //    mode; gw.sweepRecent - Stripe: its session list): paid -> fulfil (no-op
-//    once done); expired / delayed-payment failed -> release.
+//    once done); refunded before it was confirmed (never Stripe) -> fulfil too,
+//    which hands it to the owner (needs_attention) and never releases it;
+//    expired / delayed-payment failed -> release.
 // 2. Holds, from three sources, each with an age WE can vouch for:
 //    a. our open-holds index (age = our own createdAt);
 //    b. hold INTENTS (written before postReservation): an attempt whose answer
@@ -20,7 +22,8 @@
 //       our record if we have one, else Cloudbeds' creation time read
 //       cautiously (never older than it could be).
 //    Only holds older than the session lifetime (+ margin) are considered:
-//    a paid payment -> fulfil; an open one -> leave; otherwise -> release.
+//    a paid (or refunded) payment -> fulfil; an open one -> leave; otherwise
+//    -> release.
 // A hold is NEVER released while any payment for it is paid (release refuses),
 // nor when it carries our paid marker or the folio shows a payment. A
 // CONFIRMED reservation with an MSV id that we have no record or intent of
@@ -33,8 +36,18 @@
 //    paid for PAID_UNCONFIRMED_ESCALATE_MS.
 // 2d. Index hygiene: entries whose hold record expired, or older than
 //    INDEX_PRUNE_MS (other-mode leftovers, releases that kept failing) are
-//    dropped (the latter with an alert); an index that keeps growing alerts.
+//    dropped (the latter with an alert); an index that keeps growing alerts
+//    (the primary run only: the index is shared by every run).
 // 3. Critical alerts that were never delivered are re-sent (alerts.ts).
+//
+// Gateway hooks (Beam design step S2.6; the Stripe gateway sets none of them,
+// so every Stripe call, text, KV write and TTL is what it was):
+// - gw.parseHoldId reads the thirdPartyIdentifier of the provider's own holds
+//   (default lock.ts parseHoldIdentifier: Stripe's plain / -TEST ids);
+// - gw.releaseGuard is asked inside the release lock before every release of a
+//   hold whose payment this run saw (releaseHold's stillReleasable), and
+//   fulfil.ts afterPaymentReleased follows every such release (the owner is
+//   warned when the payment was still unconfirmed at the bank).
 //
 // The run only counts as a sweep (msv:sweep:last, which checkout watches) when
 // its Cloudbeds side worked: a sweeper that can't list Cloudbeds reservations
@@ -50,13 +63,18 @@
 // Ownership of a hold between those runs:
 // - one with a record or an intent belongs to the run of its mode (any other
 //   run skips it as another mode's);
-// - one with neither (an orphan: Redis lost its record) can't be told apart by
-//   provider, since every provider's live holds carry the plain ref. A drain run
-//   never touches it (no release, no "no record" report). The primary run
-//   releases it only when no provider sees a payment for it that is not over:
-//   neither its own step 1 nor a peer's. Without the peers' view, a paid or
-//   still-payable booking of another provider whose record was lost would be
-//   cancelled before that provider's run got to it;
+// - one with neither (an orphan: Redis lost its record) is seen only by the runs
+//   whose parser (gw.parseHoldId, else parseHoldIdentifier) recognises its
+//   thirdPartyIdentifier. A run owns those orphans when opts.ownsOrphans is true
+//   (default: opts.primary). Without the provider tags two providers' live holds
+//   would carry the same plain ref, so by default a drain run never touches an
+//   orphan (no release, no "no record" report). Beam holds carry '-B' and
+//   Stripe holds never do, so the route can let every run own the orphans its
+//   own parser reads (Beam design S4.8). An owning run releases an orphan only
+//   when no provider sees a payment for it that is not over: neither its own
+//   step 1 nor a peer's. Without the peers' view, a paid or still-payable
+//   booking of another provider whose record was lost would be cancelled before
+//   that provider's run got to it;
 // - whatever its record says, the hold side never releases a hold that a peer
 //   sees a paid, open, processing or refunded payment for (step 1 only ever
 //   releases the hold its own provider's payment was made for).
@@ -64,7 +82,7 @@
 import { resendPendingAlerts } from "./alerts.ts";
 import { redactForLog } from "./cloudbedsWrite.ts";
 import type { ListedReservation } from "./cloudbedsWrite.ts";
-import { PAID_UNCONFIRMED_ESCALATE_MS, alertFulfilPaymentFailure, alertPaidPaymentStuck, fulfilPayment, holdRecord, releaseHold } from "./fulfil.ts";
+import { PAID_UNCONFIRMED_ESCALATE_MS, afterPaymentReleased, alertFulfilPaymentFailure, alertPaidPaymentStuck, fulfilPayment, holdRecord, releaseHold } from "./fulfil.ts";
 import { closeHold, closeIntent, keyScope, keys, parseHoldIdentifier, readJson, recordHold } from "./lock.ts";
 import type { HoldIntent, PaidPending } from "./lock.ts";
 import type { GatewayPayment, GatewayText, PaymentGateway } from "./payments/gateway.ts";
@@ -115,6 +133,28 @@ async function noteRelease(deps: CoreDeps, reservationId: string, text: string):
   await deps.writer.addNote(reservationId, text).catch((e) => deps.log("release_note_failed", { reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) }));
 }
 
+/**
+ * releaseHold's options for the hold of the payments `paymentKeys` (this run's provider): gw.releaseGuard
+ * asked for each of them, inside the release lock, right before the Cloudbeds cancel - false for any one keeps
+ * the hold (refused_open). Nothing to ask without a guard (Stripe) or without a payment: no options, as before.
+ */
+function releaseGuardFor(gw: PaymentGateway, paymentKeys: string[]): { stillReleasable?: () => Promise<boolean> } {
+  const guard = gw.releaseGuard;
+  if (!guard || paymentKeys.length === 0) return {};
+  return {
+    stillReleasable: async () => {
+      for (const key of paymentKeys) if (!(await guard.call(gw, key))) return false;
+      return true;
+    },
+  };
+}
+
+/** The thirdPartyIdentifier parser of this run's provider: gw.parseHoldId, else Stripe's (parseHoldIdentifier). */
+function holdIdParser(gw: PaymentGateway): (id: string | null | undefined) => { ref: string; live: boolean } | null {
+  const parse = gw.parseHoldId;
+  return parse ? (id) => parse.call(gw, id) : parseHoldIdentifier;
+}
+
 /** The release note in the words of the provider whose payment page the hold had: a peer's when only a peer saw one. */
 function releaseNote(text: GatewayText, seen: GatewayPayment[], peers: RecentPayments[], reservationId: string): string {
   if (seen.length === 0) {
@@ -159,7 +199,7 @@ interface Candidate {
   indexed?: boolean;
   /** Indexed, but its hold record is gone (expired after 30 days, or lost). */
   recordMissing?: boolean;
-  /** Found only in Cloudbeds' list: neither a record nor an intent of ours names its provider (primary run only). */
+  /** Found only in Cloudbeds' list: neither a record nor an intent of ours names its provider (a run that owns orphans only). */
   orphan?: boolean;
 }
 
@@ -172,7 +212,7 @@ export interface RecentPayments {
   text: GatewayText;
   /** Its recent payments of ours (this mode), by Cloudbeds reservation. */
   byReservation: Map<string, GatewayPayment[]>;
-  /** Paid payments step 1 already ran fulfil for (successfully or not). */
+  /** Paid (or refunded) payments step 1 already ran fulfil for (successfully or not). */
   triedPaid: Set<string>;
   /** Step 1's share of the run's summary. */
   counts: Pick<SweepSummary, "sessionsChecked" | "fulfilled" | "released" | "errors">;
@@ -180,10 +220,18 @@ export interface RecentPayments {
 
 export interface SweepOptions {
   /**
-   * false for a drain run (a provider other than the active one, finishing its in-flight payments): it never
-   * touches an orphan hold (no record, no intent) - see "Ownership" above. Default true.
+   * false for a drain run (a provider other than the active one, finishing its in-flight payments): unless
+   * ownsOrphans says otherwise it never touches an orphan hold (no record, no intent), and only the primary
+   * run raises the hold-index-size alert (the index is shared) - see "Ownership" above. Default true.
    */
   primary?: boolean;
+  /**
+   * Whether this run owns the orphan holds its own parser recognises (gw.parseHoldId, else
+   * parseHoldIdentifier): releases them (when no peer sees a payment for them that is not over) and reports
+   * the confirmed ones. Default: primary. The sweep route sets it for every run once the providers' holds
+   * carry their own tags (Beam '-B', Stripe never), so no orphan is visible to two runs (Beam design S4.8).
+   */
+  ownsOrphans?: boolean;
   /**
    * Cloudbeds' reservations of the sweep window from earlier in the same request (listSweepReservations, taken
    * after every step 1): not listed again. A hold an earlier run released since is skipped by its release marker.
@@ -206,8 +254,10 @@ export function listSweepReservations(deps: Pick<CoreDeps, "writer">, nowMs: num
 
 /**
  * Step 1 for one provider: its payments of ours (this mode) created in the lookback window. Paid -> fulfil
- * (no-op once done); expired / failed -> release, with a note on the reservation. Throws when the provider
- * can't list them (the whole run fails, as before the gateway).
+ * (no-op once done); refunded -> fulfil as well (it answers needs_attention once: the owner settles it, and
+ * nothing releases it); expired / failed -> release (guarded by gw.releaseGuard for that payment), with a
+ * note on the reservation, then afterPaymentReleased. Throws when the provider can't list them (the whole
+ * run fails, as before the gateway).
  */
 export async function sweepRecentPayments(deps: CoreDeps, gw: PaymentGateway, nowMs: number = nowOf(deps)): Promise<RecentPayments> {
   const recent: RecentPayments = { text: gw.text, byReservation: new Map(), triedPaid: new Set(), counts: { sessionsChecked: 0, fulfilled: 0, released: 0, errors: 0 } };
@@ -219,7 +269,10 @@ export async function sweepRecentPayments(deps: CoreDeps, gw: PaymentGateway, no
       const list = byReservation.get(listed.reservationId) ?? [];
       list.push(payment);
       byReservation.set(listed.reservationId, list);
-      if (payment.state === "paid") {
+      // A payment refunded at the provider before it was confirmed (never Stripe) goes to fulfil like a paid
+      // one: fulfil answers needs_attention once (done marker, the hold closed, never cancelled), so it is
+      // neither released here nor alerted again by later runs (money review 4).
+      if (payment.state === "paid" || payment.state === "refunded") {
         if ((await deps.kv.get(keys.fulfilDone(listed.key))) !== null) continue;
         triedPaid.add(listed.key);
         const outcome = await fulfilPayment(listed.key, deps, gw);
@@ -227,10 +280,11 @@ export async function sweepRecentPayments(deps: CoreDeps, gw: PaymentGateway, no
       } else if (payment.state === "expired" || payment.state === "failed") {
         if ((await deps.kv.get(keys.releaseDone(listed.reservationId))) !== null) continue;
         // Another payment may exist for the same hold (never in practice: one payment page per hold).
-        const r = await releaseHold(listed.reservationId, deps, `sweeper: ${gw.text.sessionLabel.short} ${payment.state}`);
+        const r = await releaseHold(listed.reservationId, deps, `sweeper: ${gw.text.sessionLabel.short} ${payment.state}`, releaseGuardFor(gw, [listed.key]));
         if (r.state === "released") {
           counts.released++;
           await noteRelease(deps, listed.reservationId, gw.text.releaseNoteText(list));
+          await afterPaymentReleased(deps, gw, payment, listed.reservationId);
         }
       }
     } catch (e) {
@@ -267,7 +321,9 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
   const scope = keyScope(mode);
   const liveTag = isLiveMode(mode);
   const primary = opts.primary ?? true;
+  const ownsOrphans = opts.ownsOrphans ?? primary;
   const peers = opts.peers ?? [];
+  const parseHoldId = holdIdParser(gw);
 
   // 1. Provider side (unless the caller already ran it, so the other providers' runs could see it first).
   const recent = opts.recent ?? (await sweepRecentPayments(deps, gw, now));
@@ -351,7 +407,7 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
     await noteCloudbedsFailure(deps, error);
   }
   const ours = (listed ?? []).filter((r) => {
-    const id = parseHoldIdentifier(r.thirdPartyIdentifier);
+    const id = parseHoldId(r.thirdPartyIdentifier);
     if (!id) return false;
     if (id.live !== liveTag) {
       summary.skippedOtherMode++;
@@ -430,8 +486,9 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
       continue;
     }
     const orphan = !rec && intentCreated === undefined;
-    if (orphan && !primary) {
-      // Nothing of ours names its provider: only the primary run decides (and reports) it - see "Ownership".
+    if (orphan && !ownsOrphans) {
+      // Nothing of ours names its provider: only a run that owns orphans (by default the primary one) decides
+      // (and reports) it - see "Ownership".
       deps.log("sweep_orphan_left_to_primary", { reservationId: r.reservationId });
       continue;
     }
@@ -447,7 +504,7 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
       await reportConfirmedWithoutRecord(deps, scope, r);
       continue;
     }
-    add({ reservationId: r.reservationId, createdMs, ref: parseHoldIdentifier(r.thirdPartyIdentifier)?.ref ?? null, orphan });
+    add({ reservationId: r.reservationId, createdMs, ref: parseHoldId(r.thirdPartyIdentifier)?.ref ?? null, orphan });
   }
 
   for (const c of candidates.values()) {
@@ -493,7 +550,9 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
       const seen = [...(byReservation.get(reservationId) ?? [])];
       const rec = await holdRecord(deps, reservationId);
       if (rec?.sessionId && !seen.some((x) => x.key === rec.sessionId)) seen.push(await gw.get(rec.sessionId));
-      const paid = seen.find((x) => x.state === "paid");
+      // Paid -> fulfil. Refunded before it was confirmed (never Stripe) -> fulfil too: the owner settles it
+      // (needs_attention), and the hold is never released here.
+      const paid = seen.find((x) => x.state === "paid" || x.state === "refunded");
       if (paid) {
         const outcome = await fulfilPayment(paid.key, deps, gw);
         if (outcome.state === "confirmed" && !outcome.alreadyDone) summary.fulfilled++;
@@ -512,11 +571,13 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
         summary.openHolds++;
         continue;
       }
-      // No payable payment at any provider (expired/failed, or none was ever created): release.
-      const r = await releaseHold(reservationId, deps, "sweeper: stale hold");
+      // No payable payment at any provider (expired/failed, or none was ever created): release, once the
+      // provider's guard (asked for each of this hold's payments, inside the release lock) still agrees.
+      const r = await releaseHold(reservationId, deps, "sweeper: stale hold", releaseGuardFor(gw, seen.map((x) => x.key)));
       if (r.state === "released") {
         summary.released++;
         await noteRelease(deps, reservationId, releaseNote(gw.text, seen, peers, reservationId));
+        for (const payment of seen) await afterPaymentReleased(deps, gw, payment, reservationId);
       }
       if (r.state === "already_released" || r.state === "released" || r.state === "refused_paid" || r.state === "refused_confirmed") {
         await closeHold(deps.kv, reservationId);
@@ -560,18 +621,21 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
   }
 
   // 2d. The open-holds index should hold a handful of entries: a growing one means something keeps failing.
-  const indexSize = (await deps.kv.zrangeByScore(keys.holdIndex(), 0, Number.MAX_SAFE_INTEGER, INDEX_SIZE_ALERT + 1)).length;
-  if (indexSize > INDEX_SIZE_ALERT) {
-    await deps
-      .alert(
-        "The booking sweeper's hold index keeps growing",
-        [
-          `More than ${INDEX_SIZE_ALERT} holds are listed as open in Redis (msv:holds:open). Releases may be failing, or another mode's holds were left behind.`,
-          "Check the sweeper's answers (errors, skippedOtherMode) and the Vercel logs (sweep_hold_error).",
-        ],
-        { key: "hold-index-size", severity: "warning" },
-      )
-      .catch(() => undefined);
+  // The index is shared by every run of a request: only the primary run tells the owner (once, not per run).
+  if (primary) {
+    const indexSize = (await deps.kv.zrangeByScore(keys.holdIndex(), 0, Number.MAX_SAFE_INTEGER, INDEX_SIZE_ALERT + 1)).length;
+    if (indexSize > INDEX_SIZE_ALERT) {
+      await deps
+        .alert(
+          "The booking sweeper's hold index keeps growing",
+          [
+            `More than ${INDEX_SIZE_ALERT} holds are listed as open in Redis (msv:holds:open). Releases may be failing, or another mode's holds were left behind.`,
+            "Check the sweeper's answers (errors, skippedOtherMode) and the Vercel logs (sweep_hold_error).",
+          ],
+          { key: "hold-index-size", severity: "warning" },
+        )
+        .catch(() => undefined);
+    }
   }
 
   // Unpaid holds still open (fresh ones the stale query above did not read).

@@ -77,6 +77,8 @@ function ok(
   nowMs: number,
   fulfilment: FulfilmentView = NOT_APPLICABLE,
   purchase: PurchaseView | null = null,
+  /** Only when the provider's payment carries one (never Stripe): no key at all otherwise. */
+  pendingReason?: StatusResponse["pendingReason"],
 ): StatusResult {
   return {
     status: 200,
@@ -86,6 +88,7 @@ function ok(
       paymentMode: booking.paymentMode,
       provider: providerOf(booking.paymentMode),
       status,
+      ...(pendingReason ? { pendingReason } : {}),
       failureCode,
       booking,
       fulfilment,
@@ -235,6 +238,14 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
  * paid and fulfilled when paid. ctx.config is the config the booking belongs
  * to (the active one, or its provider's drain); log names follow the provider
  * (stripe_status_mismatch, ...).
+ *
+ * Gateway hooks (Beam design step S2.6; Stripe payments carry none of them, so
+ * every Stripe answer is what it was): a payment carrying a mismatch gets the
+ * mismatch answer (contact us, never "Try again"); a pending answer carries the
+ * payment's pendingReason; and a payment that expired while still unconfirmed
+ * at the bank (pendingReason "unconfirmed") is released, best effort, but
+ * answered pending/unconfirmed - never "expired" or "cancelled", which offer
+ * "Try again", a second payment (money review 8).
  */
 async function holdFirstStatus(
   booking: BookingSummary,
@@ -251,14 +262,21 @@ async function holdFirstStatus(
 
     const payment = await gw.get(key);
     const meta = payment.meta;
-    // The payment must be THIS booking's, for exactly the amount the token says.
-    if (!meta || meta.ref !== booking.ref || payment.amountSatang !== booking.dueNowSatang || (payment.currency ?? "").toLowerCase() !== "thb") {
-      ctx.log?.(`${gw.provider}_status_mismatch`, { ref: booking.ref, sessionId: key });
+    // The payment must be THIS booking's, for exactly the amount the token says - and the provider must not
+    // report it at odds with our own record of the booking (payment.mismatch, never Stripe): a person settles it.
+    if (
+      !meta ||
+      meta.ref !== booking.ref ||
+      payment.amountSatang !== booking.dueNowSatang ||
+      (payment.currency ?? "").toLowerCase() !== "thb" ||
+      payment.mismatch
+    ) {
+      ctx.log?.(`${gw.provider}_status_mismatch`, { ref: booking.ref, sessionId: key, ...(payment.mismatch ? { providerMismatch: true } : {}) });
       return ok(booking, "failed", "AMOUNT_OR_REFERENCE_MISMATCH", nowMs, { state: "not_applicable", reservationId: null });
     }
     const state = payment.state;
     if (state === "open" || state === "processing") {
-      return ok(booking, "pending", null, nowMs, { state: "awaiting_payment", reservationId: null });
+      return ok(booking, "pending", null, nowMs, { state: "awaiting_payment", reservationId: null }, null, payment.pendingReason);
     }
     if (state === "expired" || state === "failed") {
       // Best effort: the webhook/sweeper release it too.
@@ -266,6 +284,9 @@ async function holdFirstStatus(
         ctx.log?.(`${gw.provider}_status_release_failed`, { ref: booking.ref, error: e instanceof Error ? e.message : String(e) }),
       );
       const fulfilment: FulfilmentView = { state: "released", reservationId: null };
+      // The window is over but a payment was still waiting for the bank's answer: it may yet succeed, so the
+      // guest is told not to pay again (pending/unconfirmed), whatever the Cancel button did (money review 8).
+      if (state === "expired" && payment.pendingReason === "unconfirmed") return ok(booking, "pending", null, nowMs, fulfilment, null, "unconfirmed");
       if (state === "failed") return ok(booking, "failed", "PAYMENT_FAILED", nowMs, fulfilment);
       const abandoned = (await deps.kv.get(keys.abandoned(key))) !== null;
       return ok(booking, abandoned ? "cancelled" : "expired", null, nowMs, fulfilment);
