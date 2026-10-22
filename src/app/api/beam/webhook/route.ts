@@ -1,51 +1,41 @@
-import { verifyBeamSignature } from "@/lib/booking/beam";
-import { logEvent, readCapped } from "@/lib/booking/routeUtils";
+import { handleBeamWebhook } from "@/lib/booking/beamWebhook";
+import { NO_STORE, logEvent, readCapped } from "@/lib/booking/routeUtils";
+import { getBeamFulfilmentDeps } from "@/lib/booking/runtime";
 
-// Beam webhook receiver (preview). Verifies X-Beam-Signature over the EXACT
-// raw body (HMAC-SHA256, key = base64-decoded BEAM_WEBHOOK_HMAC_KEY), answers
-// 200 fast and logs a PII-free summary. The preview does NO fulfilment: in
-// live mode this is where the paid booking would be created in Cloudbeds
-// (idempotently, keyed on event + resource id).
+// Beam webhook (design S4.7). Register in Lighthouse -> Webhooks for:
+// payment_link.paid, charge.succeeded, charge.failed, refund.succeeded,
+// refund.failed, transaction.created. The handler (lib/booking/beamWebhook.ts)
+// verifies X-Beam-Signature over the RAW body (read as capped bytes, never
+// parsed before verification), re-reads every payment from Beam and confirms
+// a paid booking in Cloudbeds inline: once the paid marker is written a 200 is
+// safe, and Beam's response timeout is unknown, so nothing waits for after().
+//
+// Deps: the active Beam config's, else the Beam drain's (BOOKING_PAYMENT_PROVIDER
+// switched away from beam with the Beam variables kept), so links already
+// handed out are still finished. With neither, or without BEAM_WEBHOOK_HMAC_KEY,
+// it answers 503 before the body is read (Beam retries every non-2xx answer).
 export const runtime = "nodejs";
+export const maxDuration = 30;
 
 const MAX_BODY_BYTES = 64 * 1024;
-
-function str(v: unknown): string | null {
-  return typeof v === "string" ? v : null;
-}
+/** Every Beam call of a delivery ends by this long after it arrived (maxDuration minus a margin). */
+const WEBHOOK_BUDGET_MS = 25_000;
 
 export async function POST(request: Request) {
-  const key = process.env.BEAM_WEBHOOK_HMAC_KEY?.trim();
-  if (!key) {
+  const deadlineMs = Date.now() + WEBHOOK_BUDGET_MS;
+  const deps = getBeamFulfilmentDeps(process.env, { deadlineMs });
+  const hmacKey = deps?.config.beamWebhookHmacKey ?? null;
+  let raw: Uint8Array = new Uint8Array(0);
+  if (!deps) {
+    // The handler has no log of its own without deps.
     logEvent("beam_webhook_unconfigured");
-    return new Response("webhook not configured", { status: 503 });
+  } else if (hmacKey !== null) {
+    // Capped read: an oversized body is refused without buffering it.
+    const capped = await readCapped(request, MAX_BODY_BYTES);
+    if (capped === null) return new Response("payload too large", { status: 413, headers: NO_STORE });
+    raw = capped;
   }
-  // Capped read: an oversized body is refused without buffering it.
-  const raw = await readCapped(request, MAX_BODY_BYTES);
-  if (raw === null) return new Response("payload too large", { status: 413 });
-  if (!verifyBeamSignature(raw, request.headers.get("x-beam-signature"), key)) {
-    logEvent("beam_webhook_bad_signature");
-    return new Response("invalid signature", { status: 401 });
-  }
-
-  const event = request.headers.get("x-beam-event") ?? "unknown";
-  let body: Record<string, unknown> = {};
-  try {
-    const parsed: unknown = JSON.parse(Buffer.from(raw).toString("utf8"));
-    if (parsed && typeof parsed === "object") body = parsed as Record<string, unknown>;
-  } catch {
-    // Signed but not JSON: acknowledge so Beam does not keep retrying.
-  }
-  const order = body.order && typeof body.order === "object" ? (body.order as Record<string, unknown>) : null;
-
-  // Summary only - customer phone/email in the payload are never logged.
-  logEvent("beam_webhook", {
-    event,
-    resourceId: str(body.paymentLinkId) ?? str(body.chargeId) ?? str(body.refundId),
-    referenceId: str(body.referenceId) ?? str(order?.referenceId),
-    status: str(body.status),
-    amount: typeof body.amount === "number" ? body.amount : typeof order?.netAmount === "number" ? order.netAmount : null,
-    sourceId: str(body.sourceId),
-  });
-  return new Response(null, { status: 200 });
+  // Unconfigured (no deps or no key): the handler answers 503 before it looks at the body.
+  const result = await handleBeamWebhook(raw, request.headers, deps, hmacKey);
+  return new Response(result.body, { status: result.status, headers: NO_STORE });
 }

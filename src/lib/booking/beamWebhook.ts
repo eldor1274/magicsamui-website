@@ -1,6 +1,6 @@
-// Beam webhook handling (design S4.4). Server only. The route (S4.7) reads the RAW body (capped) and hands it
-// here with the request headers, the Beam deps (the active config's, or the Beam drain's; null when there are
-// none) and BEAM_WEBHOOK_HMAC_KEY. Nothing here is wired into a route yet.
+// Beam webhook handling (design S4.4). Server only. The route (app/api/beam/webhook, S4.7) reads the RAW body
+// (capped) and hands it here with the request headers, the Beam deps (the active config's, or the Beam drain's;
+// null when there are none, and then the body is not read) and the config's BEAM_WEBHOOK_HMAC_KEY.
 //
 // - Unconfigured (no HMAC key, or no Beam deps) -> 503: Beam retries every non-2xx answer (10 attempts).
 // - X-Beam-Signature = base64(HMAC-SHA256(base64decode(key), the exact raw body)). A bad or missing one -> 401,
