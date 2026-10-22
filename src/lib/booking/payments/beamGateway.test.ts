@@ -1,6 +1,6 @@
 // The Beam gateway (design S4.1) through the real core: fulfilPayment, releasePayment and abandonPayment on the
-// in-repo fake Beam and the fake Cloudbeds (beamTestkit.ts makeBeamKit). Each hold is a real one from the
-// hold-first core (beamCheckout, with the kit's stand-in Beam adapter until S4.3).
+// in-repo fake Beam and the fake Cloudbeds (beamTestkit.ts makeBeamKit). Each hold is a real one from the Beam
+// checkout (beamTestkit.ts beamCheckout: startBeamCheckout with payments/beamCheckoutAdapter.ts, design S4.3).
 //
 // Covered: every state a link can read (open, processing, paid - also PAID after DISABLED and PAID before its
 // charge is listed -, expired, unconfirmed, refunded); the record and the signed note (a missing record, a forged
@@ -28,6 +28,7 @@ import type { BeamChargeIndexEntry } from "./beamGateway.ts";
 import { buildBeamNote, readRecord, writeRecord } from "./beamRecord.ts";
 import { BEAM_EXPIRY_SKEW_MS } from "./beamState.ts";
 import { BEAM_GATEWAY_TEXT, beamGatewayText } from "./beamText.ts";
+import type { CartItemInput } from "../types.ts";
 import type { GatewayPayment, GatewayReceipt } from "./gateway.ts";
 import { STRIPE_GATEWAY_TEXT } from "./stripeGateway.ts";
 
@@ -45,7 +46,7 @@ const calls = (kit: BeamKit, method: string) => kit.fakeCb.calls.filter((c) => c
 const critical = (kit: BeamKit) => kit.alerts.filter((a) => a.severity === "critical");
 const withSubject = (kit: BeamKit, re: RegExp) => kit.alerts.filter((a) => re.test(a.subject));
 const cbWrites = (kit: BeamKit) => kit.fakeCb.calls.filter((c) => ["postPayment", "postCustomItem", "putReservation", "postReservationNote"].includes(c.method)).length;
-/** A link's expiry as the stand-in adapter set it (the kit's clock at checkout + 30 minutes). */
+/** A link's expiry as the checkout adapter set it (the kit's clock at checkout + 30 minutes). */
 const expiryOf = (kit: BeamKit, linkId: string) => {
   const ms = kit.fakeBeam.link(linkId).expiresAtMs;
   assert.ok(ms !== null);
@@ -939,4 +940,119 @@ test("texts: the Stripe gateway's words are unchanged and set none of the Beam h
     "Hold released by the sweeper: the Stripe payment page was created but no payment was ever attempted. Nothing was charged.",
   );
   for (const hook of ["refundHow", "mockMethod", "bookedExtra", "pendingReleasedAlert"] as const) assert.equal(STRIPE_GATEWAY_TEXT[hook], undefined, hook);
+});
+
+/* ------------------------- round 5: readings the round-4 tests left open ------------------------- */
+
+const GARDEN: CartItemInput[] = [{ slug: "garden-suite", ratePlanId: "standard", adults: 2, addonIds: [] }];
+const SCOPE = keyScope("beam-playground");
+
+test("a link whose answer carries no merchantId, or an empty one, is no merchant mismatch: paid and confirmed", async () => {
+  for (const merchantId of [undefined, ""]) {
+    const kit = makeBeamKit();
+    const h = await beamHeld(kit);
+    const link = kit.fakeBeam.links.get(h.linkId);
+    assert.ok(link);
+    if (merchantId === undefined) delete (link as { merchantId?: string }).merchantId;
+    else link.merchantId = merchantId;
+    kit.fakeBeam.pay(h.linkId, "CARD");
+    const p = await kit.gw.get(h.key);
+    assert.equal(p.state, "paid", JSON.stringify(merchantId));
+    assert.equal(p.mismatch, undefined, JSON.stringify(merchantId));
+    assert.equal((await fulfilPayment(h.key, kit.deps, kit.gw)).state, "confirmed");
+    assert.equal(critical(kit).length, 0);
+  }
+});
+
+test("before any success the receipt names the youngest PENDING attempt's method", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit);
+  kit.fakeBeam.payPending(h.linkId, "CARD");
+  kit.now.ms += MIN;
+  kit.fakeBeam.payPending(h.linkId, "ALIPAY");
+  const p = await kit.gw.get(h.key);
+  assert.equal(p.state, "processing");
+  assert.equal(p.receipt.methodType, "ALIPAY");
+  assert.equal(p.receipt.description, `Beam link ${h.linkId} charge pending (Alipay)`);
+});
+
+test("the duplicate count includes a stored primary the charge list no longer shows: 'has 3 successful charges'", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit);
+  const first = kit.fakeBeam.pay(h.linkId, "CARD");
+  assert.equal((await kit.gw.get(h.key)).receipt.primaryId, first.chargeId, "stored as the primary");
+  kit.now.ms += MIN;
+  const second = kit.fakeBeam.secondCharge(h.linkId, "CARD");
+  kit.now.ms += MIN;
+  const third = kit.fakeBeam.secondCharge(h.linkId, "ALIPAY");
+  // Beam's list lags behind: the stored primary is not listed right now.
+  const stored = kit.fakeBeam.charges.get(first.chargeId);
+  assert.ok(stored);
+  stored.listed = false;
+  await kit.gw.get(h.key);
+  const dup = withSubject(kit, /charged twice/);
+  assert.deepEqual(dup.map((d) => /; (ch_\w+) \(/.exec(d.lines[0])?.[1]), [second.chargeId, third.chargeId], "one alert per extra charge");
+  for (const d of dup) {
+    assert.ok(d.lines[0].includes(`has 3 successful charges. ${first.chargeId} (not in Beam's charge list right now) is the one recorded in Cloudbeds;`), d.lines[0]);
+  }
+});
+
+test("a late CARD_INSTALLMENTS success on a released hold: refundable in Beam Lighthouse (in full), not by bank transfer", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit);
+  const link = kit.fakeBeam.links.get(h.linkId);
+  assert.ok(link);
+  link.linkSettings = null; // the account's defaults: card instalments offered too
+  kit.fakeBeam.expire(h.linkId);
+  assert.equal((await releasePayment(h.key, kit.deps, kit.gw, "sweeper")).state, "released");
+  kit.now.ms += 3 * MIN;
+  const late = kit.fakeBeam.payAfterClose(h.linkId, "CARD_INSTALLMENTS");
+  const p = await kit.gw.get(h.key);
+  assert.deepEqual([p.receipt.methodType, p.receipt.refundable, p.receipt.partialRefundable], ["CARD_INSTALLMENTS", true, false]);
+  const out = await fulfilPayment(h.key, kit.deps, kit.gw);
+  assert.ok(out.state === "needs_attention", JSON.stringify(out));
+  assert.equal(
+    out.reason,
+    `The guest PAID but the Cloudbeds hold is CANCELLED. Re-instate or re-book the guest in Cloudbeds (if the unit is still free) or refund ${LIGHTHOUSE(late.chargeId)}.`,
+  );
+});
+
+test("every per-id money alert of the gateway is keyed by its id: dup-charge, beam-refund-ambiguous, beam-record-missing, beam-pending-released", async () => {
+  const alerted = (kit: BeamKit, key: string) => kit.deps.kv.get(keys.alerted(SCOPE, key));
+  // Two bookings each charged twice inside one alert window: two CRITICALs, each under its extra charge's key.
+  const kit = makeBeamKit();
+  const a = await beamHeld(kit);
+  const b = await beamHeld(kit, "card_ewallet", GARDEN);
+  kit.fakeBeam.pay(a.linkId, "CARD");
+  kit.fakeBeam.pay(b.linkId, "CARD");
+  kit.now.ms += MIN;
+  const extraA = kit.fakeBeam.secondCharge(a.linkId, "CARD");
+  const extraB = kit.fakeBeam.secondCharge(b.linkId, "CARD");
+  await kit.gw.get(a.key);
+  await kit.gw.get(b.key);
+  assert.deepEqual(withSubject(kit, /charged twice/).map((d) => d.subject), [`URGENT: guest charged twice for booking ${a.ref}`, `URGENT: guest charged twice for booking ${b.ref}`]);
+  for (const extra of [extraA, extraB]) assert.notEqual(await alerted(kit, `dup-charge:${extra.chargeId}`), null, extra.chargeId);
+  // A refunded link with two successes.
+  const kit2 = makeBeamKit();
+  const c = await beamHeld(kit2);
+  kit2.fakeBeam.pay(c.linkId, "CARD");
+  kit2.now.ms += MIN;
+  kit2.fakeBeam.refund(kit2.fakeBeam.secondCharge(c.linkId, "CARD").chargeId);
+  await kit2.gw.get(c.key);
+  assert.notEqual(await alerted(kit2, `beam-refund-ambiguous:${c.linkId}`), null);
+  // The record missing.
+  const kit3 = makeBeamKit();
+  const d = await beamHeld(kit3);
+  await kit3.deps.kv.del(keys.beamPayment(d.linkId));
+  await kit3.gw.get(d.key);
+  assert.notEqual(await alerted(kit3, `beam-record-missing:${d.linkId}`), null);
+  // A hold released while its payment was still pending at the bank.
+  const kit4 = makeBeamKit();
+  const e = await beamHeld(kit4, "promptpay");
+  kit4.fakeBeam.payPending(e.linkId, "QR_PROMPT_PAY");
+  kit4.fakeBeam.expire(e.linkId);
+  kit4.now.ms += GRACE_MS + MIN;
+  assert.equal((await releasePayment(e.key, kit4.deps, kit4.gw, "sweeper")).state, "released");
+  assert.equal(withSubject(kit4, /^Beam payment still pending/).length, 1);
+  assert.notEqual(await alerted(kit4, `beam-pending-released:${e.linkId}`), null);
 });

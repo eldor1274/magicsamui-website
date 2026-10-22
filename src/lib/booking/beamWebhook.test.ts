@@ -28,6 +28,7 @@ import type { BeamChargeIndexEntry, BeamGatewayDeps } from "./payments/beamGatew
 import { satangToBahtString } from "./quote.ts";
 import { runSweep } from "./sweep.ts";
 import { NOW, recordingKv } from "./testkit.ts";
+import type { CartItemInput } from "./types.ts";
 
 const MIN = 60_000;
 const DAY = 24 * 60 * MIN;
@@ -579,6 +580,7 @@ test("refund.failed while the mail relay is down: 200 (Beam won't retry), the CR
   assert.equal(failed[0].subject, `Beam refund FAILED for booking ${h.ref}`);
   assert.ok(failed[0].lines[0].includes("failed (RE_INSUFFICIENT_BALANCE)"), failed[0].lines[0]);
   assert.equal(await kit.deps.kv.get(keys.pendingAlert(SCOPE, `refund:${refundId}:FAILED`)), null, "delivered: no longer pending");
+  assert.notEqual(await kit.deps.kv.get(keys.alerted(SCOPE, `refund:${refundId}:FAILED`)), null, "keyed refund:{id}:FAILED");
   // A deps.alert that throws (never the production alerter) is the one case Beam is asked to retry.
   const throwing: BeamGatewayDeps = { ...kit.deps, alert: async () => Promise.reject(new Error("alert down")) };
   assert.deepEqual(await deliver(kit, ev, throwing), { status: 503, body: "refund alert failed - retry" });
@@ -681,6 +683,7 @@ test("a chargeback -> CRITICAL 'URGENT: chargeback on Beam payment for booking {
   const cb = kit.fakeBeam.chargeback(chargeId);
   const ev = kit.fakeBeam.signedEvent("transaction.created", cb);
   assert.deepEqual(await deliver(kit, ev), { status: 200, body: "alerted" });
+  assert.notEqual(await kit.deps.kv.get(keys.alerted(SCOPE, `beam-chargeback:${cb}`)), null, "keyed per transaction");
   kit.now.ms += PAST_ALERT_WINDOW_MS;
   assert.deepEqual(await deliver(kit, ev), { status: 200, body: "duplicate" });
   const urgent = critical(kit);
@@ -712,6 +715,7 @@ test("a chargeback -> CRITICAL 'URGENT: chargeback on Beam payment for booking {
   const cb3 = kit3.fakeBeam.chargeback(charge.chargeId);
   assert.equal((await deliver(kit3, kit3.fakeBeam.signedEvent("transaction.created", cb3))).body, "alerted");
   assert.equal(critical(kit3)[0].subject, "URGENT: chargeback on a Beam payment");
+  assert.notEqual(await kit3.deps.kv.get(keys.alerted(SCOPE, `beam-chargeback:${cb3}`)), null, "keyed per transaction");
   assert.ok(
     critical(kit3)[0].lines[0].startsWith(`Beam recorded a CHARGEBACK of ${money(150_000)} (transaction ${cb3}, payment link ${link.id}) that matches no booking of ours`),
     critical(kit3)[0].lines[0],
@@ -761,4 +765,110 @@ test("the card's last digits and the guest's details in Beam's charge body never
   // The digits standing alone, as a leak would show them (random ids can carry them by chance), and no last4 field.
   assert.equal(cardDigitsShown(everything, "4729"), false);
   assert.doesNotMatch(everything, /"last4"/);
+});
+
+/* ------------------------- round 5: readings the round-4 tests left open ------------------------- */
+
+const GARDEN: CartItemInput[] = [{ slug: "garden-suite", ratePlanId: "standard", adults: 2, addonIds: [] }];
+
+test("header names in a plain record are compared without regard to case: a mixed-case record verifies", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit);
+  kit.fakeBeam.pay(h.linkId, "CARD");
+  const ev = kit.fakeBeam.signedEvent("payment_link.paid", h.linkId);
+  const mixed = { "X-Beam-Signature": ev.headers["x-beam-signature"], "X-BEAM-EVENT": "payment_link.paid" };
+  assert.deepEqual(await handleBeamWebhook(ev.raw, mixed, kit.deps, kit.config.beamWebhookHmacKey), { status: 200, body: "confirmed" });
+  assert.deepEqual(logged(kit, "beam_webhook").map((l) => l.data?.event), ["payment_link.paid"]);
+});
+
+test("the header hint is compared lower-cased, by the body's kind AND status: only a real disagreement is logged", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit);
+  const declined = kit.fakeBeam.decline(h.linkId, "CARD");
+  const card = kit.fakeBeam.pay(h.linkId, "CARD");
+  // Upper case is the same event.
+  assert.equal((await deliver(kit, kit.fakeBeam.signedEvent("payment_link.paid", h.linkId, { header: "PAYMENT_LINK.PAID" }))).status, 200);
+  assert.equal(logged(kit, "beam_webhook_event_mismatch").length, 0);
+  assert.equal(logged(kit, "beam_webhook").at(-1)?.data?.event, "payment_link.paid");
+  // A SUCCEEDED charge sent as charge.failed, and a FAILED one sent as charge.succeeded, disagree.
+  await deliver(kit, kit.fakeBeam.signedEvent("charge.succeeded", card.chargeId, { header: "charge.failed" }));
+  await deliver(kit, kit.fakeBeam.signedEvent("charge.failed", declined.chargeId, { header: "charge.succeeded" }));
+  assert.deepEqual(logged(kit, "beam_webhook_event_mismatch").map((l) => l.data), [
+    { event: "charge.failed", kind: "charge", expected: "charge.succeeded" },
+    { event: "charge.succeeded", kind: "charge", expected: "charge.failed" },
+  ]);
+});
+
+test("a refunded payment whose fulfil throws (Redis refuses the done marker): 200 'refunded - left to the sweeper', which then hands it to fulfil", async () => {
+  const now = { ms: NOW };
+  const fail = { on: false, when: (op: "get" | "set" | "zadd" | "setNx", key: string) => fail.on && op === "set" && key.startsWith("msv:done:fulfil:") };
+  const kit = makeBeamKit({ kv: switchableKv(now, fail), now });
+  const h = await beamHeld(kit);
+  const card = kit.fakeBeam.pay(h.linkId, "CARD");
+  kit.fakeBeam.refund(card.chargeId);
+  fail.on = true;
+  assert.deepEqual(await deliver(kit, kit.fakeBeam.signedEvent("charge.succeeded", card.chargeId)), { status: 200, body: "refunded - left to the sweeper" });
+  assert.equal(logged(kit, "beam_webhook_refunded_fulfil_failed").length, 1);
+  assert.equal(critical(kit).length, 0);
+  fail.on = false;
+  kit.now.ms += 10 * MIN;
+  await runSweep(kit.deps, kit.gw);
+  const urgent = critical(kit);
+  assert.equal(urgent.length, 1);
+  assert.match(urgent[0].lines[0], /^REFUNDED at Beam before the booking was confirmed/);
+  assert.equal(res(kit, h.reservationId).status, "not_confirmed");
+});
+
+test("refund.succeeded while Beam rate-limits the charge list: 200 and the alert says '(method not known)'", async () => {
+  const kit = makeBeamKit();
+  const { h, chargeId } = await confirmedBooking(kit);
+  const refundId = kit.fakeBeam.refund(chargeId);
+  kit.fakeBeam.rateLimitNext(2, /^GET \/api\/v1\/charges$/);
+  assert.deepEqual(await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", refundId)), { status: 200, body: "refund succeeded" });
+  const done = withSubject(kit, /^Beam refund done/);
+  assert.equal(done.length, 1);
+  assert.equal(done[0].subject, `Beam refund done for booking ${h.ref} (${money(h.quote.totalSatang)})`);
+  assert.match(done[0].lines[0], new RegExp(`of charge ${chargeId} \\(method not known\\), refund ${refundId} `));
+  assert.ok(logged(kit, "beam_refund_method_unread").some((l) => l.data?.status === 429));
+});
+
+test("refund mapping: a booking pointer whose link names another booking is not used - the refund's own ref is", async () => {
+  const kit = makeBeamKit();
+  const a = await confirmedBooking(kit);
+  const b = await beamHeld(kit, "card_ewallet", GARDEN);
+  await kit.deps.kv.del(keys.beamCharge(a.chargeId));
+  // A's pointer (as if overwritten) names B's link, whose record is booking B.
+  await kit.deps.kv.set(keys.booking(a.h.ref), JSON.stringify({ sessionId: b.key, reservationId: b.reservationId }), 3600);
+  const refundId = kit.fakeBeam.refund(a.chargeId, 1_000);
+  assert.deepEqual(await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", refundId)), { status: 200, body: "refund succeeded" });
+  const done = withSubject(kit, /^Beam refund done/);
+  assert.equal(done.length, 1);
+  assert.equal(done[0].subject, `Beam refund done for booking ${a.h.ref} (THB 10.00)`);
+  assert.match(done[0].lines[1], new RegExp(`on the reservation of booking ${a.h.ref} \\(search the booking reference in Cloudbeds\\);`));
+  assert.doesNotMatch(JSON.stringify(done), new RegExp(`${b.ref}|${b.reservationId}`));
+});
+
+test("a CHARGEBACK body with no chargeId, sourceId or referenceId: its transactionId found in the charge index maps the booking", async () => {
+  const kit = makeBeamKit();
+  const { h, chargeId } = await confirmedBooking(kit);
+  const body = { transactionId: chargeId, transactionType: "CHARGEBACK", currency: "THB", grossAmount: h.quote.totalSatang, feeAmount: 0, vatAmount: 0, netAmount: h.quote.totalSatang };
+  assert.deepEqual(await deliver(kit, signed(kit, body, "transaction.created")), { status: 200, body: "alerted" });
+  const urgent = critical(kit);
+  assert.equal(urgent.length, 1);
+  assert.equal(urgent[0].subject, `URGENT: chargeback on Beam payment for booking ${h.ref}`);
+  assert.ok(urgent[0].lines[0].includes(`on charge ${chargeId} (booking ${h.ref}, Cloudbeds reservation ${h.reservationId})`), urgent[0].lines[0]);
+  assert.notEqual(await kit.deps.kv.get(keys.alerted(SCOPE, `beam-chargeback:${chargeId}`)), null, "keyed per transaction");
+});
+
+test("bad signatures are counted per hour: 3 of them 61 minutes apart send no alert", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit);
+  kit.fakeBeam.pay(h.linkId, "CARD");
+  const bad = kit.fakeBeam.signedEvent("payment_link.paid", h.linkId, { hmacKeyB64: Buffer.from("playground-key-not-production-1!").toString("base64") });
+  for (let i = 0; i < BEAM_BAD_SIGNATURE_ALERT_THRESHOLD; i++) {
+    assert.deepEqual(await deliver(kit, bad), { status: 401, body: "invalid signature" });
+    assert.equal(await kit.deps.kv.get(keys.beamBadSignatures(SCOPE)), "1", `${i}: a new hour, a new count`);
+    kit.now.ms += 61 * MIN;
+  }
+  assert.equal(withSubject(kit, /signatures are being rejected/).length, 0);
 });

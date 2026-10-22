@@ -21,6 +21,7 @@ import type { BeamKit } from "./beamTestkit.ts";
 import { POLICY_VERSION } from "./catalogue.ts";
 import type { StripeCheckoutInput } from "./checkoutShared.ts";
 import { todayInBangkok } from "./dates.ts";
+import { fulfilPayment } from "./fulfil.ts";
 import { DEFAULT_CLOSED_WORD, DEFAULT_HOLD_NOTE_DEADLINE } from "./holdFirstCheckout.ts";
 import type { CheckoutPageInput } from "./holdFirstCheckout.ts";
 import { createMemoryKv } from "./kv.ts";
@@ -652,5 +653,45 @@ test("no personal data in the logs, the alerts, Redis, the Beam calls or the sig
   for (const call of linkPosts(kit)) {
     const note = (call.body as BeamCreatePaymentLinkRequest).order.internalNote;
     assert.match(note, /^msv1\|m=beam-playground\|r=MSV-\d{8}-[A-HJ-NP-Z2-9]{4}\|res=[A-Za-z0-9_-]+\|rm=\d+\|fee=\d+\|tot=\d+\|ci=[\d-]+\|co=[\d-]+\|pm=(card_ewallet|promptpay)\|tv=[\w.-]*\|fl=[01-]{3}\|ex=\d+\|s=[\w-]{27}$/, note);
+  }
+});
+
+/* ------------------------- round 5: readings the round-4 tests left open ------------------------- */
+
+test("the circuit breaker failing itself (Redis) never replaces the create's error: the alert names Beam's answer, beam_breaker_failed is logged", async () => {
+  const now = { ms: NOW };
+  const inner = createMemoryKv(() => now.ms);
+  const kv: KvStore = {
+    ...inner,
+    kind: inner.kind,
+    incr: (key, ttl) => (key === keys.beamPageFail(SCOPE) ? Promise.reject(new Error("simulated Redis failure")) : inner.incr(key, ttl)),
+  };
+  const kit = makeBeamKit({ kv, now });
+  kit.fakeBeam.failNext(POST_LINK, 503);
+  kit.fakeBeam.failNext(POST_LINK, 503);
+  const res = await beamCheckout(kit);
+  assert.equal(res.status, 502);
+  const alert = withSubject(kit, PAGE_FAILED)[0];
+  assert.ok(alert, JSON.stringify(kit.alerts));
+  assert.equal(alert.lines[0], `Booking ${refOf(kit)}: Beam refused or failed to create the payment link (no error code, HTTP 503). The hold was cancelled and nothing was charged.`);
+  assert.ok(logged(kit, "beam_breaker_failed").some((l) => l.data?.error === "simulated Redis failure"));
+  assert.equal(onlyReservation(kit).status, "canceled");
+  assert.equal(await kit.deps.kv.get(keys.beamPaused(SCOPE)), null);
+});
+
+test("a guest arriving after 11 PM: arrivalLate in the record and the signed note, and the PAID note repeats it (also fulfilled from the note)", async () => {
+  for (const source of ["record", "note"] as const) {
+    const kit = makeBeamKit();
+    const res = await beamCheckout(kit, "card_ewallet", HONEYMOON, { ...GUEST, arrivalTime: "late" });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.ok(res.body.ok);
+    const linkId = new URL(res.body.redirectUrl).pathname.split("/").pop() ?? "";
+    assert.equal((await readRecord(kit.deps.kv, linkId))?.arrivalLate, true, source);
+    assert.equal(verifyBeamNote(kit.fakeBeam.link(linkId).order.internalNote, TOKEN_SECRET)?.arrivalLate, true, source);
+    if (source === "note") await kit.deps.kv.del(keys.beamPayment(linkId));
+    kit.fakeBeam.pay(linkId, "CARD");
+    assert.equal((await fulfilPayment(`beam:${linkId}`, kit.deps, kit.gw)).state, "confirmed", source);
+    const paidNote = onlyReservation(kit).notes.find((n) => n.includes("PAID via Beam"));
+    assert.ok(paidNote?.endsWith("\nEstimated arrival: after 11 PM."), `${source}: ${paidNote}`);
   }
 });
