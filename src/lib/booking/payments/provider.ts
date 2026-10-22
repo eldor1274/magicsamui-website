@@ -49,17 +49,47 @@ export function defaultCardFeePct(provider: PaymentProvider): number {
   return DEFAULT_FEE_PCT_BY_PROVIDER[provider];
 }
 
-/**
- * Card brands a Thai Stripe account accepts: Visa and Mastercard only (no
- * Amex, JCB or UnionPay). Beam accepts all five.
- */
-export function acceptedCardBrands(provider: PaymentProvider): CardBrand[] {
-  return provider === "stripe" ? ["visa", "mastercard"] : ["visa", "mastercard", "amex", "jcb", "unionpay"];
+/** The card brands the Beam pages name (Beam design S3.1): its card group is all on or all off, these are the ones we show. */
+export const BEAM_CARD_BRANDS: readonly CardBrand[] = ["visa", "mastercard", "jcb", "amex"];
+
+/** Beam's e-wallet badges while BEAM_EWALLETS is on (owner decision 2); wechat_pay is added only with BEAM_WECHAT_PAY. */
+export const BEAM_WALLET_BADGES: readonly PaymentMethodBadge[] = ["alipay", "line_pay", "truemoney", "shopeepay"];
+
+/** The Beam method switches the badges follow (config.beam: BEAM_PROMPTPAY, BEAM_EWALLETS, BEAM_WECHAT_PAY). */
+export interface BeamMethodSwitches {
+  promptPay: boolean;
+  ewallets: boolean;
+  wechatPay: boolean;
 }
 
-/** Badges to show. Apple Pay / Google Pay come through Stripe's card method. */
-export function paymentMethodBadges(provider: PaymentProvider): PaymentMethodBadge[] {
-  return provider === "stripe" ? ["card", "apple_pay", "google_pay", "promptpay"] : ["card", "promptpay"];
+/** The switches' defaults: PromptPay and the e-wallets on, WeChat Pay off until Beam approves it. */
+export const BEAM_METHOD_DEFAULTS: BeamMethodSwitches = { promptPay: true, ewallets: true, wechatPay: false };
+
+/**
+ * Card brands shown per provider. A Thai Stripe account accepts Visa and
+ * Mastercard only (no Amex, JCB or UnionPay); Beam: BEAM_CARD_BRANDS; the
+ * demo (the simulated Beam page) keeps its five.
+ */
+export function acceptedCardBrands(provider: PaymentProvider): CardBrand[] {
+  if (provider === "stripe") return ["visa", "mastercard"];
+  if (provider === "beam") return [...BEAM_CARD_BRANDS];
+  return ["visa", "mastercard", "amex", "jcb", "unionpay"];
+}
+
+/**
+ * Badges to show. Apple Pay / Google Pay come through Stripe's card method.
+ * Beam: card, promptpay while BEAM_PROMPTPAY is on, then the e-wallets while
+ * BEAM_EWALLETS is on (wechat_pay too with BEAM_WECHAT_PAY). The demo: card, promptpay.
+ */
+export function paymentMethodBadges(provider: PaymentProvider, beam: BeamMethodSwitches | null = null): PaymentMethodBadge[] {
+  if (provider === "stripe") return ["card", "apple_pay", "google_pay", "promptpay"];
+  if (provider !== "beam") return ["card", "promptpay"];
+  const s = beam ?? BEAM_METHOD_DEFAULTS;
+  return [
+    "card",
+    ...(s.promptPay ? (["promptpay"] as const) : []),
+    ...(s.ewallets ? [...BEAM_WALLET_BADGES, ...(s.wechatPay ? (["wechat_pay"] as const) : [])] : []),
+  ];
 }
 
 /** Hosts a booking page may redirect the browser to for payment (besides our own origin). */

@@ -37,9 +37,10 @@ test("badges: Stripe shows Visa, Mastercard, PromptPay, Apple Pay, Google Pay - 
   assert.deepEqual(labels, ["Visa", "Mastercard", "PromptPay", "Apple Pay", "Google Pay"]);
 });
 
-test("badges: Beam and the demo keep their full set (5 card brands + PromptPay)", () => {
+test("badges: the demo keeps its full set (5 card brands + PromptPay); Beam shows Visa, Mastercard, JCB, Amex and PromptPay", () => {
   const expected = ["Visa", "Mastercard", "JCB", "Amex", "UnionPay", "PromptPay"];
-  assert.deepEqual(paymentMethodLabels(config(BEAM_ENV)), expected);
+  // Beam (design S3.1): BEAM_CARD_BRANDS; its e-wallet badges get their labels in S5.2.
+  assert.deepEqual(paymentMethodLabels(config(BEAM_ENV)), ["Visa", "Mastercard", "JCB", "Amex", "PromptPay"]);
   assert.deepEqual(paymentMethodLabels(config({})), expected);
 });
 

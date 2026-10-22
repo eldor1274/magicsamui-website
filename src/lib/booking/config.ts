@@ -14,13 +14,41 @@
 // - stripe-test with a Cloudbeds write key writes REAL reservations, so the
 //   checkout refuses holds unless the arrival is 12+ months out and the guest
 //   email is BOOKING_TEST_GUEST_EMAIL (see stripeCheckout.ts).
+// - Beam modes (design S3.1) take the hold-first shape of the Stripe modes
+//   (Standard only, 100% up front, no add-ons, Cloudbeds promo-code rates and
+//   automatic discounts); their writer and test guard follow the mode as
+//   Stripe's do, and the mock writer is never used on Vercel. Every Stripe
+//   output is unchanged.
 
 import { site } from "../../data/site.ts";
 import { acceptedCardBrands, defaultCardFeePct, isLiveMode, isTestMode, paymentMethodBadges, providerOf } from "./payments/provider.ts";
+import type { BeamMethodSwitches } from "./payments/provider.ts";
 import type { PaymentMode, PaymentProvider, PromoMode, PublicBookingConfig, RatePlanId } from "./types.ts";
 
 export const BEAM_PLAYGROUND_BASE = "https://playground.api.beamcheckout.com";
 export const BEAM_LIVE_BASE = "https://api.beamcheckout.com";
+/**
+ * The one hosted-page host each Beam API base hands out (the same pairs as beam.ts beamHostedHost; config.ts does
+ * not import beam.ts, so the Stripe money routes, which load config.ts, never load the Beam client).
+ */
+export const BEAM_LIVE_HOSTED_HOST = "pay.beamcheckout.com";
+export const BEAM_PLAYGROUND_HOSTED_HOST = "playground-pay.beamcheckout.com";
+/** BEAM_PENDING_GRACE_MINUTES: how long after a link's expiry its hold is kept while a charge is PENDING (default, range). */
+export const DEFAULT_BEAM_PENDING_GRACE_MINUTES = 20;
+export const MIN_BEAM_PENDING_GRACE_MINUTES = 5;
+export const MAX_BEAM_PENDING_GRACE_MINUTES = 60;
+/** BEAM_LATE_WATCH_DAYS: how long a released link is re-checked for a late success (default, range). */
+export const DEFAULT_BEAM_LATE_WATCH_DAYS = 7;
+export const MIN_BEAM_LATE_WATCH_DAYS = 3;
+export const MAX_BEAM_LATE_WATCH_DAYS = 30;
+/** The sweeper's Beam charge scan: every run looks this far back; a deep pass looks BEAM_DEEP_SCAN_DAYS back. */
+export const BEAM_SCAN_LOOKBACK_HOURS = 72;
+export const BEAM_DEEP_SCAN_DAYS = 7;
+/**
+ * Added to a Beam attempt's payable window (attemptPayableMinutes = the link lifetime + the pending grace + this),
+ * as the browser's 33-minute window for a Stripe attempt adds it to the 30-minute session.
+ */
+export const ATTEMPT_PAYABLE_MARGIN_MINUTES = 3;
 
 /**
  * Built-in token secret for demo runs only. It is public (it is in the repo),
@@ -110,6 +138,25 @@ export interface BeamCredentials {
   apiKey: string;
 }
 
+/**
+ * config.beam in the Beam modes (null in every other mode). The credentials, plus (design S3.1):
+ * - hostedHost: the one hosted-page host apiBase hands out (pay. or playground-pay.beamcheckout.com);
+ * - promptPay (BEAM_PROMPTPAY, default on; off hides the PromptPay choice), promptPayFeePct (BEAM_PROMPTPAY_FEE_PCT,
+ *   default 0: owner decision 1), ewallets (BEAM_EWALLETS, default on; off is the emergency switch: owner decision 2),
+ *   wechatPay (BEAM_WECHAT_PAY, default off until Beam approves it);
+ * - pendingGraceMinutes (BEAM_PENDING_GRACE_MINUTES 20, 5-60), lateWatchDays (BEAM_LATE_WATCH_DAYS 7, 3-30),
+ *   scanLookbackHours (72) and deepScanDays (7).
+ * The card/e-wallet fee is config.cardFeePct (BOOKING_CARD_FEE_PCT, 3 on Beam when unset).
+ */
+export interface BeamSettings extends BeamCredentials, BeamMethodSwitches {
+  hostedHost: string;
+  promptPayFeePct: number;
+  pendingGraceMinutes: number;
+  lateWatchDays: number;
+  scanLookbackHours: number;
+  deepScanDays: number;
+}
+
 export interface StripeSettings {
   /** Secret or restricted key (MOCK_STRIPE_SECRET_KEY in stripe-mock). */
   secretKey: string;
@@ -148,25 +195,26 @@ export interface BookingConfig {
   dataSource: "demo" | "cloudbeds";
   tokenSecret: string;
   tokenSecretIsDemo: boolean;
-  beam: BeamCredentials | null;
+  /** The Beam modes only (BeamSettings); null in every Stripe mode and in the demo. */
+  beam: BeamSettings | null;
   /** Base64 HMAC key from Lighthouse (webhook signature), if configured. */
   beamWebhookHmacKey: string | null;
   /**
-   * Read-side Cloudbeds access (availability). baseRateOnly (Stripe): only the
+   * Read-side Cloudbeds access (availability). baseRateOnly (Stripe and Beam): only the
    * base (BAR) row is sold, never another rate plan under the Standard label -
    * except the Direct rate for the code and the automatic discount plans
    * (autoDiscountPlans: BOOKING_AUTO_DISCOUNT_PLANS while BOOKING_AUTO_DISCOUNTS
-   * is on, Stripe only; empty or absent = none).
+   * is on, Stripe and Beam only; empty or absent = none).
    */
   cloudbeds: CloudbedsReadSettings | null;
   /** Stripe modes only. */
   stripe: StripeSettings | null;
-  /** Stripe modes only: where reservations are written. */
+  /** Stripe and Beam modes only: where reservations are written (Beam: never the mock writer on Vercel). */
   cloudbedsWrite: CloudbedsWriteSettings | null;
   /** Upstash Redis (lock + idempotency markers); null = in-memory (refused in live). */
   redis: RedisSettings | null;
   /**
-   * stripe-test with real Cloudbeds writes: the guard settings. A hold needs
+   * stripe-test / beam-playground with real Cloudbeds writes: the guard settings. A hold needs
    * the test guest email AND the staff access cookie (BOOKING_TEST_ACCESS_KEY,
    * see /api/booking/test-access) AND an arrival minArrivalMonths ahead.
    */
@@ -220,6 +268,23 @@ export function parsePct(raw: string | undefined, fallback: number, min: number,
   // Two decimals at most so satang arithmetic stays exact (basis points).
   const rounded = Math.round(n * 100) / 100;
   return Math.min(max, Math.max(min, rounded));
+}
+
+/**
+ * The providers whose modes hold the room in Cloudbeds before payment: Stripe, and Beam from design S3.1 (Standard
+ * only, 100% up front, no add-ons, Cloudbeds promo-code rates and automatic discounts, the guest's details).
+ */
+function isHoldFirstProvider(provider: PaymentProvider): boolean {
+  return provider === "stripe" || provider === "beam";
+}
+
+/**
+ * The provider whose booking rules apply: the payment mode's when the mode resolves, so BOOKING_PAYMENT_PROVIDER=beam
+ * without Beam keys (allowed only locally without a booking key) stays exactly the demo, as before; the provider
+ * variable's when it does not (a locked config keeps its provider's page shape). For Stripe both are always stripe.
+ */
+function rulesProviderOf(provider: PaymentProvider, paymentMode: PaymentMode | null): PaymentProvider {
+  return paymentMode === null ? provider : providerOf(paymentMode);
 }
 
 /* ------------------------------ provider ------------------------------ */
@@ -326,6 +391,20 @@ function resolveBeamMode(env: Env, options: ModeOptions): PaymentMode {
     return "beam-live";
   }
   if (base === BEAM_PLAYGROUND_BASE && hasKeys) return "beam-playground";
+  // Gap review 8: BOOKING_PAYMENT_PROVIDER=beam that cannot run Beam is never a silent demo on the production
+  // deployment or next to a Cloudbeds booking key. Elsewhere (local, no booking key) it stays the demo, as before;
+  // the legacy rule (no provider variable, BEAM_API_BASE set) is unchanged.
+  if (trimmed(env.BOOKING_PAYMENT_PROVIDER).toLowerCase() === "beam" && (trimmed(env.VERCEL_ENV) === "production" || trimmed(env.CLOUDBEDS_API_KEY_BOOKING) !== "")) {
+    const missing: string[] = [];
+    if (base !== BEAM_PLAYGROUND_BASE) missing.push("BEAM_API_BASE (the Beam playground or live API base)");
+    if (trimmed(env.BEAM_MERCHANT_ID) === "") missing.push("BEAM_MERCHANT_ID");
+    if (trimmed(env.BEAM_API_KEY) === "") missing.push("BEAM_API_KEY");
+    throw new BookingConfigError(
+      "payment_misconfigured",
+      `BOOKING_PAYMENT_PROVIDER=beam but Beam is not configured. Missing: ${missing.join("; ")}. Set them, or BOOKING_PAYMENT_PROVIDER=stripe.`,
+      missing,
+    );
+  }
   if (base !== "" && base !== BEAM_PLAYGROUND_BASE) {
     throw new BookingConfigError("invalid_beam_base", "BEAM_API_BASE is not a recognised Beam API base URL.");
   }
@@ -478,16 +557,20 @@ export function resolveAutoDiscountPlans(env: Env = process.env): string[] {
   return valid;
 }
 
-/** The automatic discount plans this deployment sells: Stripe only (demo and Beam are unchanged), while the flag is on. */
+/**
+ * The automatic discount plans this deployment sells: the hold-first providers only (Stripe and Beam; the demo is
+ * unchanged), while the flag is on. `provider` is the rules provider (rulesProviderOf).
+ */
 function autoDiscountPlansFor(env: Env, provider: PaymentProvider): string[] {
-  return provider === "stripe" && autoDiscountsOn(env) ? resolveAutoDiscountPlans(env) : [];
+  return isHoldFirstProvider(provider) && autoDiscountsOn(env) ? resolveAutoDiscountPlans(env) : [];
 }
 
 /**
- * How the guest's promo code works (see PromoMode). Stripe sells Cloudbeds' own promo-code plans
- * (direct-rate: the Direct rate for DIRECT, any other code's plan) only with live Cloudbeds rates and
- * BOOKING_DIRECT_PROMO on; otherwise a Stripe page points every code to the classic booking page
- * (classic-only). The demo keeps its site-side % discount; Beam modes take no code (off). Never throws.
+ * How the guest's promo code works (see PromoMode). Stripe and Beam (the hold-first providers, taken from the
+ * payment mode when it resolves: rulesProviderOf) sell Cloudbeds' own promo-code plans (direct-rate: the Direct
+ * rate for DIRECT, any other code's plan) only with live Cloudbeds rates and BOOKING_DIRECT_PROMO on; otherwise
+ * their page points every code to the classic booking page (classic-only). The demo keeps its site-side %
+ * discount (off when it is 0). Never throws.
  */
 export function resolvePromoSettings(env: Env, provider: PaymentProvider, paymentMode: PaymentMode | null, dataSource: "demo" | "cloudbeds"): PromoSettings {
   const rawCode = trimmed(env.BOOKING_PROMO_CODE).toUpperCase();
@@ -498,7 +581,7 @@ export function resolvePromoSettings(env: Env, provider: PaymentProvider, paymen
   const cloudbedsCode = CLOUDBEDS_PROMO_CODE_RE.test(rawCb) ? rawCb : DEFAULT_CLOUDBEDS_PROMO_CODE;
   const pct = promoPctFor(env, paymentMode);
   let mode: PromoMode;
-  if (provider === "stripe") mode = dataSource === "cloudbeds" && directPromoOn(env) ? "direct-rate" : "classic-only";
+  if (isHoldFirstProvider(rulesProviderOf(provider, paymentMode))) mode = dataSource === "cloudbeds" && directPromoOn(env) ? "direct-rate" : "classic-only";
   else mode = pct > 0 ? "discount" : "off";
   return { mode, code, pct: mode === "discount" ? pct : 0, cloudbedsCode };
 }
@@ -531,19 +614,71 @@ function safeProvider(env: Env): PaymentProvider {
   }
 }
 
+/** `provider`: the rules provider (rulesProviderOf). */
 function ratePlansFor(provider: PaymentProvider): RatePlanId[] {
   // Cloudbeds prices only its own rate plans: the synthetic Breakfast plan
   // and add-on would make the hold's grandTotal differ from the quote.
-  return provider === "stripe" ? ["standard"] : ["standard", "breakfast"];
+  return isHoldFirstProvider(provider) ? ["standard"] : ["standard", "breakfast"];
 }
 
 function cardFeeFor(env: Env, provider: PaymentProvider): number {
   return parsePct(env.BOOKING_CARD_FEE_PCT, defaultCardFeePct(provider), 0, 10);
 }
 
+/** `provider`: the rules provider (rulesProviderOf). */
 function depositFor(env: Env, provider: PaymentProvider): number {
-  // Stripe: always 100% up front (the folio is settled in one payment).
-  return provider === "stripe" ? 100 : parsePct(env.BOOKING_DEPOSIT_PCT, 100, 1, 100);
+  // Stripe and Beam: always 100% up front (the folio is settled in one payment).
+  return isHoldFirstProvider(provider) ? 100 : parsePct(env.BOOKING_DEPOSIT_PCT, 100, 1, 100);
+}
+
+/** An on/off variable: off/false/0/no = off, on/true/1/yes = on, unset or empty = the default; anything else is the default, with one config_warning. */
+function onOffVar(env: Env, name: string, fallback: boolean): boolean {
+  const raw = trimmed(env[name]).toLowerCase();
+  if (raw === "") return fallback;
+  if (["off", "false", "0", "no"].includes(raw)) return false;
+  if (["on", "true", "1", "yes"].includes(raw)) return true;
+  configWarning(name, `not on/off: treated as ${fallback ? "on" : "off"}`);
+  return fallback;
+}
+
+/** A whole number from an env var, clamped to [min, max]; unset = the default; not a number = the default, with one config_warning. */
+function wholeNumberVar(env: Env, name: string, fallback: number, min: number, max: number): number {
+  const s = trimmed(env[name]);
+  if (s === "") return fallback;
+  const n = Number(s);
+  if (!Number.isFinite(n)) {
+    configWarning(name, `not a number: ${fallback} is used`);
+    return fallback;
+  }
+  const v = Math.min(max, Math.max(min, Math.round(n)));
+  if (v !== n) configWarning(name, `not a whole number from ${min} to ${max}: ${v} is used`);
+  return v;
+}
+
+/** Everything in BeamSettings but the credentials and the host. Read only for Beam; never throws. */
+function beamOptionsOf(env: Env): Omit<BeamSettings, keyof BeamCredentials | "hostedHost"> {
+  return {
+    promptPay: onOffVar(env, "BEAM_PROMPTPAY", true),
+    promptPayFeePct: parsePct(env.BEAM_PROMPTPAY_FEE_PCT, 0, 0, 10),
+    ewallets: onOffVar(env, "BEAM_EWALLETS", true),
+    wechatPay: onOffVar(env, "BEAM_WECHAT_PAY", false),
+    pendingGraceMinutes: wholeNumberVar(env, "BEAM_PENDING_GRACE_MINUTES", DEFAULT_BEAM_PENDING_GRACE_MINUTES, MIN_BEAM_PENDING_GRACE_MINUTES, MAX_BEAM_PENDING_GRACE_MINUTES),
+    lateWatchDays: wholeNumberVar(env, "BEAM_LATE_WATCH_DAYS", DEFAULT_BEAM_LATE_WATCH_DAYS, MIN_BEAM_LATE_WATCH_DAYS, MAX_BEAM_LATE_WATCH_DAYS),
+    scanLookbackHours: BEAM_SCAN_LOOKBACK_HOURS,
+    deepScanDays: BEAM_DEEP_SCAN_DAYS,
+  };
+}
+
+/** config.beam of a Beam mode: the base follows the mode (the live base only for beam-live), the host the base. */
+function beamSettingsOf(env: Env, paymentMode: "beam-playground" | "beam-live"): BeamSettings {
+  const live = paymentMode === "beam-live";
+  return {
+    apiBase: live ? BEAM_LIVE_BASE : BEAM_PLAYGROUND_BASE,
+    merchantId: trimmed(env.BEAM_MERCHANT_ID),
+    apiKey: trimmed(env.BEAM_API_KEY),
+    hostedHost: live ? BEAM_LIVE_HOSTED_HOST : BEAM_PLAYGROUND_HOSTED_HOST,
+    ...beamOptionsOf(env),
+  };
 }
 
 /**
@@ -683,14 +818,53 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
   // Local demo/mock only: an unset secret falls back to the public built-in one.
   const tokenSecretIsDemo = secret === "";
 
-  const beam: BeamCredentials | null =
-    provider !== "beam" || paymentMode === "demo"
-      ? null
-      : {
-          apiBase: paymentMode === "beam-live" ? BEAM_LIVE_BASE : BEAM_PLAYGROUND_BASE,
-          merchantId: trimmed(env.BEAM_MERCHANT_ID),
-          apiKey: trimmed(env.BEAM_API_KEY),
-        };
+  // Beam modes (design S3.1): the writer follows the mode, as Stripe's does. With CLOUDBEDS_API_KEY_BOOKING the live
+  // writer, with Stripe's requirements; without it the mock writer, which is local only: every Vercel deployment
+  // shares the production Redis, so a Beam mode with the mock writer is refused wherever VERCEL_ENV is set and can
+  // never write fake holds into the shared index (money review 10). Checked after the token secret, so a Beam
+  // preview without one still says so first.
+  if (paymentMode === "beam-playground" || paymentMode === "beam-live") {
+    if (bookingKey !== "") {
+      if (!/^\d{1,12}$/.test(propertyId)) {
+        throw new BookingConfigError("payment_misconfigured", "CLOUDBEDS_PROPERTY_ID (numeric) is required with CLOUDBEDS_API_KEY_BOOKING.", [
+          "CLOUDBEDS_PROPERTY_ID",
+        ]);
+      }
+      if (dataSource !== "cloudbeds") {
+        throw new BookingConfigError(
+          "payment_misconfigured",
+          "Real Cloudbeds reservations need real Cloudbeds prices: BOOKING_DATA_SOURCE must not be 'demo' when CLOUDBEDS_API_KEY_BOOKING is set.",
+          ["BOOKING_DATA_SOURCE"],
+        );
+      }
+      if (resolveRedis(env) === null) {
+        throw new BookingConfigError(
+          "payment_misconfigured",
+          "Real Cloudbeds reservations (CLOUDBEDS_API_KEY_BOOKING) need Upstash Redis for the fulfilment lock, also with Beam playground keys.",
+          ["Upstash Redis (UPSTASH_REDIS_REST_URL/TOKEN or KV_REST_API_URL/TOKEN)"],
+        );
+      }
+      cloudbedsWrite = { mode: "live", apiKey: bookingKey, propertyId };
+    } else {
+      if (trimmed(env.VERCEL_ENV) !== "") {
+        throw new BookingConfigError(
+          "payment_misconfigured",
+          "Beam on Vercel needs real Cloudbeds writes (CLOUDBEDS_API_KEY_BOOKING with CLOUDBEDS_PROPERTY_ID): the simulated Cloudbeds writer is for local runs only, " +
+            "because every Vercel deployment shares the production Redis.",
+          ["CLOUDBEDS_API_KEY_BOOKING"],
+        );
+      }
+      cloudbedsWrite = { mode: "mock" };
+    }
+  }
+
+  const beam: BeamSettings | null = paymentMode === "beam-playground" || paymentMode === "beam-live" ? beamSettingsOf(env, paymentMode) : null;
+  // The card/e-wallet fee is BOOKING_CARD_FEE_PCT on Beam too; unset it is 3 on Beam and 5 on Stripe, so a provider
+  // switch sets the fee by itself. It must stay unset in Production.
+  if (beam && trimmed(env.BOOKING_CARD_FEE_PCT) !== "") {
+    configWarning("BOOKING_CARD_FEE_PCT", "set while Beam is the payment provider: keep it unset in Production (unset = 3% on Beam, 5% on Stripe)");
+  }
+  const rules = rulesProviderOf(provider, paymentMode);
 
   let stripe: StripeSettings | null = null;
   if (provider === "stripe") {
@@ -726,13 +900,14 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
     beamWebhookHmacKey: hmac === "" ? null : hmac,
     cloudbeds:
       dataSource === "cloudbeds"
-        ? { apiKey: readKey, propertyId: propertyId || null, baseRateOnly: provider === "stripe", autoDiscountPlans: autoDiscountPlansFor(env, provider) }
+        ? { apiKey: readKey, propertyId: propertyId || null, baseRateOnly: isHoldFirstProvider(rules), autoDiscountPlans: autoDiscountPlansFor(env, rules) }
         : null,
     stripe,
     cloudbedsWrite,
     redis: resolveRedis(env),
+    // stripe-test and beam-playground with real Cloudbeds writes (the same condition as before for Stripe).
     testGuard:
-      paymentMode === "stripe-test" && cloudbedsWrite?.mode === "live"
+      isTestMode(paymentMode) && cloudbedsWrite?.mode === "live"
         ? {
             guestEmail: testGuardEmail === "" ? null : testGuardEmail,
             minArrivalMonths: TEST_MODE_MIN_ARRIVAL_MONTHS,
@@ -740,11 +915,11 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
           }
         : null,
     cardFeePct: cardFeeFor(env, provider),
-    depositPct: depositFor(env, provider),
+    depositPct: depositFor(env, rules),
     promoPct: promo.pct,
     promo,
-    ratePlans: ratePlansFor(provider),
-    addonsEnabled: provider !== "stripe",
+    ratePlans: ratePlansFor(rules),
+    addonsEnabled: !isHoldFirstProvider(rules),
     cloudbedsPaymentMethod: paymentMethod.method,
     cloudbedsPaymentMethodProblem: paymentMethod.problem,
     cloudbedsSourceId: resolveCloudbedsSourceId(env),
@@ -819,22 +994,27 @@ export function finishesLiveStripePayments(env: Env = process.env): boolean {
   return getStripeDrainConfig(env)?.paymentMode === "stripe-live";
 }
 
-function publicFields(provider: PaymentProvider, paymentMode: PaymentMode, env: Env) {
-  const stripe = provider === "stripe";
+/**
+ * The public fields every answer has. `rules` is the rules provider (rulesProviderOf): Stripe and Beam take the
+ * hold-first shape (guest details, postcode, Standard only, no add-ons, the confirmation-email flag), and Beam its
+ * card brands and its method badges from `beam` (the switches; Beam only).
+ */
+function publicFields(provider: PaymentProvider, paymentMode: PaymentMode, env: Env, rules: PaymentProvider, beam: BeamMethodSwitches | null) {
+  const holdFirst = isHoldFirstProvider(rules);
   const engine = resolveBookingEngine(env);
   return {
     provider,
     live: isLiveMode(paymentMode),
     testMode: isTestMode(paymentMode),
     mock: paymentMode === "stripe-mock",
-    requiresGuestDetails: stripe,
-    collectPostcode: stripe,
-    ratePlans: ratePlansFor(provider),
-    addonsEnabled: !stripe,
-    acceptedCardBrands: acceptedCardBrands(provider),
-    paymentMethods: paymentMethodBadges(provider),
+    requiresGuestDetails: holdFirst,
+    collectPostcode: holdFirst,
+    ratePlans: ratePlansFor(rules),
+    addonsEnabled: !holdFirst,
+    acceptedCardBrands: acceptedCardBrands(rules),
+    paymentMethods: paymentMethodBadges(rules, beam),
     holdMinutes: PAYMENT_LINK_TTL_MINUTES,
-    sendsBookingConfirmationEmail: stripe && env.CLOUDBEDS_SEND_STATUS_EMAIL === "true",
+    sendsBookingConfirmationEmail: holdFirst && env.CLOUDBEDS_SEND_STATUS_EMAIL === "true",
     bookingPath: bookingBasePath(engine),
     classicBookingPath: engine === "own" ? "/booking/classic" : "/booking",
     whatsappUrl: site.whatsapp,
@@ -850,9 +1030,20 @@ function publicPromo(promo: PromoSettings): Pick<PublicBookingConfig, "promoEnab
   return { promoEnabled: promo.mode === "direct-rate" || (promo.mode === "discount" && promo.pct > 0), promoMode: promo.mode, promoCode: promo.code };
 }
 
+/** The public fields only Beam has (spread in for Beam only, so no Stripe or demo answer gains a key). */
+function beamPublicFields(
+  cardFeePct: number,
+  beam: Pick<BeamSettings, "promptPayFeePct" | "pendingGraceMinutes">,
+): Pick<PublicBookingConfig, "feeByMethod" | "attemptPayableMinutes"> {
+  return {
+    feeByMethod: { card_ewallet: cardFeePct, promptpay: beam.promptPayFeePct },
+    attemptPayableMinutes: PAYMENT_LINK_TTL_MINUTES + beam.pendingGraceMinutes + ATTEMPT_PAYABLE_MARGIN_MINUTES,
+  };
+}
+
 export function toPublicConfig(config: BookingConfig, env: Env = process.env): PublicBookingConfig {
   return {
-    ...publicFields(config.provider, config.paymentMode, env),
+    ...publicFields(config.provider, config.paymentMode, env, rulesProviderOf(config.provider, config.paymentMode), config.beam),
     paymentMode: config.paymentMode,
     paymentStatus: "ok",
     dataSource: config.dataSource,
@@ -861,42 +1052,54 @@ export function toPublicConfig(config: BookingConfig, env: Env = process.env): P
     ...publicPromo(config.promo),
     cloudbedsWrites: config.cloudbedsWrite?.mode ?? "none",
     testGuard: config.testGuard ? { minArrivalMonths: config.testGuard.minArrivalMonths } : null,
+    ...(config.beam ? beamPublicFields(config.cardFeePct, config.beam) : {}),
   };
 }
 
 /**
  * Never throws: on an unsafe payment configuration it reports
  * paymentStatus "locked" (and demo-shaped values) so pages can still render
- * a clear message plus the WhatsApp fallback instead of crashing.
+ * a clear message plus the WhatsApp fallback instead of crashing. A locked
+ * Stripe or Beam config keeps its provider's hold-first shape (and Beam its
+ * own fields).
  */
 export function getPublicBookingConfig(env: Env = process.env): PublicBookingConfig {
   try {
     return toPublicConfig(getBookingConfig(env), env);
   } catch {
     const provider = safeProvider(env);
+    const rules = rulesProviderOf(provider, safePaymentMode(env));
+    const beam = rules === "beam" ? beamOptionsOf(env) : null;
+    const cardFeePct = cardFeeFor(env, provider);
     return {
-      ...publicFields(provider, "demo", env),
+      ...publicFields(provider, "demo", env, rules, beam),
       live: false,
       paymentMode: "demo",
       paymentStatus: "locked",
       dataSource: resolveDataSource(env),
-      cardFeePct: cardFeeFor(env, provider),
-      depositPct: depositFor(env, provider),
+      cardFeePct,
+      depositPct: depositFor(env, rules),
       // Same rule the availability API applies (getInventoryConfig).
       ...publicPromo(resolvePromoSettings(env, provider, safePaymentMode(env), resolveDataSource(env))),
       cloudbedsWrites: "none",
       testGuard: null,
+      ...(beam ? beamPublicFields(cardFeePct, beam) : {}),
     };
   }
 }
 
-/** Inventory + pricing settings only; never throws (availability works even when payments are locked). */
+/**
+ * Inventory + pricing settings only; never throws (availability works even when payments are locked). The rules
+ * (baseRateOnly, the automatic discounts, the rate plans, the promo) are getBookingConfig's: the rules provider's.
+ */
 export function getInventoryConfig(
   env: Env = process.env,
 ): Pick<BookingConfig, "dataSource" | "cloudbeds" | "promoPct" | "promo" | "ratePlans" | "provider"> {
   const dataSource = resolveDataSource(env);
   const provider = safeProvider(env);
-  const promo = resolvePromoSettings(env, provider, safePaymentMode(env), dataSource);
+  const paymentMode = safePaymentMode(env);
+  const rules = rulesProviderOf(provider, paymentMode);
+  const promo = resolvePromoSettings(env, provider, paymentMode, dataSource);
   return {
     dataSource,
     provider,
@@ -905,12 +1108,12 @@ export function getInventoryConfig(
         ? {
             apiKey: cloudbedsReadKey(env),
             propertyId: trimmed(env.CLOUDBEDS_PROPERTY_ID) || null,
-            baseRateOnly: provider === "stripe",
-            autoDiscountPlans: autoDiscountPlansFor(env, provider),
+            baseRateOnly: isHoldFirstProvider(rules),
+            autoDiscountPlans: autoDiscountPlansFor(env, rules),
           }
         : null,
     promoPct: promo.pct,
     promo,
-    ratePlans: ratePlansFor(provider),
+    ratePlans: ratePlansFor(rules),
   };
 }

@@ -191,10 +191,12 @@ export type PromoResult =
 /**
  * How a promo code works on this deployment (config.ts resolvePromoSettings):
  * - discount: demo only, a site-side % (BOOKING_DEMO_PROMO_PCT);
- * - direct-rate: Stripe with live Cloudbeds rates and BOOKING_DIRECT_PROMO on: Cloudbeds' own Direct rate plan is sold
- *   for DIRECT, and the plan of any other promo code the owner set up in Cloudbeds for that code (PromoLookup);
- * - classic-only: Stripe without it (flag off, or no Cloudbeds rates): every code is pointed to the classic booking page;
- * - off: Beam modes (no code applies).
+ * - direct-rate: Stripe or Beam (design S3.1) with live Cloudbeds rates and BOOKING_DIRECT_PROMO on: Cloudbeds' own
+ *   Direct rate plan is sold for DIRECT, and the plan of any other promo code the owner set up in Cloudbeds for that
+ *   code (PromoLookup);
+ * - classic-only: Stripe or Beam without it (flag off, or no Cloudbeds rates): every code is pointed to the classic
+ *   booking page;
+ * - off: the demo with no site-side % (BOOKING_DEMO_PROMO_PCT=0): no code applies.
  */
 export type PromoMode = "discount" | "direct-rate" | "classic-only" | "off";
 
@@ -221,7 +223,21 @@ export interface PricingConfig {
 }
 
 export type CardBrand = "visa" | "mastercard" | "amex" | "jcb" | "unionpay";
-export type PaymentMethodBadge = "card" | "promptpay" | "apple_pay" | "google_pay";
+/**
+ * A payment-method badge. Stripe: card, apple_pay, google_pay, promptpay. Beam (design S3.1): card, promptpay
+ * (BEAM_PROMPTPAY) and its e-wallets (BEAM_EWALLETS: alipay, line_pay, truemoney, shopeepay; wechat_pay with
+ * BEAM_WECHAT_PAY). The demo: card, promptpay.
+ */
+export type PaymentMethodBadge =
+  | "card"
+  | "promptpay"
+  | "apple_pay"
+  | "google_pay"
+  | "alipay"
+  | "line_pay"
+  | "truemoney"
+  | "shopeepay"
+  | "wechat_pay";
 
 /** Non-secret config the browser may see. */
 export interface PublicBookingConfig extends PricingConfig {
@@ -239,28 +255,29 @@ export interface PublicBookingConfig extends PricingConfig {
    * "mock" = simulated writer (nothing reaches Cloudbeds), "none" = no reservation (demo/beam preview).
    */
   cloudbedsWrites: "live" | "mock" | "none";
-  /** True when the server needs the guest's details at checkout (stripe modes): send CheckoutRequest.guest. */
+  /** True when the server needs the guest's details at checkout (the hold-first Stripe and Beam modes): send CheckoutRequest.guest. */
   requiresGuestDetails: boolean;
   /** Ask for a postcode (sent to Cloudbeds as guestZip; optional for the guest - a placeholder is sent when empty). */
   collectPostcode: boolean;
-  /** Rate plans offered (stripe: Standard only - Cloudbeds does not price the synthetic Breakfast plan). */
+  /** Rate plans offered (Stripe and Beam: Standard only - Cloudbeds does not price the synthetic Breakfast plan). */
   ratePlans: RatePlanId[];
-  /** Add-ons offered (false in stripe modes). */
+  /** Add-ons offered (false in the Stripe and Beam modes). */
   addonsEnabled: boolean;
-  /** Card brands the provider accepts (Stripe Thailand: Visa + Mastercard only). */
+  /** Card brands the provider accepts (Stripe Thailand: Visa + Mastercard only; Beam: Visa, Mastercard, JCB, Amex). */
   acceptedCardBrands: CardBrand[];
   /** Payment method badges to show. */
   paymentMethods: PaymentMethodBadge[];
   /** How long the room is held while the guest pays (minutes). */
   holdMinutes: number;
   /**
-   * Stripe modes: whether Cloudbeds emails the guest a booking confirmation
-   * when we confirm (CLOUDBEDS_SEND_STATUS_EMAIL). When false the only email
-   * is Stripe's payment receipt, and copy must not promise a confirmation email.
+   * Hold-first (Stripe and Beam) modes: whether Cloudbeds emails the guest a booking
+   * confirmation when we confirm (CLOUDBEDS_SEND_STATUS_EMAIL; on Beam it is the guest's
+   * written confirmation, owner decision 6). When false the only email is Stripe's payment
+   * receipt, and copy must not promise a confirmation email.
    */
   sendsBookingConfirmationEmail: boolean;
   /**
-   * stripe-test with REAL Cloudbeds writes only: holds are refused unless the
+   * stripe-test / beam-playground with REAL Cloudbeds writes only: holds are refused unless the
    * arrival is at least `minArrivalMonths` ahead and the guest email is the
    * owner's test address (the address itself is never exposed). null otherwise.
    */
@@ -284,6 +301,18 @@ export interface PublicBookingConfig extends PricingConfig {
   promoMode?: PromoMode;
   /** The code guests type (BOOKING_PROMO_CODE, default DIRECT): not a secret, the site advertises it. */
   promoCode?: string;
+  /**
+   * Beam only (absent for Stripe and the demo): the payment processing fee % per method group the guest picks on
+   * our page - card_ewallet = cardFeePct (BOOKING_CARD_FEE_PCT, 3 when unset), promptpay = BEAM_PROMPTPAY_FEE_PCT
+   * (0 when unset: owner decision 1). Offered methods are in paymentMethods.
+   */
+  feeByMethod?: { card_ewallet: number; promptpay: number };
+  /**
+   * Beam only (absent for Stripe and the demo): how long after a checkout starts its payment may still succeed, in
+   * minutes - the link's lifetime (holdMinutes) + BEAM_PENDING_GRACE_MINUTES + a 3-minute margin (53 by default).
+   * No second payable link is opened for the booking inside it.
+   */
+  attemptPayableMinutes?: number;
 }
 
 export interface CartItem {

@@ -400,6 +400,11 @@ test("beam-live refuses simulated inventory at checkout (defence in depth)", asy
       BOOKING_ALLOW_LIVE_PAYMENTS: "true",
       VERCEL_ENV: "production",
       CLOUDBEDS_API_KEY: "cbat_x",
+      // Real Cloudbeds writes: since design S3.1 a Beam mode on Vercel never runs on the mock writer.
+      CLOUDBEDS_API_KEY_BOOKING: "cbat_write_x",
+      CLOUDBEDS_PROPERTY_ID: "235064",
+      UPSTASH_REDIS_REST_URL: "https://example-redis.upstash.io",
+      UPSTASH_REDIS_REST_TOKEN: "token-x",
     },
     { liveFulfilmentReady: true },
   );

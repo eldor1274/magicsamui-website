@@ -59,7 +59,7 @@ const unfilteredRatePlanReads = (kit: Kit) => kit.fakeCb.calls.filter((c) => c.m
 
 /* --------------------------------- config --------------------------------- */
 
-test("promo settings: Stripe with live Cloudbeds rates sells the Direct rate (default on); off / no Cloudbeds rates point to the classic page; Beam takes no code", () => {
+test("promo settings: Stripe with live Cloudbeds rates sells the Direct rate (default on); off / no Cloudbeds rates point to the classic page; Beam follows the same rule", () => {
   const on = getBookingConfig(STRIPE_TEST_ENV).promo;
   assert.deepEqual(on, { mode: "direct-rate", code: "DIRECT", pct: 0, cloudbedsCode: "Direct" });
   assert.equal(getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_DIRECT_PROMO: "on" }).promo.mode, "direct-rate");
@@ -68,7 +68,8 @@ test("promo settings: Stripe with live Cloudbeds rates sells the Direct rate (de
     assert.equal(getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_DIRECT_PROMO: off }).promo.mode, "classic-only", off);
   }
   assert.equal(getBookingConfig(MOCK_ENV).promo.mode, "classic-only", "MOCK: demo prices, no Cloudbeds Direct rows to sell");
-  assert.equal(getBookingConfig(BEAM_ENV).promo.mode, "off");
+  // Beam is hold-first since design S3.1: BEAM_ENV has no Cloudbeds rates, so its codes point to the classic page (with rates: beamConfig.test.ts).
+  assert.equal(getBookingConfig(BEAM_ENV).promo.mode, "classic-only");
   // The code guests type (trimmed, upper case) and Cloudbeds' code (kept as is); bad values fall back.
   const custom = getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_PROMO_CODE: " summer26 ", CLOUDBEDS_PROMO_CODE: "DirectWeb" }).promo;
   assert.equal(custom.code, "SUMMER26");
@@ -91,7 +92,8 @@ test("public config: the code pill and hint follow the promo mode (the hint only
   assert.equal(promoInputOffered(classic), true, "the code can still be entered, and is answered with the classic-page note");
   assert.equal(promoCodeHint(classic), null, "never suggests a code this page can't apply");
   const beam = getPublicBookingConfig(BEAM_ENV);
-  assert.equal(promoInputOffered(beam), false);
+  assert.equal(promoInputOffered(beam), true, "Beam (design S3.1): as a Stripe page without Cloudbeds rates, a code is answered with the classic-page note");
+  assert.equal(promoCodeHint(beam), null);
   // A locked config (nobody can pay) still reports the mode its pages would have.
   assert.equal(getPublicBookingConfig({ BOOKING_PAYMENT_PROVIDER: "stripe", STRIPE_SECRET_KEY: "sk_live_abcdefghijkl", CLOUDBEDS_API_KEY: "k" }).promoMode, "direct-rate");
 });
@@ -701,7 +703,7 @@ test("booking page UI: Direct prices struck through with the label, the not-appl
 test("results step: with no code entered, the bar above the results invites the DIRECT code (arrivals with dates skip the search step's perk)", () => {
   const ui = (path: string) => readFileSync(new URL(`../../components/booking/${path}`, import.meta.url), "utf8");
   const bar = ui("search/SearchBar.tsx");
-  // Only while no code is typed, and only where a code lowers the price (promoCodeHint is null in Beam and classic-only modes).
+  // Only while no code is typed, and only where a code lowers the price (promoCodeHint is null in the classic-only and off modes).
   assert.ok(bar.includes('codeHint={promoEnabled && promoCode === "" ? promoCodeHint : null}'));
   assert.match(bar, /\} else if \(compact && codeHint\) \{[\s\S]{0,300}?content = `Have code \$\{codeHint\}\? Add it above for our best direct rate\.`;/);
   // It goes after the code verdicts and the missing-dates prompts (an applied or refused code says so instead).

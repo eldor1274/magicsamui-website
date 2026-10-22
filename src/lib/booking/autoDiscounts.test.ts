@@ -65,7 +65,7 @@ const hmOf = (inv: RoomInventory[]) => inv.find((i) => i.slug === "honeymoon-sui
 
 /* --------------------------------- config --------------------------------- */
 
-test("config: BOOKING_AUTO_DISCOUNTS on by default (empty = on, off/false/0/no = off); plans default to Last minute, Long term, Early bird; Stripe with Cloudbeds data only", () => {
+test("config: BOOKING_AUTO_DISCOUNTS on by default (empty = on, off/false/0/no = off); plans default to Last minute, Long term, Early bird; Stripe and Beam with Cloudbeds data only", () => {
   assert.deepEqual(DEFAULT_AUTO_DISCOUNT_PLANS, ["Last minute", "Long term", "Early bird"]);
   assert.deepEqual(getBookingConfig(STRIPE_TEST_ENV).cloudbeds?.autoDiscountPlans, DEFAULT_AUTO_DISCOUNT_PLANS);
   for (const on of ["", "on", "ON", " true ", "1", "yes"]) {
@@ -95,13 +95,13 @@ test("config: BOOKING_AUTO_DISCOUNTS on by default (empty = on, off/false/0/no =
   // The availability API's config agrees, and never throws.
   assert.deepEqual(getInventoryConfig(STRIPE_TEST_ENV).cloudbeds?.autoDiscountPlans, DEFAULT_AUTO_DISCOUNT_PLANS);
   assert.deepEqual(getInventoryConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNTS: "off" }).cloudbeds?.autoDiscountPlans, []);
-  // Demo and Beam (with a Cloudbeds read key): unchanged, no automatic discounts. MOCK without Cloudbeds data: nothing to read.
+  // The demo (with a Cloudbeds read key): unchanged, no automatic discounts. MOCK without Cloudbeds data: nothing to read.
   assert.deepEqual(getBookingConfig({ CLOUDBEDS_API_KEY: "k" }).cloudbeds?.autoDiscountPlans, []);
   assert.deepEqual(getInventoryConfig({ CLOUDBEDS_API_KEY: "k" }).cloudbeds?.autoDiscountPlans, []);
-  assert.deepEqual(
-    getBookingConfig({ BOOKING_PAYMENT_PROVIDER: "beam", BEAM_API_BASE: "https://playground.api.beamcheckout.com", BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k", BOOKING_TOKEN_SECRET: "test-only-7f3K9qLm2xVw8RtY4pZn6bHc1dJe5gUa", CLOUDBEDS_API_KEY: "k" }).cloudbeds?.autoDiscountPlans,
-    [],
-  );
+  // Beam (with a Cloudbeds read key) is hold-first since design S3.1: the same plans as Stripe, in both configs.
+  const beamEnv: Env = { BOOKING_PAYMENT_PROVIDER: "beam", BEAM_API_BASE: "https://playground.api.beamcheckout.com", BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k", BOOKING_TOKEN_SECRET: "test-only-7f3K9qLm2xVw8RtY4pZn6bHc1dJe5gUa", CLOUDBEDS_API_KEY: "k" };
+  assert.deepEqual(getBookingConfig(beamEnv).cloudbeds?.autoDiscountPlans, DEFAULT_AUTO_DISCOUNT_PLANS);
+  assert.deepEqual(getInventoryConfig(beamEnv).cloudbeds?.autoDiscountPlans, DEFAULT_AUTO_DISCOUNT_PLANS);
   assert.equal(getBookingConfig({ BOOKING_PAYMENT_PROVIDER: "stripe", BOOKING_STRIPE_MOCK: "true" }).cloudbeds, null);
 });
 

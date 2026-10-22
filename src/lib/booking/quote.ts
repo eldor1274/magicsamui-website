@@ -365,9 +365,9 @@ export const DIRECT_RATE_LABEL = "Direct rate";
 
 /**
  * Whether the booking page offers the code input and sends a typed (or ?promo=) code with its searches:
- * wherever a code can lower the price (DIRECT, or any promo code set up in Cloudbeds), and on a Stripe page
- * that can't apply codes (it answers a code with a note linking the classic booking page instead of
- * ignoring it). Not in Beam modes.
+ * wherever a code can lower the price (DIRECT, or any promo code set up in Cloudbeds), and on a Stripe or Beam
+ * page that can't apply codes (it answers a code with a note linking the classic booking page instead of
+ * ignoring it). Not where no code applies (promo mode off).
  */
 export function promoInputOffered(config: Pick<PublicBookingConfig, "promoEnabled" | "promoMode">): boolean {
   return config.promoEnabled || config.promoMode === "classic-only";
@@ -379,7 +379,7 @@ export function promoCodeHint(config: Pick<PublicBookingConfig, "promoEnabled" |
 }
 
 /**
- * Validates a promo code for this deployment's PromoSettings. demo (discount) and Beam (off):
+ * Validates a promo code for this deployment's PromoSettings. The demo (discount, or off with no site-side %):
  * exactly resolvePromo. direct-rate: the price comes from Cloudbeds' own rows, never from a site-side %
  * (pct 0) - the DIRECT alias (BOOKING_PROMO_CODE, trimmed, any case) is valid as "Direct rate"; any other
  * code is valid only as `lookup` (the rate-plan index read for the stay) found it: a plan the page may sell

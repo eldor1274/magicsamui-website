@@ -4,7 +4,7 @@ import { getBookingConfig, getInventoryConfig, getPublicBookingConfig } from "@/
 import { validationLimits } from "@/lib/booking/checkout";
 import { nightsBetween } from "@/lib/booking/dates";
 import { apiError, clientIp, createRateLimiter, json, logEvent } from "@/lib/booking/routeUtils";
-import { getStripeDeps } from "@/lib/booking/runtime";
+import { getProviderDeps, getStripeDeps } from "@/lib/booking/runtime";
 import type { AvailabilityResponse } from "@/lib/booking/types";
 import { parseSearch } from "@/lib/booking/validate";
 
@@ -58,11 +58,13 @@ export async function GET(request: NextRequest) {
       // The automatic discounts' rate-plan read never takes a plain search down: base rates instead (checkout re-quotes).
       autoDiscountsBestEffort: true,
       onFallback: (e) => logEvent("cloudbeds_fallback", { error: e instanceof Error ? e.message : String(e) }),
-      // Stripe sells the base rate only: when that leaves no room at all, the owner is told (the alerter is built only then).
-      ...(inventoryConfig.provider === "stripe"
+      // The hold-first providers (Stripe, Beam) sell the base rate only: when that leaves no room at all, the owner is
+      // told (the alerter, from the active provider's runtime deps, is built only then; Stripe's exactly as before).
+      ...(inventoryConfig.provider === "stripe" || inventoryConfig.provider === "beam"
         ? {
             onNoBaseRateAll: async (slugs: string[]) => {
-              const deps = getStripeDeps(getBookingConfig());
+              const bookingConfig = getBookingConfig();
+              const deps = inventoryConfig.provider === "stripe" ? getStripeDeps(bookingConfig) : getProviderDeps(bookingConfig)?.deps;
               if (deps) await alertNoBaseRateAll(deps.alert, slugs, search.checkIn, search.checkOut);
             },
           }

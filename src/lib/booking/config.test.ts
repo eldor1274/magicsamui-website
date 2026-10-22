@@ -19,6 +19,13 @@ import { allowListedSearch, isAllowedHost, resolveOrigin, resumePaymentPath } fr
 
 const KEYS = { BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k" };
 const SECRET = { BOOKING_TOKEN_SECRET: "test-only-7f3K9qLm2xVw8RtY4pZn6bHc1dJe5gUa" };
+/** Real Cloudbeds writes for the beam-live fixtures: since design S3.1 a Beam mode on Vercel never runs on the mock writer. */
+const BEAM_WRITES = {
+  CLOUDBEDS_API_KEY_BOOKING: "cbat_write_x",
+  CLOUDBEDS_PROPERTY_ID: "235064",
+  UPSTASH_REDIS_REST_URL: "https://example-redis.upstash.io",
+  UPSTASH_REDIS_REST_TOKEN: "token-x",
+};
 
 test("demo is the default payment mode", () => {
   assert.equal(resolvePaymentMode({}), "demo");
@@ -77,7 +84,7 @@ test("beam live mode is hard-stopped in code (no Beam fulfilment)", () => {
  */
 async function beamLivePaidAnswer(): Promise<StatusResponse> {
   const now = Date.parse("2026-10-21T03:00:00Z");
-  const env = { ...KEYS, ...SECRET, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production", CLOUDBEDS_API_KEY: "cbat_x" };
+  const env = { ...KEYS, ...SECRET, ...BEAM_WRITES, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production", CLOUDBEDS_API_KEY: "cbat_x" };
   const config = getBookingConfig(env, { liveFulfilmentReady: true });
   const booking: BookingSummary = {
     ref: "MSV-20261021-GQ7K",
@@ -145,7 +152,7 @@ test("live mode needs live Cloudbeds data", () => {
       (e: unknown) => e instanceof BookingConfigError && e.code === "live_payments_locked",
     );
   }
-  const live = getBookingConfig({ ...full, CLOUDBEDS_API_KEY: "cbat_x" }, ready);
+  const live = getBookingConfig({ ...full, ...BEAM_WRITES, CLOUDBEDS_API_KEY: "cbat_x" }, ready);
   assert.equal(live.paymentMode, "beam-live");
   assert.equal(live.dataSource, "cloudbeds");
   assert.equal(live.promoPct, 0, "the demo DIRECT promo never applies to real money");
