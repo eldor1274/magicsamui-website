@@ -10,7 +10,7 @@
 import { redactForLog } from "./cloudbedsWrite.ts";
 import type { BookingConfig } from "./config.ts";
 import { abandonPayment, bookingPointer } from "./fulfil.ts";
-import { holdFirstProvider, providerDepsOf, requestPaymentKey } from "./status.ts";
+import { holdFirstProvider, providerDepsOf, requestPaymentKey } from "./providerDispatch.ts";
 import type { ProviderDeps, ProviderDepsFn, StripeDeps } from "./stripeDeps.ts";
 import { verifyBookingToken } from "./token.ts";
 import type { AbandonResponse } from "./types.ts";
