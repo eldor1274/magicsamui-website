@@ -228,8 +228,9 @@ export interface BookingConfig {
   ratePlans: RatePlanId[];
   addonsEnabled: boolean;
   /**
-   * postPayment `type`: the exact `method` value of the property's custom Stripe payment method
-   * (see resolveCloudbedsPaymentMethod). null = not usable: checkouts with real Cloudbeds writes are refused.
+   * postPayment `type`: the exact `method` value of the property's custom payment method for the mode's
+   * provider - Stripe's, or Beam's 'Beam(website)' (see resolveCloudbedsPaymentMethod). null = not usable:
+   * checkouts with real Cloudbeds writes are refused.
    */
   cloudbedsPaymentMethod: string | null;
   /** Why cloudbedsPaymentMethod is null (names the env var); null when it is usable. */
@@ -682,8 +683,8 @@ function beamSettingsOf(env: Env, paymentMode: "beam-playground" | "beam-live"):
 }
 
 /**
- * Cloudbeds' built-in payment methods (getPaymentMethods `method` and `code` values). Stripe money
- * recorded under one of them would be filed as cash, PayPal, a transfer...; "credit" also needs a
+ * Cloudbeds' built-in payment methods (getPaymentMethods `method` and `code` values). Stripe or Beam
+ * money recorded under one of them would be filed as cash, PayPal, a transfer...; "credit" also needs a
  * cardType, so postPayment would refuse it. Only the property's own custom method is accepted.
  */
 const BUILT_IN_PAYMENT_METHODS = new Set(["credit", "cards", "cash", "bank_transfer", "ebanking", "pay_pal", "debit", "check", "check_true", "bill"]);
@@ -692,30 +693,65 @@ const PAYMENT_METHOD_RE = /^[^\s\p{Cc}\p{Cf}]{1,64}$/u;
 const COPY_METHOD_HINT =
   "Copy the exact 'method' value that scripts/cloudbeds-wi0-check.mjs prints for the custom Stripe payment method (case included) and redeploy.";
 
+/** Where one provider's postPayment method is read from, and the words its problems use. */
+interface PaymentMethodSource {
+  /** The only variable a live mode reads (and the fallback outside live). */
+  liveVar: string;
+  /** Read first outside live when set; an invalid value is a problem, never a fall-through to liveVar. */
+  testVar: string;
+  /** Whose money it records ("Stripe payments can't be recorded..."). */
+  money: string;
+  /** The custom method that money belongs under ("...under the property's own {custom}"). */
+  custom: string;
+  hint: string;
+}
+
+/** Stripe money - and the demo, whose config has always read these names (its answers are unchanged). */
+const STRIPE_PAYMENT_METHOD_SOURCE: PaymentMethodSource = {
+  liveVar: "CLOUDBEDS_STRIPE_PAYMENT_METHOD",
+  testVar: "CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD",
+  money: "Stripe",
+  custom: "custom Stripe method",
+  hint: COPY_METHOD_HINT,
+};
+
+/** Beam money (Beam design S3.3): one custom 'Beam(website)' method for card, e-wallet and PromptPay money alike. */
+const BEAM_PAYMENT_METHOD_SOURCE: PaymentMethodSource = {
+  liveVar: "CLOUDBEDS_BEAM_PAYMENT_METHOD",
+  testVar: "CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD",
+  money: "Beam",
+  custom: "custom 'Beam(website)' method",
+  hint:
+    "Copy the exact 'method' value that scripts/cloudbeds-wi0-check.mjs prints for the custom 'Beam(website)' payment method " +
+    "(case included; the one method for card, e-wallet and PromptPay money) and redeploy.",
+};
+
 /**
- * postPayment `type` for Stripe money. stripe-live: CLOUDBEDS_STRIPE_PAYMENT_METHOD only. Otherwise
- * CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD when set (an invalid one is a problem: it never falls through to
- * the live method), else CLOUDBEDS_STRIPE_PAYMENT_METHOD. The value is kept exactly (case included);
- * there is no default. An unusable value is reported as `problem`, never thrown, so fulfilment,
- * release and the sweeper keep loading the config; checkout refuses instead (stripeCheckout.ts).
- * Deliberately NOT a live-lock condition: stripeLiveBlockers also gates the fulfilment and drain
- * configs, and holds must still be released while the value is fixed. Method values are not secrets.
+ * postPayment `type` for the mode's provider: CLOUDBEDS_STRIPE_* for Stripe (and the demo), CLOUDBEDS_BEAM_*
+ * for Beam (design S3.3). A live mode (stripe-live, beam-live) reads the live variable only
+ * (CLOUDBEDS_{STRIPE,BEAM}_PAYMENT_METHOD). Otherwise the TEST variable when set (an invalid one is a
+ * problem: it never falls through to the live method), else the live variable. The value is kept exactly
+ * (case included); there is no default. An unusable value is reported as `problem`, never thrown, so
+ * fulfilment, release and the sweeper keep loading the config; checkout refuses instead, with the
+ * 'payment-method-config' alert whose problem line is this text (holdFirstCheckout.ts).
+ * Deliberately NOT a live-lock condition: stripeLiveBlockers (and Beam's live checks) also gate the
+ * fulfilment and drain configs, and holds must still be released while the value is fixed. Method values
+ * are not secrets.
  */
 export function resolveCloudbedsPaymentMethod(env: Env, paymentMode: PaymentMode): { method: string | null; problem: string | null } {
-  const name =
-    paymentMode !== "stripe-live" && trimmed(env.CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD) !== ""
-      ? "CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD"
-      : "CLOUDBEDS_STRIPE_PAYMENT_METHOD";
+  const source = providerOf(paymentMode) === "beam" ? BEAM_PAYMENT_METHOD_SOURCE : STRIPE_PAYMENT_METHOD_SOURCE;
+  // For Stripe and the demo, !isLiveMode is exactly "not stripe-live" (beam-live is a Beam mode).
+  const name = !isLiveMode(paymentMode) && trimmed(env[source.testVar]) !== "" ? source.testVar : source.liveVar;
   const value = trimmed(env[name]);
-  if (value === "") return { method: null, problem: `${name} is not set, so Stripe payments can't be recorded in Cloudbeds. ${COPY_METHOD_HINT}` };
+  if (value === "") return { method: null, problem: `${name} is not set, so ${source.money} payments can't be recorded in Cloudbeds. ${source.hint}` };
   const shown = JSON.stringify(value.slice(0, 80));
   if (!PAYMENT_METHOD_RE.test(value)) {
-    return { method: null, problem: `${name} ${shown} is not a Cloudbeds payment method value (1-64 characters, no spaces). ${COPY_METHOD_HINT}` };
+    return { method: null, problem: `${name} ${shown} is not a Cloudbeds payment method value (1-64 characters, no spaces). ${source.hint}` };
   }
   if (BUILT_IN_PAYMENT_METHODS.has(value.toLowerCase())) {
     return {
       method: null,
-      problem: `${name} ${shown} is a Cloudbeds built-in method: Stripe money must be recorded under the property's own custom Stripe method. ${COPY_METHOD_HINT}`,
+      problem: `${name} ${shown} is a Cloudbeds built-in method: ${source.money} money must be recorded under the property's own ${source.custom}. ${source.hint}`,
     };
   }
   return { method: value, problem: null };
@@ -884,7 +920,8 @@ export function getBookingConfig(env: Env = process.env, options: ModeOptions = 
   const testGuardEmail = trimmed(env.BOOKING_TEST_GUEST_EMAIL).toLowerCase();
   const testAccessKey = trimmed(env.BOOKING_TEST_ACCESS_KEY);
   const reservationMethod = trimmed(env.CLOUDBEDS_RESERVATION_PAYMENT_METHOD) as ReservationPaymentMethod;
-  // Outside live, CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD (a separate test method) keeps test money out of the real one.
+  // Outside live, CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD (Beam: CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD), a separate test
+  // method, keeps test money out of the real one.
   const paymentMethod = resolveCloudbedsPaymentMethod(env, paymentMode);
   const zip = trimmed(env.BOOKING_GUEST_ZIP_PLACEHOLDER);
   const alertEmail = trimmed(env.BOOKING_ALERT_EMAIL);
