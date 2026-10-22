@@ -683,6 +683,7 @@ Cloudbeds has **no sandbox**. Every Stage B test writes to the **live property**
    4. In Cloudbeds, search for reservations whose third-party id starts with `MSV-` and status "Confirmation pending"; cancel any left over by hand (none should be).
    5. Only then switch `BOOKING_PAYMENT_PROVIDER` or the keys, and redeploy.
    - Safety net if this is skipped: while the Stripe key and webhook secret are still set, the webhook, sweeper, return page and abandon endpoints keep finishing Stripe sessions even after `BOOKING_PAYMENT_PROVIDER` is switched to `beam` or `demo` (drain mode, log `stripe_drain_mode`). So **keep the Stripe variables for at least 3 days** after switching the provider. Swapping test keys for live keys cannot drain test sessions (a live key cannot read them) - hence the procedure above before Stage C.
+   - A typo in the payment variables (for example a misspelt `BOOKING_PAYMENT_PROVIDER`; the log shows `config error: payment_misconfigured - missing: ...`) stops checkout, and the status and Cancel endpoints answer 503 "not configured" for Stripe bookings, as before. While the Beam variables (base, both keys, the webhook key) are set, Beam bookings already started still get their status, their Cancel and their return page from the Beam drain, and the webhooks and the sweeper keep finishing the payments of each provider whose variables are set (its drain). Fix the typo and redeploy. A lock (`live_payments_locked`) never takes this path.
 
 ---
 

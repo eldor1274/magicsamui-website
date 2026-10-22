@@ -14,11 +14,16 @@ export function apiError(status: number, error: ApiError["error"], message: stri
   return json(body, status);
 }
 
+/** The line a route logs for a config error: the names of the missing/invalid settings only (never values). */
+export function logConfigError(e: BookingConfigError): void {
+  console.error(`[booking] config error: ${e.code}${e.missing.length ? ` - missing: ${e.missing.join(", ")}` : ""}`);
+}
+
 /** Maps a config error to a 503 the UI can explain; rethrows anything else. */
 export function configErrorResponse(e: unknown): Response {
   if (e instanceof BookingConfigError) {
     // Names of the missing/invalid settings only (never values), so go-live day can see what is left.
-    console.error(`[booking] config error: ${e.code}${e.missing.length ? ` - missing: ${e.missing.join(", ")}` : ""}`);
+    logConfigError(e);
     return e.code === "live_payments_locked"
       ? apiError(503, "live_payments_locked", "Online payment on this page is paused right now. No payment was taken.")
       : apiError(503, "payment_unavailable", "Online payment is not configured right now. No payment was taken.");

@@ -12,7 +12,9 @@ import type { ApiError, StatusResponse } from "@/lib/booking/types";
 // MOCK pages) sends the guest here. The status is verified on the server from
 // the signed token - never from the query string alone - and, in the hold-first
 // modes (Stripe, Beam), a paid payment is confirmed in Cloudbeds during this
-// render.
+// render. After a typo in the config a Beam booking is still checked here
+// (returnPageStatus, design S4.9); the Beam views read nothing from the
+// current config's cloudbedsWrites or confirmation-email flag below.
 
 export type ReturnSearchParams = { [key: string]: string | string[] | undefined };
 
