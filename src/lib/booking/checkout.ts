@@ -95,7 +95,8 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
   const { config } = deps;
   const limits = validationLimits(nowMs);
 
-  const parsed = parseCheckoutRequest(rawBody, limits);
+  // Only the Beam modes (config.beam set) read payMethod; Stripe and the demo parse with exactly production main's limits.
+  const parsed = parseCheckoutRequest(rawBody, config.beam !== null ? { ...limits, payMethods: true } : limits);
   if (!parsed.ok) {
     return fail(400, {
       error: "invalid_request",

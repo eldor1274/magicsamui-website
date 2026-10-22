@@ -145,7 +145,8 @@ export interface BeamCredentials {
 /**
  * config.beam in the Beam modes (null in every other mode). The credentials, plus (design S3.1):
  * - hostedHost: the one hosted-page host apiBase hands out (pay. or playground-pay.beamcheckout.com);
- * - promptPay (BEAM_PROMPTPAY, default on; off hides the PromptPay choice), promptPayFeePct (BEAM_PROMPTPAY_FEE_PCT,
+ * - promptPay (BEAM_PROMPTPAY, default on; off hides the PromptPay choice and its public fee, and the server no longer
+ *   takes it: quote.ts payMethodOffered), promptPayFeePct (BEAM_PROMPTPAY_FEE_PCT,
  *   default 0: owner decision 1), ewallets (BEAM_EWALLETS, default on; off is the emergency switch: owner decision 2),
  *   wechatPay (BEAM_WECHAT_PAY, default off until Beam approves it);
  * - pendingGraceMinutes (BEAM_PENDING_GRACE_MINUTES 20, 5-60), lateWatchDays (BEAM_LATE_WATCH_DAYS 7, 3-30),
@@ -784,6 +785,12 @@ interface PaymentMethodSource {
   /** The custom method that money belongs under ("...under the property's own {custom}"). */
   custom: string;
   hint: string;
+  /**
+   * Beam only (round-4 amendment to design S3.3): the other provider's method variables. A value equal to one of them
+   * (ignoring case) is refused, so Beam money is never filed under the Stripe method that sits next to it in Vercel.
+   * Stripe's source has none: its answers are unchanged.
+   */
+  otherProvider?: { name: string; vars: readonly string[] };
 }
 
 /** Stripe money - and the demo, whose config has always read these names (its answers are unchanged). */
@@ -804,6 +811,7 @@ const BEAM_PAYMENT_METHOD_SOURCE: PaymentMethodSource = {
   hint:
     "Copy the exact 'method' value that scripts/cloudbeds-wi0-check.mjs prints for the custom 'Beam(website)' payment method " +
     "(case included; the one method for card, e-wallet and PromptPay money) and redeploy.",
+  otherProvider: { name: "Stripe", vars: [STRIPE_PAYMENT_METHOD_SOURCE.liveVar, STRIPE_PAYMENT_METHOD_SOURCE.testVar] },
 };
 
 /**
@@ -811,7 +819,9 @@ const BEAM_PAYMENT_METHOD_SOURCE: PaymentMethodSource = {
  * for Beam (design S3.3). A live mode (stripe-live, beam-live) reads the live variable only
  * (CLOUDBEDS_{STRIPE,BEAM}_PAYMENT_METHOD). Otherwise the TEST variable when set (an invalid one is a
  * problem: it never falls through to the live method), else the live variable. The value is kept exactly
- * (case included); there is no default. An unusable value is reported as `problem`, never thrown, so
+ * (case included); there is no default. Beam only: a value equal (ignoring case) to a set
+ * CLOUDBEDS_STRIPE_PAYMENT_METHOD or CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD is a problem too (the Stripe method is not
+ * Beam's). An unusable value is reported as `problem`, never thrown, so
  * fulfilment, release and the sweeper keep loading the config; checkout refuses instead, with the
  * 'payment-method-config' alert whose problem line is this text (holdFirstCheckout.ts).
  * Deliberately NOT a live-lock condition: stripeLiveBlockers (and Beam's live checks) also gate the
@@ -832,6 +842,15 @@ export function resolveCloudbedsPaymentMethod(env: Env, paymentMode: PaymentMode
     return {
       method: null,
       problem: `${name} ${shown} is a Cloudbeds built-in method: ${source.money} money must be recorded under the property's own ${source.custom}. ${source.hint}`,
+    };
+  }
+  // value is non-empty here, so an unset or blank Stripe variable never matches.
+  const other = source.otherProvider;
+  const clash = other?.vars.find((v) => trimmed(env[v]).toLowerCase() === value.toLowerCase());
+  if (other && clash) {
+    return {
+      method: null,
+      problem: `${name} ${shown} is the ${other.name} method (${clash}): ${source.money} money must be recorded under the property's own ${source.custom}. ${source.hint}`,
     };
   }
   return { method: value, problem: null };
@@ -1212,13 +1231,18 @@ function publicPromo(promo: PromoSettings): Pick<PublicBookingConfig, "promoEnab
   return { promoEnabled: promo.mode === "direct-rate" || (promo.mode === "discount" && promo.pct > 0), promoMode: promo.mode, promoCode: promo.code };
 }
 
-/** The public fields only Beam has (spread in for Beam only, so no Stripe or demo answer gains a key). */
+/**
+ * The public fields only Beam has (spread in for Beam only, so no Stripe or demo answer gains a key). feeByMethod
+ * carries exactly the method groups the checkout takes (quote.ts payMethodOffered): PromptPay is left out while
+ * BEAM_PROMPTPAY is off (round-4 amendment to design S3.1), so the browser drops a stored PromptPay choice
+ * (pagePayMethodOffered) instead of pricing it.
+ */
 function beamPublicFields(
   cardFeePct: number,
-  beam: Pick<BeamSettings, "promptPayFeePct" | "pendingGraceMinutes">,
+  beam: Pick<BeamSettings, "promptPay" | "promptPayFeePct" | "pendingGraceMinutes">,
 ): Pick<PublicBookingConfig, "feeByMethod" | "attemptPayableMinutes"> {
   return {
-    feeByMethod: { card_ewallet: cardFeePct, promptpay: beam.promptPayFeePct },
+    feeByMethod: { card_ewallet: cardFeePct, ...(beam.promptPay ? { promptpay: beam.promptPayFeePct } : {}) },
     attemptPayableMinutes: PAYMENT_LINK_TTL_MINUTES + beam.pendingGraceMinutes + ATTEMPT_PAYABLE_MARGIN_MINUTES,
   };
 }

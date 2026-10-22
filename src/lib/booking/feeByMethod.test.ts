@@ -3,6 +3,11 @@
 // with - on Beam the card/e-wallet fee (BOOKING_CARD_FEE_PCT, 3 when unset) or the PromptPay fee (BEAM_PROMPTPAY_FEE_PCT,
 // 0 when unset: owner decision 1); on Stripe and the demo config.cardFeePct whatever is sent. Nothing uses payMethod in
 // checkout yet (S4.6): a Stripe checkout is the same with or without one, and the golden snapshot is unchanged.
+//
+// Round 4: only the Beam modes read payMethod (ValidationLimits.payMethods, set by runCheckout when config.beam is set);
+// Stripe and the demo ignore the field whatever it holds, exactly as production main. payMethodOffered (quote.ts) is the
+// server half of the BEAM_PROMPTPAY switch and pagePayMethodOffered its browser half: the public feeByMethod carries
+// exactly the groups the checkout takes (no promptpay while the switch is off).
 
 import { test } from "node:test";
 import type { TestContext } from "node:test";
@@ -15,8 +20,8 @@ import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, getBookingConfig, getPublicBookin
 import type { BookingConfig, Env } from "./config.ts";
 import { addDays } from "./dates.ts";
 import { demoInventory } from "./demoProvider.ts";
-import { computeQuote, feePctFor, isPayMethod, percentOf } from "./quote.ts";
-import { HONEYMOON, STRIPE_LIVE_ENV, STRIPE_TEST_ENV, TOKEN_SECRET, makeKit, refCharSequence, request, serverQuote } from "./testkit.ts";
+import { computeQuote, feePctFor, isPayMethod, pagePayMethodOffered, payMethodOffered, percentOf } from "./quote.ts";
+import { HONEYMOON, NOW as KIT_NOW, ORIGIN, STRIPE_LIVE_ENV, STRIPE_TEST_ENV, TOKEN_SECRET, makeKit, refCharSequence, request, serverQuote } from "./testkit.ts";
 import { createBookingToken, isBookingSummary, verifyBookingToken } from "./token.ts";
 import type { BookingSummary, CartItemInput, PayMethod, Quote, RoomOffer } from "./types.ts";
 import { PAY_METHOD_UNREADABLE, parseCheckoutRequest } from "./validate.ts";
@@ -43,6 +48,12 @@ const BEAM_LIVE: Env = {
 const MOCK_ENV: Env = { BOOKING_PAYMENT_PROVIDER: "stripe", BOOKING_STRIPE_MOCK: "true" };
 const METHODS: PayMethod[] = ["card_ewallet", "promptpay"];
 const LIMITS = { today: "2026-10-05", maxNights: 30, bookingWindowMonths: 18, maxSearchAdults: 18, maxCartItems: 6 };
+/** The limits runCheckout parses a Beam-mode request with (config.beam set). */
+const BEAM_LIMITS = { ...LIMITS, payMethods: true };
+/** Every kind of payMethod a hand-made request can carry: the two groups, the empty values and garbage. */
+const ANY_PAY_METHOD: unknown[] = ["bogus", "CARD", 0, false, [], {}, null, "", "promptpay", "card_ewallet", " promptpay", "PROMPTPAY", true, 1, ["promptpay"]];
+/** The code switch overridden (tests only): beam-live resolves. */
+const READY = { liveFulfilmentReady: true };
 
 /** A config_warning (Beam with BOOKING_CARD_FEE_PCT set) is expected in some tests: keep it out of the output. */
 function quiet(t: TestContext): void {
@@ -164,20 +175,91 @@ test("feePctFor agrees with the public feeByMethod on every Beam config, and Str
     const pub = toPublicConfig(config, env);
     assert.ok(pub.feeByMethod, name);
     assert.deepEqual(getPublicBookingConfig(env).feeByMethod, pub.feeByMethod, name);
-    for (const m of METHODS) assert.equal(feePctFor(config, m), pub.feeByMethod[m], `${name} ${m}`);
+    // Every group the checkout takes has its fee, equal to feePctFor; a group it does not take has no key (round 4:
+    // PromptPay while BEAM_PROMPTPAY is off).
+    for (const m of METHODS) {
+      if (payMethodOffered(config, m)) assert.equal(pub.feeByMethod[m], feePctFor(config, m), `${name} ${m}`);
+      else assert.equal(m in pub.feeByMethod, false, `${name} ${m}: not offered, no fee shown`);
+    }
     assert.equal(feePctFor(config, "card_ewallet"), pub.cardFeePct, `${name}: the card/e-wallet fee is cardFeePct`);
   }
+  assert.deepEqual(getPublicBookingConfig({ ...BEAM_PG, BEAM_PROMPTPAY: "off" }).feeByMethod, { card_ewallet: 3 });
   // A locked beam-live page shows the fees the unlocked config would charge.
   const locked = getPublicBookingConfig({ ...BEAM_LIVE, BEAM_PROMPTPAY_FEE_PCT: "1.5" });
   assert.equal(locked.paymentStatus, "locked");
-  const unlocked = getBookingConfig({ ...BEAM_LIVE, BEAM_PROMPTPAY_FEE_PCT: "1.5" }, { liveFulfilmentReady: true });
+  const unlocked = getBookingConfig({ ...BEAM_LIVE, BEAM_PROMPTPAY_FEE_PCT: "1.5" }, READY);
   assert.equal(unlocked.paymentMode, "beam-live");
   assert.deepEqual(locked.feeByMethod, { card_ewallet: feePctFor(unlocked, "card_ewallet"), promptpay: feePctFor(unlocked, "promptpay") });
+  // Both fee variables set (round-3 triage): the locked page follows BOOKING_CARD_FEE_PCT, not a hard-coded 3.
+  const feesEnv = { ...BEAM_LIVE, BOOKING_CARD_FEE_PCT: "4", BEAM_PROMPTPAY_FEE_PCT: "1.5" };
+  const lockedFees = getPublicBookingConfig(feesEnv);
+  const unlockedFees = getBookingConfig(feesEnv, READY);
+  assert.equal(lockedFees.paymentStatus, "locked");
+  assert.deepEqual(lockedFees.feeByMethod, { card_ewallet: 4, promptpay: 1.5 });
+  assert.equal(lockedFees.cardFeePct, unlockedFees.cardFeePct);
+  assert.equal(lockedFees.cardFeePct, 4);
+  assert.deepEqual(lockedFees.feeByMethod, toPublicConfig(unlockedFees, feesEnv).feeByMethod);
+  // A locked page with PromptPay switched off offers the card/e-wallet fee only.
+  assert.deepEqual(getPublicBookingConfig({ ...feesEnv, BEAM_PROMPTPAY: "off" }).feeByMethod, { card_ewallet: 4 });
 
   for (const env of [STRIPE_TEST_ENV, STRIPE_LIVE_ENV, MOCK_ENV, {}]) {
     const pub = getPublicBookingConfig(env);
     assert.equal("feeByMethod" in pub, false);
     for (const m of METHODS) assert.equal(feePctFor(getBookingConfig(env), m), pub.cardFeePct);
+  }
+});
+
+test("payMethodOffered (the server half of BEAM_PROMPTPAY): on Beam card_ewallet always, promptpay only while the switch is on; no method is never taken; Stripe and the demo offer none", () => {
+  const on = getBookingConfig(BEAM_PG);
+  assert.equal(payMethodOffered(on, "card_ewallet"), true);
+  assert.equal(payMethodOffered(on, "promptpay"), true);
+  for (const off of ["off", "OFF", "false", "0", "no"]) {
+    const config = getBookingConfig({ ...BEAM_PG, BEAM_PROMPTPAY: off });
+    assert.equal(config.beam?.promptPay, false, off);
+    assert.equal(payMethodOffered(config, "card_ewallet"), true, off);
+    assert.equal(payMethodOffered(config, "promptpay"), false, `${off}: the emergency switch refuses PromptPay on the server too`);
+  }
+  // The e-wallet switch narrows the card_ewallet link (beamLinkSettings), never the group itself.
+  assert.equal(payMethodOffered(getBookingConfig({ ...BEAM_PG, BEAM_EWALLETS: "off" }), "card_ewallet"), true);
+  assert.equal(payMethodOffered(getBookingConfig(BEAM_LIVE, READY), "promptpay"), true, "beam-live");
+  assert.equal(payMethodOffered(getBookingConfig({ ...BEAM_LIVE, BEAM_PROMPTPAY: "off" }, READY), "promptpay"), false, "beam-live, switched off");
+  // No method: the same refusal as a switched-off one (S4.6 answers both with 'Please choose how to pay').
+  for (const none of [undefined, null]) assert.equal(payMethodOffered(on, none), false, String(none));
+  for (const v of ["bitcoin", "PROMPTPAY", "", 1, {}]) assert.equal(payMethodOffered(on, v as PayMethod), false, JSON.stringify(v));
+  // Stripe and the demo offer no choice (their checkout ignores payMethod).
+  for (const env of [STRIPE_TEST_ENV, STRIPE_LIVE_ENV, MOCK_ENV, {}, { BOOKING_PAYMENT_PROVIDER: "beam" }]) {
+    const config = getBookingConfig(env);
+    for (const m of METHODS) assert.equal(payMethodOffered(config, m), false, `${config.paymentMode} ${m}`);
+  }
+});
+
+test("the public config offers exactly what the server takes: no promptpay fee while BEAM_PROMPTPAY is off (ok and locked pages), pagePayMethodOffered agrees with payMethodOffered, and so does the PromptPay badge", () => {
+  const cases: [string, Env, Env][] = [];
+  for (const extra of [{}, { BEAM_PROMPTPAY: "off" }, { BEAM_PROMPTPAY: "no", BEAM_EWALLETS: "off" }, { BEAM_PROMPTPAY: "maybe" }, { BEAM_PROMPTPAY: "off", BEAM_PROMPTPAY_FEE_PCT: "2" }]) {
+    // [label, the page's env, the env the server config is built from (the locked page's unlocked twin)]
+    cases.push([`beam-playground ${JSON.stringify(extra)}`, { ...BEAM_PG, ...extra }, { ...BEAM_PG, ...extra }]);
+    cases.push([`locked beam-live ${JSON.stringify(extra)}`, { ...BEAM_LIVE, ...extra }, { ...BEAM_LIVE, ...extra }]);
+  }
+  for (const [label, pageEnv, serverEnv] of cases) {
+    const page = getPublicBookingConfig(pageEnv);
+    const server = getBookingConfig(serverEnv, READY);
+    assert.ok(page.feeByMethod, label);
+    for (const m of METHODS) {
+      assert.equal(pagePayMethodOffered(page, m), payMethodOffered(server, m), `${label} ${m}`);
+      assert.equal(page.paymentMethods.includes(m === "promptpay" ? "promptpay" : "card"), payMethodOffered(server, m), `${label} ${m}: the badge`);
+    }
+  }
+  assert.deepEqual(getPublicBookingConfig({ ...BEAM_LIVE, BEAM_PROMPTPAY: "off" }).feeByMethod, { card_ewallet: 3 }, "a locked page too");
+  // A stored choice the page no longer offers is dropped; anything that is not one of the two groups never counts.
+  const off = getPublicBookingConfig({ ...BEAM_PG, BEAM_PROMPTPAY: "off" });
+  assert.equal(pagePayMethodOffered(off, "promptpay"), false);
+  assert.equal(pagePayMethodOffered(off, "card_ewallet"), true);
+  const on = getPublicBookingConfig(BEAM_PG);
+  for (const v of [undefined, null, "", "PROMPTPAY", "card", 0, {}, ["promptpay"]]) assert.equal(pagePayMethodOffered(on, v), false, JSON.stringify(v));
+  // Stripe and demo pages have no feeByMethod: nothing is offered there.
+  for (const env of [STRIPE_TEST_ENV, STRIPE_LIVE_ENV, MOCK_ENV, {}, { ...STRIPE_LIVE_ENV, BOOKING_ALLOW_LIVE_PAYMENTS: "false" }]) {
+    const page = getPublicBookingConfig(env);
+    for (const m of METHODS) assert.equal(pagePayMethodOffered(page, m), false, `${page.paymentMode} ${m}`);
   }
 });
 
@@ -221,35 +303,59 @@ const BODY = {
   expectedDueNowSatang: 100_000,
 };
 
-test("parseCheckoutRequest: an optional payMethod - kept when it is one of the two, no key at all when absent (a Stripe request's parse result is unchanged)", () => {
+test("parseCheckoutRequest in the Beam modes (limits.payMethods): an optional payMethod - kept when it is one of the two, no key at all when absent", () => {
   for (const m of METHODS) {
-    const parsed = parseCheckoutRequest({ ...BODY, payMethod: m }, LIMITS);
+    const parsed = parseCheckoutRequest({ ...BODY, payMethod: m }, BEAM_LIMITS);
     assert.ok(parsed.ok, m);
     assert.equal(parsed.value.payMethod, m);
   }
-  const without = parseCheckoutRequest(BODY, LIMITS);
+  const without = parseCheckoutRequest(BODY, BEAM_LIMITS);
   assert.ok(without.ok);
   assert.equal("payMethod" in without.value, false);
   assert.deepEqual(without.value, { ...BODY, promo: undefined });
+  assert.deepEqual(without, parseCheckoutRequest(BODY, LIMITS), "a request without one parses the same in every mode");
   // Not sent, as an empty field is read (null and "" are how a form says "none").
-  for (const none of [undefined, null, ""]) assert.deepEqual(parseCheckoutRequest({ ...BODY, payMethod: none }, LIMITS), without, String(none));
+  for (const none of [undefined, null, ""]) assert.deepEqual(parseCheckoutRequest({ ...BODY, payMethod: none }, BEAM_LIMITS), without, String(none));
   // Everything else the request carries is read exactly as before.
   const full = { ...BODY, promo: "direct", theme: "classic", termsVersion: "2026-10-07" };
-  const withMethod = parseCheckoutRequest({ ...full, payMethod: "promptpay" }, LIMITS);
-  const withoutMethod = parseCheckoutRequest(full, LIMITS);
+  const withMethod = parseCheckoutRequest({ ...full, payMethod: "promptpay" }, BEAM_LIMITS);
+  const withoutMethod = parseCheckoutRequest(full, BEAM_LIMITS);
   assert.ok(withMethod.ok && withoutMethod.ok);
   const { payMethod, ...rest } = withMethod.value;
   assert.equal(payMethod, "promptpay");
   assert.deepEqual(rest, withoutMethod.value);
 });
 
-test("a bad payMethod is a validation issue (in every mode: nothing is held)", async () => {
-  for (const bad of ["bitcoin", "PROMPTPAY", "card", " promptpay", 1, true, {}, ["promptpay"]]) {
-    const parsed = parseCheckoutRequest({ ...BODY, payMethod: bad }, LIMITS);
+test("parseCheckoutRequest on Stripe and the demo (no limits.payMethods): payMethod is ignored completely - every value, valid or not, parses exactly as none", () => {
+  for (const body of [BODY, { ...BODY, promo: "direct", theme: "classic", termsVersion: "2026-10-07" }, { ...BODY, checkIn: "2026-10-01" }, { ...BODY, items: [] }]) {
+    const none = parseCheckoutRequest(body, LIMITS);
+    for (const v of ANY_PAY_METHOD) {
+      const parsed = parseCheckoutRequest({ ...body, payMethod: v }, LIMITS);
+      assert.deepEqual(parsed, none, JSON.stringify(v));
+      if (parsed.ok) assert.equal("payMethod" in parsed.value, false, `${JSON.stringify(v)}: no payMethod key`);
+      else assert.equal(parsed.issues.includes(PAY_METHOD_UNREADABLE), false, `${JSON.stringify(v)}: no issue`);
+    }
+  }
+  // An explicit false is the same as unset.
+  assert.deepEqual(parseCheckoutRequest({ ...BODY, payMethod: "bogus" }, { ...LIMITS, payMethods: false }), parseCheckoutRequest(BODY, LIMITS));
+});
+
+/** A Beam-mode checkout's deps: nothing faked but the network, which records every call (none may be made here). */
+function beamDeps(config: BookingConfig, calls: string[]) {
+  const fetchImpl = (async (input: string | URL | Request) => {
+    calls.push(String(input));
+    throw new Error("no network in this test");
+  }) as typeof fetch;
+  return { config, origin: ORIGIN, nowMs: KIT_NOW, fetchImpl, nonce: () => "nonce", pickRefChar: refCharSequence() };
+}
+
+test("a bad payMethod is a validation issue in the Beam modes (nothing is read, held or sent to Beam)", async () => {
+  for (const bad of ["bitcoin", "PROMPTPAY", "card", " promptpay", 1, true, 0, false, {}, [], ["promptpay"]]) {
+    const parsed = parseCheckoutRequest({ ...BODY, payMethod: bad }, BEAM_LIMITS);
     assert.deepEqual(parsed, { ok: false, issues: [PAY_METHOD_UNREADABLE] }, JSON.stringify(bad));
   }
   // With other problems, each is listed once.
-  const many = parseCheckoutRequest({ ...BODY, checkIn: "2026-10-01", payMethod: "x" }, LIMITS);
+  const many = parseCheckoutRequest({ ...BODY, checkIn: "2026-10-01", payMethod: "x" }, BEAM_LIMITS);
   assert.equal(many.ok, false);
   if (!many.ok) {
     assert.ok(many.issues.includes(PAY_METHOD_UNREADABLE));
@@ -257,13 +363,37 @@ test("a bad payMethod is a validation issue (in every mode: nothing is held)", a
     assert.ok(many.issues.length >= 2);
   }
 
-  // A Stripe checkout with one: 400 invalid_request before any Cloudbeds or Stripe call.
-  const kit = makeKit();
-  const res = await runCheckout(request(HONEYMOON, { payMethod: "bitcoin" as PayMethod, expectedTotalSatang: 1, expectedDueNowSatang: 1 }), kit.checkoutDeps());
-  assert.equal(res.status, 400);
-  assert.deepEqual(res.body, { ok: false, error: "invalid_request", message: "Please check your booking details.", issues: [PAY_METHOD_UNREADABLE] });
-  assert.equal(kit.fakeCb.calls.length, 0);
-  assert.equal(kit.fakeStripe.calls.length, 0);
+  // A Beam checkout with one (beam-playground, and beam-live with the code switch overridden): 400 invalid_request
+  // before any Cloudbeds read or Beam call.
+  for (const config of [getBookingConfig(BEAM_PG), getBookingConfig(BEAM_LIVE, READY)]) {
+    const calls: string[] = [];
+    const res = await runCheckout(request(HONEYMOON, { payMethod: "bitcoin" as PayMethod, expectedTotalSatang: 1, expectedDueNowSatang: 1 }), beamDeps(config, calls));
+    assert.equal(res.status, 400, config.paymentMode);
+    assert.deepEqual(res.body, { ok: false, error: "invalid_request", message: "Please check your booking details.", issues: [PAY_METHOD_UNREADABLE] }, config.paymentMode);
+    assert.deepEqual(calls, [], config.paymentMode);
+  }
+});
+
+test("Stripe live, Stripe test and the demo ignore payMethod completely: a bogus or a valid one gives exactly the answer, Cloudbeds calls, Stripe calls and logs of none", async () => {
+  const run = async (env: Env, extra: Record<string, unknown>) => {
+    const kit = makeKit({ env, pickRefChar: refCharSequence() });
+    const stay = kit.config.dataSource === "demo" ? demoStay(kit.config) : null;
+    const req = { ...request(stay ? stay.items : HONEYMOON, stay ? { checkIn: stay.checkIn, checkOut: stay.checkOut } : {}), ...extra };
+    const first = await runCheckout({ ...req, expectedTotalSatang: 1, expectedDueNowSatang: 1 }, kit.checkoutDeps());
+    const quote = first.body.ok ? null : first.body.quote;
+    const second = quote ? await runCheckout({ ...req, expectedTotalSatang: quote.totalSatang, expectedDueNowSatang: quote.dueNowSatang }, kit.checkoutDeps()) : null;
+    const badDates = await runCheckout({ ...req, checkIn: "2020-01-01", checkOut: "2020-01-03" }, kit.checkoutDeps());
+    return { status: second?.status, text: normalised(JSON.stringify({ first, second, badDates, cb: kit.fakeCb.calls, stripe: kit.fakeStripe.calls, alerts: kit.alerts, logs: kit.logs })) };
+  };
+  for (const [name, env] of [["stripe-live", STRIPE_LIVE_ENV], ["stripe-test", STRIPE_TEST_ENV], ["demo", {}]] as const) {
+    assert.equal(getBookingConfig(env).beam, null, name);
+    const none = await run(env, {});
+    assert.equal(none.status, 200, `${name}: the checkout went through`);
+    for (const v of ANY_PAY_METHOD) {
+      const withValue = await run(env, { payMethod: v });
+      assert.equal(withValue.text, none.text, `${name} ${JSON.stringify(v)}`);
+    }
+  }
 });
 
 test("a Stripe checkout carrying a payMethod is unaffected: the same answer, token, Cloudbeds calls and Stripe requests", async () => {
@@ -291,14 +421,14 @@ test("a Stripe checkout carrying a payMethod is unaffected: the same answer, tok
 
 /**
  * A checkout record with what differs between two runs replaced: booking tokens by their decoded payload (signed at the
- * same time, they differ only by the ids inside), and the fakes' random ids (Cloudbeds reservations, Stripe sessions,
- * request ids) numbered in the order they first appear.
+ * same time, they differ only by the ids inside), and the fakes' random ids (Cloudbeds reservations, Stripe sessions
+ * and payment intents in test and live mode, request ids) numbered in the order they first appear.
  */
 function normalised(json: string): string {
   const decoded = json.replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, (tok) => `TOKEN${Buffer.from(tok.split(".")[0], "base64url").toString("utf8").replace(/"/g, "'")}`);
   const seen = new Map<string, string>();
   const counters = new Map<string, number>();
-  return decoded.replace(/\b7\d{12}\b|cs_test_fake_[0-9a-f]+|pi_test_fake_[0-9a-f]+|fake-\d+/g, (id) => {
+  return decoded.replace(/\b7\d{12}\b|cs_(?:test|live)_fake_[0-9a-f]+|pi_(?:test|live)_fake_[0-9a-f]+|fake-\d+/g, (id) => {
     const known = seen.get(id);
     if (known) return known;
     const kind = /^7\d{12}$/.test(id) ? "res" : id.startsWith("cs_") ? "cs" : id.startsWith("pi_") ? "pi" : "req";

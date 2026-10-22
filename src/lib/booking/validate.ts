@@ -16,6 +16,12 @@ export interface ValidationLimits {
   bookingWindowMonths: number;
   maxSearchAdults: number;
   maxCartItems: number;
+  /**
+   * The Beam modes only (runCheckout sets it when config.beam is set; design S3.2, round-4 amendment): parse
+   * CheckoutRequest.payMethod. Unset (Stripe, the demo, the availability search) the field is ignored completely - no
+   * issue and no payMethod key, whatever it holds - so their parse results are exactly production main's.
+   */
+  payMethods?: boolean;
 }
 
 /** fixStep: where the guest can fix the problem ("addons" = an add-on no longer fits the stay). */
@@ -46,8 +52,9 @@ function parsePromoField(v: unknown, issues: string[]): string | undefined {
 export const PAY_METHOD_UNREADABLE = "The payment method you chose couldn't be read - please choose how to pay again.";
 
 /**
- * CheckoutRequest.payMethod (design S3.2): absent (undefined, null or "", as an empty promo field) -> undefined; one of
- * the two groups -> kept; anything else is an issue, in every mode (as a malformed promo field is).
+ * CheckoutRequest.payMethod in the Beam modes (design S3.2; limits.payMethods): absent (undefined, null or "", as an
+ * empty promo field) -> undefined; one of the two groups -> kept; anything else is an issue (as a malformed promo field
+ * is). Stripe and the demo never call it (parseCheckoutRequest ignores the field there).
  */
 function parsePayMethodField(v: unknown, issues: string[]): PayMethod | undefined {
   if (v === undefined || v === null || v === "") return undefined;
@@ -142,8 +149,8 @@ export function parseCheckoutRequest(body: unknown, limits: ValidationLimits): P
   const checkOut = dateError ? null : (b.checkOut as IsoDate);
 
   const promo = parsePromoField(b.promo, issues);
-  // Stripe and the demo never send one: their parse result has no payMethod key, exactly as before.
-  const payMethod = parsePayMethodField(b.payMethod, issues);
+  // Beam modes only. Stripe and the demo ignore the field whatever it holds: no issue and no payMethod key, exactly as before.
+  const payMethod = limits.payMethods === true ? parsePayMethodField(b.payMethod, issues) : undefined;
 
   const expected = b.expectedTotalSatang;
   const expectedDueNow = b.expectedDueNowSatang;

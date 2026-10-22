@@ -291,7 +291,12 @@ test("fees per method: card/e-wallet = BOOKING_CARD_FEE_PCT (3 when unset), Prom
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /config_warning/);
   assert.match(warnings[0], /"name":"BOOKING_CARD_FEE_PCT"/);
-  assert.doesNotMatch(warnings[0], /"7"|:7\b/, "the value is never logged");
+  // The whole line (round-3 triage: the old /"7"|:7\b/ let 'set to 7 while ...' through): the name and a fixed reason only.
+  assert.equal(
+    warnings[0],
+    '[booking] config_warning {"name":"BOOKING_CARD_FEE_PCT","reason":"set while Beam is the payment provider: keep it unset in Production (unset = 3% on Beam, 5% on Stripe)"}',
+  );
+  assert.doesNotMatch(warnings[0], /\b7\b/, "the value is never logged");
   // The fee itself still follows the provider when unset: 5 on Stripe, 3 on Beam.
   assert.equal(getBookingConfig({ ...STRIPE_LIVE_ENV, ...BEAM_PG, ...WRITES }).cardFeePct, 3);
 });
@@ -570,6 +575,76 @@ test("Beam payment method: beam-playground reads CLOUDBEDS_BEAM_TEST_PAYMENT_MET
   assert.equal(getBookingConfig({ ...BEAM_PG_WRITES, ...testVars }).cloudbedsPaymentMethod, "Beam_TEST");
   assert.equal(getFulfilmentConfig({ ...BEAM_PG_WRITES, ...testVars }).cloudbedsPaymentMethod, "Beam_TEST");
   assert.equal(getBookingConfig({ ...BEAM_LIVE, ...testVars }, READY).cloudbedsPaymentMethod, "Beam(website)");
+});
+
+test("Beam payment method: Stripe's method is refused for Beam money - a Beam value equal (ignoring case) to a set CLOUDBEDS_STRIPE_PAYMENT_METHOD or CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD is a problem; every Stripe and demo answer is unchanged", () => {
+  const STRIPE_VARS: Env = { CLOUDBEDS_STRIPE_PAYMENT_METHOD: "Stripe(website)", CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD: "Stripe_TEST" };
+  const beamHint =
+    "Copy the exact 'method' value that scripts/cloudbeds-wi0-check.mjs prints for the custom 'Beam(website)' payment method " +
+    "(case included; the one method for card, e-wallet and PromptPay money) and redeploy.";
+  for (const mode of BEAM_MODES) {
+    const resolve = (env: Env) => resolveCloudbedsPaymentMethod({ ...STRIPE_VARS, ...env }, mode);
+    for (const [raw, shown, stripeVar] of [
+      ["Stripe(website)", "Stripe(website)", "CLOUDBEDS_STRIPE_PAYMENT_METHOD"],
+      ["stripe(WEBSITE)", "stripe(WEBSITE)", "CLOUDBEDS_STRIPE_PAYMENT_METHOD"],
+      [" Stripe_TEST\n", "Stripe_TEST", "CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD"],
+      ["STRIPE_test", "STRIPE_test", "CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD"],
+    ]) {
+      assert.deepEqual(
+        resolve({ CLOUDBEDS_BEAM_PAYMENT_METHOD: raw }),
+        {
+          method: null,
+          problem:
+            `CLOUDBEDS_BEAM_PAYMENT_METHOD ${JSON.stringify(shown)} is the Stripe method (${stripeVar}): ` +
+            `Beam money must be recorded under the property's own custom 'Beam(website)' method. ${beamHint}`,
+        },
+        `${mode} ${JSON.stringify(raw)}`,
+      );
+    }
+    // Only a value equal to a SET Stripe variable is refused: Beam's own method next to Stripe's is fine, and so is a value
+    // that only resembles it or a number Cloudbeds assigned (a Beam method value need not contain 'beam').
+    assert.deepEqual(resolve(BEAM_METHOD), { method: "Beam(website)", problem: null }, mode);
+    for (const fine of ["Stripe(website)2", "Stripe", "Beam_TEST", "1", "7"]) {
+      assert.deepEqual(resolve({ CLOUDBEDS_BEAM_PAYMENT_METHOD: fine }), { method: fine, problem: null }, `${mode} ${fine}`);
+    }
+    const blankStripe = { CLOUDBEDS_STRIPE_PAYMENT_METHOD: "", CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD: "  ", CLOUDBEDS_BEAM_PAYMENT_METHOD: "Stripe(website)" };
+    assert.deepEqual(resolveCloudbedsPaymentMethod(blankStripe, mode), { method: "Stripe(website)", problem: null }, `${mode}: nothing to compare with`);
+    // The built-in check comes first.
+    const builtIn = resolveCloudbedsPaymentMethod({ CLOUDBEDS_STRIPE_PAYMENT_METHOD: "cash", CLOUDBEDS_BEAM_PAYMENT_METHOD: "Cash" }, mode);
+    assert.match(builtIn.problem ?? "", /^CLOUDBEDS_BEAM_PAYMENT_METHOD "Cash" is a Cloudbeds built-in method: /, mode);
+  }
+  // beam-playground's TEST variable is refused the same way (never a fall-through to the live method); beam-live ignores it.
+  for (const [raw, stripeVar] of [["stripe_test", "CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD"], ["STRIPE(website)", "CLOUDBEDS_STRIPE_PAYMENT_METHOD"]]) {
+    const env = { ...STRIPE_VARS, ...BEAM_METHOD, CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD: raw };
+    const playground = resolveCloudbedsPaymentMethod(env, "beam-playground");
+    assert.equal(playground.method, null, raw);
+    assert.ok(playground.problem?.startsWith(`CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD ${JSON.stringify(raw)} is the Stripe method (${stripeVar}): `), playground.problem ?? "");
+    assert.deepEqual(resolveCloudbedsPaymentMethod(env, "beam-live"), { method: "Beam(website)", problem: null }, raw);
+  }
+
+  // Stripe and the demo have no such rule: with the Beam variables equal to theirs, every answer is what it was.
+  const pastedBoth = { CLOUDBEDS_STRIPE_PAYMENT_METHOD: "Stripe(website)", CLOUDBEDS_BEAM_PAYMENT_METHOD: "Stripe(website)", CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD: "stripe(website)" };
+  for (const mode of ["demo", "stripe-mock", "stripe-test", "stripe-live"] as const) {
+    assert.deepEqual(resolveCloudbedsPaymentMethod(pastedBoth, mode), { method: "Stripe(website)", problem: null }, mode);
+    assert.deepEqual(resolveCloudbedsPaymentMethod({ ...STRIPE_VARS, CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD: "Stripe(website)" }, mode), { method: "Stripe(website)", problem: null }, mode);
+  }
+  for (const env of [STRIPE_TEST_ENV, STRIPE_LIVE_ENV, MOCK_ENV, {}]) {
+    const withBeam = { ...env, CLOUDBEDS_BEAM_PAYMENT_METHOD: "Stripe(website)", CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD: "Stripe(website)" };
+    assert.deepEqual(getBookingConfig(withBeam), getBookingConfig(env));
+    assert.deepEqual(getPublicBookingConfig(withBeam), getPublicBookingConfig(env));
+  }
+
+  // Through the configs: Stage B with Stripe's value pasted into the Beam variable. The config loads (fulfilment too);
+  // checkout refuses with the 'payment-method-config' alert carrying this problem. The Stripe drain keeps Stripe's method.
+  const pasted = { ...BEAM_PG_WRITES, ...STRIPE_VARS, CLOUDBEDS_BEAM_PAYMENT_METHOD: "Stripe(website)" };
+  for (const cfg of [getBookingConfig(pasted), getFulfilmentConfig(pasted)]) {
+    assert.equal(cfg.paymentMode, "beam-playground");
+    assert.equal(cfg.cloudbedsPaymentMethod, null);
+    assert.match(cfg.cloudbedsPaymentMethodProblem ?? "", /^CLOUDBEDS_BEAM_PAYMENT_METHOD "Stripe\(website\)" is the Stripe method \(CLOUDBEDS_STRIPE_PAYMENT_METHOD\): /);
+  }
+  const drainEnv = { ...STRIPE_LIVE_ENV, ...BEAM_PG, ...WRITES, CLOUDBEDS_BEAM_PAYMENT_METHOD: "stripe(website)" };
+  assert.equal(getBookingConfig(drainEnv).cloudbedsPaymentMethod, null);
+  assert.equal(getStripeDrainConfig(drainEnv)?.cloudbedsPaymentMethod, "Stripe(website)");
 });
 
 /** A cart's checkout input, priced on Stripe's kit (the same fake property, and a Beam quote is the same hold-first quote). */

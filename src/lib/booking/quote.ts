@@ -75,13 +75,38 @@ export function isPayMethod(v: unknown): v is PayMethod {
  * (BOOKING_CARD_FEE_PCT, 3 when unset); promptpay -> config.beam.promptPayFeePct (BEAM_PROMPTPAY_FEE_PCT, 0 when unset:
  * owner decision 1); no method yet -> the card/e-wallet fee (the total a Beam page shows before a method is chosen; a
  * Beam checkout without one is refused from S4.6). Stripe and the demo (config.beam null): config.cardFeePct whatever
- * is sent. It always agrees with the public feeByMethod (config.ts toPublicConfig), which only Beam answers carry.
+ * is sent. It always agrees with the public feeByMethod (config.ts toPublicConfig), which only Beam answers carry, for
+ * every group the page offers (payMethodOffered).
  */
 export function feePctFor(
   config: Pick<BookingConfig, "cardFeePct"> & { beam: Pick<BeamSettings, "promptPayFeePct"> | null },
   payMethod: PayMethod | null | undefined,
 ): number {
   return config.beam !== null && payMethod === "promptpay" ? config.beam.promptPayFeePct : config.cardFeePct;
+}
+
+/**
+ * Whether the checkout takes the payment method group `m` (design S3.1, round-4 amendment: the server half of the
+ * BEAM_PROMPTPAY switch). Beam (config.beam set): card_ewallet always; promptpay only while config.beam.promptPay
+ * (BEAM_PROMPTPAY, on unless switched off). No method (undefined or null) is never taken, so one check refuses a
+ * missing and a switched-off method alike: S4.6 answers both with 400 'Please choose how to pay' (fixStep 'payment')
+ * before any hold, Cloudbeds write or Beam call, and S4.3's beamCheckoutAdapter.createPage throws for a group this
+ * refuses. Stripe and the demo (config.beam null) offer no choice: false for every value, and their checkout ignores
+ * payMethod (validate.ts). It agrees with the public answer (pagePayMethodOffered on toPublicConfig(config)).
+ */
+export function payMethodOffered(config: { beam: Pick<BeamSettings, "promptPay"> | null }, m: PayMethod | null | undefined): boolean {
+  if (config.beam === null) return false;
+  return m === "card_ewallet" || (m === "promptpay" && config.beam.promptPay);
+}
+
+/**
+ * The browser's side of payMethodOffered (design S5.2, round-4 amendment): whether a page whose public config is
+ * `config` offers `m` - one of the two groups with a fee in feeByMethod (Beam only; promptpay is absent while
+ * BEAM_PROMPTPAY is off). The client drops a persisted payMethod this refuses (a page loaded before the switch, a
+ * reload) instead of pricing or sending it. Never true on a Stripe or demo page (no feeByMethod).
+ */
+export function pagePayMethodOffered(config: Pick<PublicBookingConfig, "feeByMethod">, m: unknown): m is PayMethod {
+  return isPayMethod(m) && typeof config.feeByMethod?.[m] === "number";
 }
 
 /** `pct` percent of an integer satang amount, rounded half-up to a satang. */

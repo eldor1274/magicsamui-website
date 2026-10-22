@@ -312,9 +312,10 @@ export interface PublicBookingConfig extends PricingConfig {
   /**
    * Beam only (absent for Stripe and the demo): the payment processing fee % per method group the guest picks on
    * our page - card_ewallet = cardFeePct (BOOKING_CARD_FEE_PCT, 3 when unset), promptpay = BEAM_PROMPTPAY_FEE_PCT
-   * (0 when unset: owner decision 1). Offered methods are in paymentMethods.
+   * (0 when unset: owner decision 1). It carries exactly the groups the checkout takes: promptpay is absent while
+   * BEAM_PROMPTPAY is off (quote.ts pagePayMethodOffered / payMethodOffered). The badges are in paymentMethods.
    */
-  feeByMethod?: Record<PayMethod, number>;
+  feeByMethod?: { card_ewallet: number } & Partial<Record<PayMethod, number>>;
   /**
    * Beam only (absent for Stripe and the demo): how long after a checkout starts its payment may still succeed, in
    * minutes - the link's lifetime (holdMinutes) + BEAM_PENDING_GRACE_MINUTES + a 3-minute margin (53 by default).
@@ -499,9 +500,9 @@ export interface CheckoutRequest {
   termsVersion?: string;
   /**
    * The payment method group the guest chose (design S3.2): what a Beam checkout prices the fee with (feePctFor) and
-   * which methods its payment link offers; required on Beam from S4.6. Stripe and the demo never need it and ignore it
-   * (one fee whatever is sent). Absent (undefined, null or "") = not chosen; any value other than the two is an
-   * invalid_request issue (validate.ts).
+   * which methods its payment link offers; required on Beam from S4.6. Only the Beam modes read it: there, absent
+   * (undefined, null or "") = not chosen and any value other than the two is an invalid_request issue (validate.ts).
+   * Stripe and the demo ignore the field completely, whatever it holds (no issue, never in their parse result).
    */
   payMethod?: PayMethod;
   /**
