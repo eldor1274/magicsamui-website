@@ -64,7 +64,9 @@
 // (sweepRecentPayments), then one runSweep per provider - the active one with
 // primary: true, each drain with primary: false - handed its own step 1
 // (opts.recent), the other providers' (opts.peers) and one Cloudbeds listing
-// for all (opts.listed, from listSweepReservations). A provider whose step 1
+// for all (opts.listed, from listSweepReservations; the sweep route's
+// sweepProviders.ts takes it at the first run's own listing point, as a lone
+// run would, and hands it to every later run). A provider whose step 1
 // threw gets no hold side that run, only sweepPaidAndAlerts: its step 1b,
 // step 3 and heartbeat - the same code runSweep runs for them (round 5), so a
 // failing payment list never stops paid bookings from being confirmed or
@@ -250,8 +252,11 @@ export interface SweepOptions {
   /**
    * Cloudbeds' reservations of the sweep window from earlier in the same request (listSweepReservations, taken
    * after every step 1): not listed again. A hold an earlier run released since is skipped by its release marker.
+   * Or the request's shared listing (sweepProviders.ts, Beam design S4.8): called at this run's own listing point
+   * with this run's time, it lists once for every run of the request - the first caller's answer, or its failure,
+   * which each run then handles as its own failed listing.
    */
-  listed?: ListedReservation[];
+  listed?: ListedReservation[] | ((nowMs: number) => Promise<ListedReservation[]>);
   /** This run's own step 1, already run by the caller (so the other runs could see it first): not run again. */
   recent?: RecentPayments;
   /**
@@ -467,7 +472,7 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
   // 2c (read first: 2b matches intents against it). Every reservation Cloudbeds created in the window.
   let listed: ListedReservation[] | null = null;
   try {
-    listed = opts.listed ?? (await listSweepReservations(deps, now));
+    listed = typeof opts.listed === "function" ? await opts.listed(now) : (opts.listed ?? (await listSweepReservations(deps, now)));
     await deps.kv.del(keys.sweepCloudbedsFailures(keyScope(deps.config.paymentMode))).catch(() => undefined);
   } catch (e) {
     summary.errors++;

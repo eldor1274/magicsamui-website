@@ -100,6 +100,8 @@ export function makeBeamKit(
   options: {
     env?: Env;
     cb?: FakeCloudbedsOptions;
+    /** A fake Cloudbeds to share (e.g. a Stripe kit's, design S4.8): used as it is, and `cb` is ignored. It must list BEAM_CLOUDBEDS_METHOD. */
+    fakeCb?: FakeCloudbeds;
     beam?: FakeBeamOptions;
     kv?: KvStore;
     now?: { ms: number };
@@ -123,13 +125,15 @@ export function makeBeamKit(
     base: config.paymentMode === "beam-live" ? "live" : "playground",
     ...options.beam,
   });
-  const fakeCb = createFakeCloudbeds({
-    roomTypes: ROOM_TYPES,
-    createdStatus: "confirmed",
-    now: () => now.ms,
-    paymentMethods: [...FAKE_PAYMENT_METHODS, { method: BEAM_CLOUDBEDS_METHOD, code: BEAM_CLOUDBEDS_METHOD, name: "Beam (website)" }],
-    ...options.cb,
-  });
+  const fakeCb =
+    options.fakeCb ??
+    createFakeCloudbeds({
+      roomTypes: ROOM_TYPES,
+      createdStatus: "confirmed",
+      now: () => now.ms,
+      paymentMethods: [...FAKE_PAYMENT_METHODS, { method: BEAM_CLOUDBEDS_METHOD, code: BEAM_CLOUDBEDS_METHOD, name: "Beam (website)" }],
+      ...options.cb,
+    });
   const alerts: BeamKit["alerts"] = [];
   const logs: BeamKit["logs"] = [];
   const log = (message: string, data?: Record<string, unknown>) => logs.push({ message, data });
