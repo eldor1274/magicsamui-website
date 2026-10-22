@@ -7,12 +7,22 @@
 // marker that later calls return early on.
 
 import { randomBytes } from "node:crypto";
+import { isBeamLinkId } from "./beam.ts";
 import type { KvStore } from "./kv.ts";
-import { isLiveMode } from "./payments/provider.ts";
+import { isLiveMode, providerOf } from "./payments/provider.ts";
 import type { PaymentMode } from "./types.ts";
 
 export const LOCK_TTL_SECONDS = 120;
 export const DONE_TTL_SECONDS = 30 * 24 * 3600;
+/**
+ * How long Beam's payment records, charge index and done markers live: 600 days, so a refund or chargeback
+ * months later still maps to its booking (bookings up to 18 months ahead, plus 90 days after check-out: gap
+ * review 17). The Stripe keys keep DONE_TTL_SECONDS.
+ */
+export const BEAM_RECORD_TTL_SECONDS = 600 * 24 * 3600;
+
+/** The set-once "told the owner" markers of the Beam payment flow (keys.beamReported). */
+export type BeamReportKind = "dup-charge" | "record-missing" | "unknown-payment" | "foreign-link" | "refund-ambiguous";
 
 /**
  * Key scope of a payment mode: "live" for stripe-live, else the mode itself
@@ -80,25 +90,95 @@ export const keys = {
   badSignatures: (scope: string) => `msv:${scope}:webhook:badsig`,
   /** A confirmed MSV reservation with no record of ours was reported to the owner (sweeper, once). */
   noRecordReported: (scope: string, reservationId: string) => `msv:${scope}:norecord:${reservationId}`,
+
+  // Beam (design S2.4). Every Beam key carries "beam:" right after "msv:" or after the mode scope, so no Beam
+  // key can ever be a Stripe one. The per-payment keys are named by Beam's own ids (a record carries its mode);
+  // the others carry keyScope(mode) like the keys above.
+  /** A link's PaymentRecord (JSON, payments/beamRecord.ts), BEAM_RECORD_TTL_SECONDS. */
+  beamPayment: (linkId: string) => `msv:beam:pay:${linkId}`,
+  /** Charge index: a SUCCEEDED charge -> its link (BEAM_RECORD_TTL_SECONDS), so refunds and chargebacks map to the booking. */
+  beamCharge: (chargeId: string) => `msv:beam:charge:${chargeId}`,
+  /** The charge that paid the link, stored set-once by fulfil: it wins over a later reading's primary. */
+  beamPrimary: (linkId: string) => `msv:beam:primary:${linkId}`,
+  /** Sorted set of the links we created that are not finished yet (score = the link's expiresAt ms). */
+  beamLinksOpen: (scope: string) => `msv:${scope}:beam:links:open`,
+  /** Sorted set of links whose hold was released, watched for a late payment (score = release time ms). */
+  beamLinksWatch: (scope: string) => `msv:${scope}:beam:links:watch`,
+  /**
+   * Set-once "told the owner" marker: a duplicate charge, a missing record, an unknown MSV payment, a foreign
+   * link (cached as not ours), a refunded link with several successful charges (S4.1).
+   */
+  beamReported: (scope: string, kind: BeamReportKind, id: string) => `msv:${scope}:beam:reported:${kind}:${id}`,
+  /** A Beam transaction (PAYMENT, REFUND, VOID, CHARGEBACK) already handled by the webhook. */
+  beamTxn: (scope: string, id: string) => `msv:${scope}:beam:txn:${id}`,
+  /** Rejected Beam webhook signatures in the current hour (Stripe's count is keys.badSignatures). */
+  beamBadSignatures: (scope: string) => `msv:${scope}:beam:webhook:badsig`,
+  /** Beam 429 answers in the current window. */
+  beamRateLimited: (scope: string) => `msv:${scope}:beam:ratelimited`,
+  /** When disabling this link first failed (ms): a disable that keeps failing alerts. */
+  beamDisableFail: (scope: string, linkId: string) => `msv:${scope}:beam:disablefail:${linkId}`,
+  /** Consecutive failed payment-page creations (the circuit breaker's count). */
+  beamPageFail: (scope: string) => `msv:${scope}:beam:pagefail`,
+  /** Set while the circuit breaker pauses Beam checkout. */
+  beamPaused: (scope: string) => `msv:${scope}:beam:paused`,
+  /** The last 7-day charge scan (ms). */
+  beamDeepScan: (scope: string) => `msv:${scope}:beam:deepscan`,
 };
+
+/**
+ * A Beam payment's KEY (PaymentGateway.keyOf): "beam:" + the link id. Tokens and URLs carry the bare link id;
+ * only Redis keys add the prefix (money review 14), so a Beam key can never be a Stripe session id.
+ */
+export const BEAM_KEY_PREFIX = "beam:";
+
+/** The KEY of a Beam payment link id (one beam.ts isBeamLinkId accepts). */
+export function beamKeyOf(linkId: string): string {
+  return `${BEAM_KEY_PREFIX}${linkId}`;
+}
+
+/** The link id of a Beam payment KEY; null for any other key (a Stripe session id, a bare link id, a malformed id). */
+export function linkIdOf(key: string): string | null {
+  if (typeof key !== "string" || !key.startsWith(BEAM_KEY_PREFIX)) return null;
+  const linkId = key.slice(BEAM_KEY_PREFIX.length);
+  return isBeamLinkId(linkId) ? linkId : null;
+}
 
 /** thirdPartyIdentifier suffix for holds written by a NON-live deployment (Stage B tests). */
 export const TEST_HOLD_SUFFIX = "-TEST";
+/** thirdPartyIdentifier tag of a Beam hold: '{ref}-B' in beam-live, '{ref}-B-TEST' in beam-playground. */
+export const BEAM_HOLD_SUFFIX = "-B";
 const HOLD_ID_RE = /^(MSV-\d{8}-[A-HJ-NP-Z2-9]{4})(-TEST)?$/;
+const BEAM_HOLD_ID_RE = /^(MSV-\d{8}-[A-HJ-NP-Z2-9]{4})-B(-TEST)?$/;
 
 /**
  * The thirdPartyIdentifier written on a Cloudbeds hold. Live holds (any live
  * mode) carry the plain booking ref; every other mode appends -TEST, so a live
  * sweeper never touches a test hold (or the reverse) and staff can tell test
  * bookings apart.
+ *
+ * Beam holds are tagged as well: '{ref}-B' (beam-live) and '{ref}-B-TEST'
+ * (beam-playground). parseHoldIdentifier never matches a -B id, so every
+ * Stripe code path (and the pre-Beam code after a rollback) ignores Beam
+ * holds; Beam runs read only -B ids (parseBeamHoldIdentifier). Money review 5
+ * and 12. The Stripe modes (and the demo) are unchanged.
  */
 export function holdIdentifier(ref: string, mode: PaymentMode): string {
+  if (providerOf(mode) === "beam") return `${ref}${BEAM_HOLD_SUFFIX}${isLiveMode(mode) ? "" : TEST_HOLD_SUFFIX}`;
   return isLiveMode(mode) ? ref : `${ref}${TEST_HOLD_SUFFIX}`;
 }
 
 /** Parses a thirdPartyIdentifier we wrote; null for anything else (OTA bookings, staff bookings). */
 export function parseHoldIdentifier(id: string | null | undefined): { ref: string; live: boolean } | null {
   const m = HOLD_ID_RE.exec((id ?? "").trim());
+  return m ? { ref: m[1], live: m[2] === undefined } : null;
+}
+
+/**
+ * Parses the thirdPartyIdentifier of a Beam hold ('{ref}-B' live, '{ref}-B-TEST' playground); null for
+ * anything else, a Stripe hold's plain or -TEST id included.
+ */
+export function parseBeamHoldIdentifier(id: string | null | undefined): { ref: string; live: boolean } | null {
+  const m = BEAM_HOLD_ID_RE.exec((id ?? "").trim());
   return m ? { ref: m[1], live: m[2] === undefined } : null;
 }
 

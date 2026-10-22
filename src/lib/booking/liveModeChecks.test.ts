@@ -4,6 +4,8 @@
 // `=== "stripe-live"`, so a live Beam deployment gets the live answers too.
 // A six-mode table; each Stripe mode must still give exactly what the old
 // check gave. keyScope (and feeItemFor, for now) keep their stripe-live check.
+// Beam holds carry their own tag since S2.4 ('{ref}-B' live, '{ref}-B-TEST'
+// playground), which only parseBeamHoldIdentifier reads.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -11,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { alertEmailEnabled, alertSubjectPrefix } from "./alerts.ts";
 import type { BookingConfig } from "./config.ts";
 import { testMoneyLabel } from "./fulfil.ts";
-import { holdIdentifier, keyScope, parseHoldIdentifier } from "./lock.ts";
+import { holdIdentifier, keyScope, parseBeamHoldIdentifier, parseHoldIdentifier } from "./lock.ts";
 import { isLiveMode, providerOf } from "./payments/provider.ts";
 import { purchaseFor } from "./status.ts";
 import type { BookingSummary, FulfilmentView, PaymentMode } from "./types.ts";
@@ -31,8 +33,8 @@ interface Row {
 
 const TABLE: Row[] = [
   { mode: "demo", live: false, identifier: `${REF}-TEST`, label: TEST_LABEL, email: false, prefix: "[demo] " },
-  { mode: "beam-playground", live: false, identifier: `${REF}-TEST`, label: TEST_LABEL, email: false, prefix: "[beam-playground] " },
-  { mode: "beam-live", live: true, identifier: REF, label: "", email: true, prefix: "" },
+  { mode: "beam-playground", live: false, identifier: `${REF}-B-TEST`, label: TEST_LABEL, email: false, prefix: "[beam-playground] " },
+  { mode: "beam-live", live: true, identifier: `${REF}-B`, label: "", email: true, prefix: "" },
   { mode: "stripe-mock", live: false, identifier: `${REF}-TEST`, label: TEST_LABEL, email: false, prefix: "[stripe-mock] " },
   { mode: "stripe-test", live: false, identifier: `${REF}-TEST`, label: TEST_LABEL, email: false, prefix: "[stripe-test] " },
   { mode: "stripe-live", live: true, identifier: REF, label: "", email: true, prefix: "" },
@@ -69,10 +71,11 @@ test("the table covers every payment mode once, and isLiveMode is true for exact
   for (const r of TABLE) assert.equal(isLiveMode(r.mode), r.live, r.mode);
 });
 
-test("holdIdentifier: the plain ref in a live mode, -TEST otherwise (and parseHoldIdentifier reads it back)", () => {
+test("holdIdentifier: the plain ref in a live mode, -TEST otherwise; Beam holds -B / -B-TEST (and parseHoldIdentifier, for Beam parseBeamHoldIdentifier, reads it back)", () => {
   for (const r of TABLE) {
     assert.equal(holdIdentifier(REF, r.mode), r.identifier, r.mode);
-    assert.deepEqual(parseHoldIdentifier(holdIdentifier(REF, r.mode)), { ref: REF, live: r.live }, r.mode);
+    const parse = providerOf(r.mode) === "beam" ? parseBeamHoldIdentifier : parseHoldIdentifier;
+    assert.deepEqual(parse(holdIdentifier(REF, r.mode)), { ref: REF, live: r.live }, r.mode);
   }
 });
 

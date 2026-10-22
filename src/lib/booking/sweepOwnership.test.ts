@@ -21,11 +21,11 @@ import type { SweepSummary } from "./sweep.ts";
 import { STALE_HOLD_MS, SWEEP_LOOKBACK_MS, listSweepReservations, runSweep, sweepRecentPayments } from "./sweep.ts";
 import type { RecentPayments } from "./sweep.ts";
 import { createMemoryKv } from "./kv.ts";
-import { holdIdentifier, keys, recordHold, recordIntent, DONE_TTL_SECONDS } from "./lock.ts";
+import { holdIdentifier, keyScope, keys, recordHold, recordIntent, DONE_TTL_SECONDS } from "./lock.ts";
 import type { GatewayPayment, GatewayState, PaymentGateway } from "./payments/gateway.ts";
 import { stripeGateway } from "./payments/stripeGateway.ts";
 import type { CoreDeps } from "./stripeDeps.ts";
-import { HONEYMOON, NOW, checkout, makeKit, recordingKv, refCharSequence, sessionIdOf } from "./testkit.ts";
+import { HONEYMOON, NOW, STRIPE_LIVE_ENV, STRIPE_TEST_ENV, checkout, makeKit, recordingKv, refCharSequence, sessionIdOf } from "./testkit.ts";
 import type { Kit } from "./testkit.ts";
 import type { CartItemInput, CheckoutSuccess } from "./types.ts";
 
@@ -165,10 +165,13 @@ test("primary=false still handles its own mode's holds: a paid session is confir
 
 test("an orphan whose intent is another mode's belongs to that mode's run: the other run never takes it for a record-less orphan", async () => {
   const kit = makeKit();
-  // An Acme attempt (beam-playground: -TEST ids like stripe-test) whose postReservation answer was lost.
+  // An Acme attempt (another mode, beam-playground, whose holds carry -TEST ids like stripe-test's) whose
+  // postReservation answer was lost. The id is spelled out: real Beam holds carry -B-TEST since S2.4, which no
+  // Stripe run parses at all (see the next test); this one tests the other-mode intent guard on a parsable id.
   const ref = "MSV-20261005-ACME";
-  await recordIntent(kit.deps.kv, { ref, identifier: holdIdentifier(ref, "beam-playground"), mode: "beam-playground", createdAt: kit.now.ms, reservationId: null });
-  const hold = await orphan(kit, ref, "not_confirmed", "462958", holdIdentifier(ref, "beam-playground"));
+  const identifier = `${ref}-TEST`;
+  await recordIntent(kit.deps.kv, { ref, identifier, mode: "beam-playground", createdAt: kit.now.ms, reservationId: null });
+  const hold = await orphan(kit, ref, "not_confirmed", "462958", identifier);
   kit.now.ms += ORPHAN_STALE_MS;
 
   const stripe = await runSweep(kit.deps);
@@ -181,6 +184,40 @@ test("an orphan whose intent is another mode's belongs to that mode's run: the o
   assert.equal(status(kit, hold), "canceled");
   assert.equal(notes(kit, hold).at(-1), "Hold released by the sweeper: Acme link never created.");
   assert.equal(acme.released, 1);
+});
+
+test("a Beam hold (-B, -B-TEST) is invisible to a Stripe run: never parsed, released or reported, while a Stripe orphan of the same age is (S2.4)", async () => {
+  for (const env of [STRIPE_TEST_ENV, STRIPE_LIVE_ENV]) {
+    const kit = makeKit({ env });
+    const mode = kit.config.paymentMode;
+    const scope = keyScope(mode);
+    // Both Beam tags in both kits: the beam-playground one pending, the beam-live one confirmed, and the reverse.
+    const [pendingTag, confirmedTag] = mode === "stripe-live" ? (["beam-live", "beam-playground"] as const) : (["beam-playground", "beam-live"] as const);
+    const beamPending = await orphan(kit, "MSV-20261005-BMPN", "not_confirmed", "462958", holdIdentifier("MSV-20261005-BMPN", pendingTag));
+    const beamConfirmed = await orphan(kit, "MSV-20261005-BMCF", "confirmed", "462961", holdIdentifier("MSV-20261005-BMCF", confirmedTag));
+    const stripePending = await orphan(kit, "MSV-20261005-STPN", "not_confirmed", "462960");
+    const stripeConfirmed = await orphan(kit, "MSV-20261005-STCF", "confirmed", "462964");
+    const beamNotes = [notes(kit, beamPending).length, notes(kit, beamConfirmed).length];
+    kit.now.ms += ORPHAN_STALE_MS;
+    const noRecordAlerts = () => kit.alerts.filter((a) => a.subject.includes("carries an online-booking id we have no record of"));
+
+    const s = await runSweep(kit.deps);
+    assert.equal(status(kit, beamPending), "not_confirmed", mode);
+    assert.equal(status(kit, beamConfirmed), "confirmed", mode);
+    assert.deepEqual([notes(kit, beamPending).length, notes(kit, beamConfirmed).length], beamNotes, `${mode}: no note on a Beam hold`);
+    assert.equal(await kit.deps.kv.get(keys.noRecordReported(scope, beamConfirmed)), null, mode);
+    assert.deepEqual(
+      kit.logs.filter((l) => [beamPending, beamConfirmed].some((id) => JSON.stringify(l.data ?? {}).includes(id))),
+      [],
+      `${mode}: no log line names a Beam hold`,
+    );
+    assert.equal(s.skippedOtherMode, 0, `${mode}: not even counted as another mode's`);
+    // The control: the same orphans with Stripe's identifiers are released and reported, as today.
+    assert.equal(status(kit, stripePending), "canceled", mode);
+    assert.notEqual(await kit.deps.kv.get(keys.noRecordReported(scope, stripeConfirmed)), null, mode);
+    assert.equal(noRecordAlerts().length, 1, mode);
+    assert.equal(s.released, 1, mode);
+  }
 });
 
 /* --------------------------- the peers' payments --------------------------- */
