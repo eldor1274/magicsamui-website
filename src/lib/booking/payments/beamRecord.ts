@@ -31,12 +31,12 @@
 // record is lost as well (design risks).
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { isBeamLinkId } from "../beam.ts";
 import type { BeamMethodGroup } from "../beam.ts";
 import { isIsoDate } from "../dates.ts";
 import type { KvStore } from "../kv.ts";
 import { BEAM_RECORD_TTL_SECONDS, keys, readJson, writeJson } from "../lock.ts";
 import { isBookingRef } from "../ref.ts";
+import { isBeamLinkId } from "./beamIds.ts";
 import type { PaymentMeta } from "./gateway.ts";
 
 /** What the booking engine knows about one Beam payment link (no personal data). */

@@ -11,6 +11,7 @@ import {
   PAID_UNCONFIRMED_ESCALATE_MS,
   abandonPayment,
   afterPaymentReleased,
+  alertFulfilPaymentFailure,
   alertPaidPaymentStuck,
   feeItemFor,
   fulfilPayment,
@@ -33,7 +34,7 @@ import type { CheckoutSuccess } from "./types.ts";
 
 const money = (satang: number) => `THB ${satangToBahtString(satang)}`;
 
-/** Acme's done-marker TTL (Beam's is 600 days). */
+/** Acme's done-marker TTL (any long one: Beam's is lock.ts BEAM_RECORD_TTL_SECONDS). */
 const ACME_TTL = 600 * 24 * 3600;
 const ACME_FEE_NAME = "Acme handling fee";
 const refundHow = (receipt: GatewayReceipt) => `the full amount by bank transfer (Acme can't refund ${receipt.methodType ?? "?"} payments)`;
@@ -318,6 +319,90 @@ test("texts: the fee-line alerts quote feeItemName", async () => {
   const stuck = kit.alerts.at(-1)!;
   assert.ok(stuck.lines[2].startsWith(`If the "${ACME_FEE_NAME}" line is not on the folio yet`), stuck.lines[2]);
   assert.doesNotMatch(stuck.lines.join("\n"), /Payment processing fee/);
+
+  // The folio already carries additional items: the fee line is skipped, and the alert names the gateway's line.
+  {
+    const h = await held();
+    h.kit.fakeStripe.complete(h.key);
+    h.kit.fakeCb.reservations.get(h.reservationId)!.items.push({ referenceID: null, itemPrice: 50_000, itemName: "Airport transfer" });
+    assert.equal((await fulfilPayment(h.key, h.kit.deps, h.gw)).state, "confirmed");
+    const skipped = h.kit.alerts.find((a) => a.subject === `Booking ${h.ref}: the processing fee line was not added (the folio already has items)`);
+    const lines = skipped?.lines.join("\n") ?? "";
+    assert.match(lines, /before we added our "Acme handling fee" line \(THB [\d,.]+\), so we did NOT add it/);
+    assert.match(lines, /exactly one "Acme handling fee" line of THB [\d,.]+ should be listed/);
+    assert.doesNotMatch(lines, /Payment processing fee/);
+  }
+  // Cloudbeds' own taxes/fees on top of the fee line.
+  {
+    const h = await held();
+    h.kit.fakeStripe.complete(h.key);
+    h.kit.fakeCb.reservations.get(h.reservationId)!.taxesFees = 1350;
+    assert.equal((await fulfilPayment(h.key, h.kit.deps, h.gw)).state, "confirmed");
+    const taxes = h.kit.alerts.find((a) => a.subject === `Booking ${h.ref}: Cloudbeds added taxes/fees on top of our fee line`);
+    const lines = taxes?.lines.join("\n") ?? "";
+    assert.match(lines, /on top of our "Acme handling fee" line/);
+    assert.doesNotMatch(lines, /Payment processing fee/);
+  }
+  // Cloudbeds refuses to record the payment: the CRITICAL's last line names the gateway's line.
+  {
+    const h = await held();
+    h.kit.fakeStripe.complete(h.key);
+    h.kit.fakeCb.failNext("postPayment", "rejected", "Invalid payment type");
+    const error = await fulfilPayment(h.key, h.kit.deps, h.gw).then(
+      () => assert.fail("fulfil should throw"),
+      (e: unknown) => e,
+    );
+    await alertFulfilPaymentFailure(h.kit.deps, h.gw, h.key, error);
+    const refused = h.kit.alerts.find((a) => a.subject === `URGENT: paid booking ${h.ref}: Cloudbeds refused to record the payment`);
+    assert.equal(refused?.severity, "critical");
+    assert.ok(refused?.lines.at(-1)?.startsWith(`If the "${ACME_FEE_NAME}" line is not on the folio yet`), refused?.lines.at(-1));
+    assert.match(refused?.lines.at(-1) ?? "", /Do NOT add the "Acme handling fee" line by hand/);
+    assert.doesNotMatch(refused?.lines.join("\n") ?? "", /Payment processing fee/);
+  }
+});
+
+test("texts: a paid booking whose reservation is no longer pending at the confirm step (step 7) ends with refundHow, else refundWhere", async () => {
+  // A release that raced the payment cancels the hold after step 5 read it, before step 7 confirms it.
+  const raced = async (gwOf: (gw: PaymentGateway) => PaymentGateway) => {
+    const h = await held();
+    h.kit.fakeStripe.complete(h.key);
+    const writer = h.kit.deps.writer;
+    const deps = {
+      ...h.kit.deps,
+      writer: {
+        ...writer,
+        recordPayment: async (input: Parameters<typeof writer.recordPayment>[0]) => {
+          const recorded = await writer.recordPayment(input);
+          h.kit.fakeCb.reservations.get(h.reservationId)!.status = "canceled";
+          return recorded;
+        },
+      },
+    };
+    const out = await fulfilPayment(h.key, deps, gwOf(h.gw));
+    assert.equal(out.state, "needs_attention");
+    assert.equal(h.kit.fakeCb.count("postPayment"), 1, "the payment was recorded before the hold was found cancelled");
+    return { h, reason: out.state === "needs_attention" ? out.reason : "" };
+  };
+  const { h, reason } = await raced((gw) => gw);
+  const pi = h.kit.fakeStripe.session(h.key)!.payment_intent!;
+  assert.match(reason, new RegExp(`^The guest PAID \\(THB [\\d,.]+ via Acme, ${pi}\\) and the payment is recorded on the folio, but Cloudbeds reservation ${h.reservationId} is "canceled"`));
+  assert.ok(reason.endsWith("Check it in Cloudbeds: re-instate and confirm it, or refund the full amount by bank transfer (Acme can't refund QR payments)."), reason);
+  const critical = h.kit.alerts.filter((a) => a.severity === "critical" && a.subject === `URGENT: paid booking ${h.ref} needs attention`);
+  assert.deepEqual(
+    critical.map((a) => a.lines[0]),
+    [reason],
+  );
+  // Without refundHow: refundWhere, as before (and as Stripe, which sets no refundHow).
+  const plain = await raced((gw) => ({ ...gw, text: { ...gw.text, refundHow: undefined } }));
+  assert.ok(plain.reason.endsWith("Check it in Cloudbeds: re-instate and confirm it, or refund in the Acme dashboard."), plain.reason);
+
+  // A status staff set by hand (here no_show) reads the same way.
+  const noShow = await held();
+  noShow.kit.fakeStripe.complete(noShow.key);
+  // The fake's type lists three statuses; Cloudbeds also reports checked_in, checked_out and no_show.
+  (noShow.kit.fakeCb.reservations.get(noShow.reservationId)! as { status: string }).status = "no_show";
+  const out = await fulfilPayment(noShow.key, noShow.kit.deps, noShow.gw);
+  assert.ok((out.state === "needs_attention" ? out.reason : "").endsWith('is "no_show", so it was not confirmed automatically. Check it in Cloudbeds: re-instate and confirm it, or refund the full amount by bank transfer (Acme can\'t refund QR payments).'), JSON.stringify(out));
 });
 
 test("texts: with the MOCK writer and no method configured, the payment is recorded under the gateway's mockMethod", async () => {

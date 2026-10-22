@@ -120,7 +120,9 @@ export interface GatewayText {
   refundWhere: string;
   /**
    * The refund instruction for this payment's method, after "refund " (instead of refundWhere) in the
-   * paid-but-hold-cancelled alert (owner decision 3). Absent (Stripe): refundWhere.
+   * needs_attention reasons of a paid booking whose hold is already cancelled before the fee line (step 5),
+   * or is no longer pending or confirmed at the confirm step (step 7: e.g. cancelled by a release that raced
+   * the payment) - owner decisions 3 and 4. Absent (Stripe): refundWhere.
    */
   refundHow?(receipt: GatewayReceipt): string;
   /** The env var holding the Cloudbeds payment method for this provider's money. */
@@ -170,8 +172,9 @@ export interface PaymentGateway {
   text: GatewayText;
   /**
    * TTL (seconds) of every marker fulfil writes for this provider's payments: the done marker, the paid
-   * markers and the step markers. Absent (Stripe): lock.ts DONE_TTL_SECONDS (30 days). Beam: 600 days, so a
-   * webhook arriving months later can never run fulfil again on a finished booking.
+   * markers and the step markers. Absent (Stripe): lock.ts DONE_TTL_SECONDS (30 days). Beam:
+   * BEAM_RECORD_TTL_SECONDS (708 days), so a webhook arriving months later can never run fulfil again on a
+   * finished booking.
    */
   doneTtlSeconds?: number;
   /**

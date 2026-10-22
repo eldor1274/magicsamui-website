@@ -22,6 +22,7 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { formatDisplayDate } from "./dates.ts";
+import { BEAM_ID_PATTERN, isBeamLinkId } from "./payments/beamIds.ts";
 import { MIN_CHARGE_SATANG, percentOf } from "./quote.ts";
 import type { BeamCredentials } from "./config.ts";
 import type { PaymentStatus, Quote } from "./types.ts";
@@ -208,7 +209,6 @@ const RETRY_JITTER_MIN_MS = 100;
 const RETRY_JITTER_MAX_MS = 400;
 /** Beam's largest page (limit 1-100). */
 const PAGE_SIZE = 100;
-const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** Beam's two API bases and the one hosted-page host each may hand out. */
 const HOSTED_HOST_BY_API_BASE = new Map<string, string>([
@@ -250,10 +250,8 @@ export function basicAuthHeader(merchantId: string, apiKey: string): string {
   return `Basic ${Buffer.from(`${merchantId}:${apiKey}`, "utf8").toString("base64")}`;
 }
 
-/** A Beam payment link id as we accept it in URLs, tokens and keys. */
-export function isBeamLinkId(id: unknown): id is string {
-  return typeof id === "string" && ID_PATTERN.test(id);
-}
+/** A Beam payment link id as we accept it in URLs, tokens and keys (payments/beamIds.ts, which imports nothing). */
+export { isBeamLinkId };
 
 /**
  * The only hosted-page host the given API base may hand out: the live base ->
@@ -903,7 +901,7 @@ export async function getRefund(
   fetchImpl: typeof fetch = fetch,
   opts: BeamCallOptions = {},
 ): Promise<BeamRefund> {
-  if (typeof refundId !== "string" || !ID_PATTERN.test(refundId)) throw new BeamApiError(400, null, "Invalid refund id");
+  if (typeof refundId !== "string" || !BEAM_ID_PATTERN.test(refundId)) throw new BeamApiError(400, null, "Invalid refund id");
   const j = await beamGet(creds, `/api/v1/refunds/${encodeURIComponent(refundId)}`, fetchImpl, opts);
   const refund = parseBeamRefund(j);
   if (!refund || refund.refundId !== refundId) {

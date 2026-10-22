@@ -7,19 +7,24 @@
 // marker that later calls return early on.
 
 import { randomBytes } from "node:crypto";
-import { isBeamLinkId } from "./beam.ts";
+import { BOOKING_WINDOW_MONTHS } from "./config.ts";
 import type { KvStore } from "./kv.ts";
+import { isBeamLinkId } from "./payments/beamIds.ts";
 import { isLiveMode, providerOf } from "./payments/provider.ts";
 import type { PaymentMode } from "./types.ts";
 
 export const LOCK_TTL_SECONDS = 120;
 export const DONE_TTL_SECONDS = 30 * 24 * 3600;
+/** Card networks accept a dispute (chargeback) up to about 120 days after the service date: the check-out. */
+export const BEAM_DISPUTE_WINDOW_DAYS = 120;
 /**
- * How long Beam's payment records, charge index and done markers live: 600 days, so a refund or chargeback
- * months later still maps to its booking (bookings up to 18 months ahead, plus 90 days after check-out: gap
- * review 17). The Stripe keys keep DONE_TTL_SECONDS.
+ * How long Beam's payment records, charge index and done markers live, so a refund or chargeback after the
+ * stay still maps to its booking (gap review 17): the farthest check-out validateStayDates accepts
+ * (BOOKING_WINDOW_MONTHS ahead, counted as 31-day months) plus the dispute window plus 30 days of margin =
+ * 708 days from the write. The record is written when the link is created, the charge index and the done
+ * markers later, so each lives at least that long past the booking day. The Stripe keys keep DONE_TTL_SECONDS.
  */
-export const BEAM_RECORD_TTL_SECONDS = 600 * 24 * 3600;
+export const BEAM_RECORD_TTL_SECONDS = (BOOKING_WINDOW_MONTHS * 31 + BEAM_DISPUTE_WINDOW_DAYS + 30) * 24 * 3600;
 
 /** The set-once "told the owner" markers of the Beam payment flow (keys.beamReported). */
 export type BeamReportKind = "dup-charge" | "record-missing" | "unknown-payment" | "foreign-link" | "refund-ambiguous";
@@ -131,7 +136,7 @@ export const keys = {
  */
 export const BEAM_KEY_PREFIX = "beam:";
 
-/** The KEY of a Beam payment link id (one beam.ts isBeamLinkId accepts). */
+/** The KEY of a Beam payment link id (one isBeamLinkId accepts: payments/beamIds.ts, re-exported by beam.ts). */
 export function beamKeyOf(linkId: string): string {
   return `${BEAM_KEY_PREFIX}${linkId}`;
 }

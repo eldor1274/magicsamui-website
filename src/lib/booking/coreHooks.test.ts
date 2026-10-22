@@ -21,7 +21,7 @@ import { todayInBangkok } from "./dates.ts";
 import { DEFAULT_CLOSED_WORD, DEFAULT_HOLD_NOTE_DEADLINE, startHoldFirstCheckout } from "./holdFirstCheckout.ts";
 import type { CheckoutAdapter, HoldFirstCheckoutContext } from "./holdFirstCheckout.ts";
 import { createMemoryKv } from "./kv.ts";
-import { holdIdentifier, keyScope, keys, parseBeamHoldIdentifier, readJson } from "./lock.ts";
+import { holdIdentifier, keyScope, keys, parseBeamHoldIdentifier, parseHoldIdentifier, readJson } from "./lock.ts";
 import type { FulfilDone } from "./fulfil.ts";
 import type { GatewayPayment, GatewayState, PaymentGateway } from "./payments/gateway.ts";
 import { stripeGateway } from "./payments/stripeGateway.ts";
@@ -31,7 +31,8 @@ import { runStatus } from "./status.ts";
 import { fail, stripeCheckoutAdapter } from "./stripeCheckout.ts";
 import type { StripeCheckoutInput } from "./stripeCheckout.ts";
 import type { CoreDeps } from "./stripeDeps.ts";
-import { STALE_HOLD_MS, runSweep } from "./sweep.ts";
+import { RELEASE_ALERT_AGE_MS, STALE_HOLD_MS, runSweep } from "./sweep.ts";
+import type { RecentPayments } from "./sweep.ts";
 import { GUEST, HONEYMOON, NOW, ORIGIN, TOKEN_SECRET, checkout, makeKit, recordingKv, request, serverQuote, sessionIdOf } from "./testkit.ts";
 import type { Kit } from "./testkit.ts";
 import { createBookingToken, verifyBookingToken } from "./token.ts";
@@ -332,6 +333,146 @@ test("sweep: with ownsOrphans true a run owns the orphans gw.parseHoldId recogni
   assert.equal(status(kit, stripePending), "canceled");
   assert.equal(status(kit, beamConfirmed), "confirmed");
   assert.equal(noRecord().length, 1);
+});
+
+test("sweep: an orphan whose payment step 1 listed but could not read is kept (no release, no guard bypassed), paid or not; a later readable run decides", async () => {
+  const UNREAD = "cs_test_unreadable_link";
+  for (const listedPaid of [false, true]) {
+    const kit = makeKit();
+    const ref = "MSV-20261005-BMRD";
+    const reservationId = await orphan(kit, ref, holdIdentifier(ref, "beam-playground"), "not_confirmed", "462958");
+    kit.now.ms += ORPHAN_STALE_MS;
+    const link = { readable: false };
+    const expired: GatewayPayment = { key: UNREAD, paymentId: UNREAD, state: "expired", meta: null, amountSatang: null, currency: null, attempted: false, receipt: { primaryId: null, description: "" } };
+    const acme = acmeGateway(kit, {
+      parseHoldId: parseBeamHoldIdentifier,
+      // The orphan's link, mapped by its signed note (S4.2): listed, but Beam answers 429 to its read.
+      async sweepRecent() {
+        return [
+          {
+            key: UNREAD,
+            reservationId,
+            listedPaid,
+            read: async () => {
+              if (!link.readable) throw new Error("Acme 429 RATE_LIMIT_ERROR");
+              return expired;
+            },
+          },
+        ];
+      },
+    });
+    const deps = acmeDeps(kit);
+
+    for (let run = 0; run < 2; run++) {
+      const from = kit.alerts.length;
+      const s = await runSweep(deps, acme.gw, { ownsOrphans: true });
+      const label = `listedPaid ${listedPaid}, run ${run}`;
+      assert.deepEqual([s.released, s.errors, s.holdsChecked, s.skippedOpen], [0, 1, 1, 1], label);
+      assert.ok(s.openHolds >= 1, label);
+      assert.equal(status(kit, reservationId), "not_confirmed", label);
+      assert.equal(cancels(kit), 0, label);
+      assert.deepEqual(acme.calls, [], `${label}: no release was attempted, so no guard could be skipped`);
+      assert.ok(kit.logs.some((l) => l.message === "sweep_hold_payment_unread" && l.data?.reservationId === reservationId && l.data?.listedPaid === listedPaid), label);
+      assert.deepEqual(urgent(kit, from), [], `${label}: no CRITICAL (the unit was never put back on sale)`);
+      if (listedPaid && run === 0) {
+        // Step 1 says it is paid and must not be cancelled (once per alert window) - and nothing cancels it.
+        assert.ok(kit.alerts.slice(from).some((a) => a.subject === "Paid booking not yet confirmed in Cloudbeds (retrying)" && a.lines[1].includes("Do NOT cancel the reservation")), label);
+      }
+      kit.now.ms += 10 * 60_000;
+    }
+
+    if (!listedPaid) {
+      // Readable again, and expired: released by step 1 for that payment, guarded.
+      link.readable = true;
+      const s = await runSweep(deps, acme.gw, { ownsOrphans: true });
+      assert.equal(s.released, 1);
+      assert.equal(status(kit, reservationId), "canceled");
+      assert.deepEqual(acme.calls, [`guard ${UNREAD}`]);
+      assert.equal(notes(kit, reservationId).at(-1), "Hold released by the sweeper: Acme link expired.");
+    }
+  }
+
+  // The control: a provider without a release guard (Stripe) keeps its old behaviour - nothing guards that
+  // release, and the hold is released as it was at production main.
+  const kit = makeKit();
+  const ref = "MSV-20261005-BMRE";
+  const reservationId = await orphan(kit, ref, holdIdentifier(ref, "beam-playground"), "not_confirmed", "462958");
+  kit.now.ms += ORPHAN_STALE_MS;
+  const unguarded = acmeGateway(kit, {
+    parseHoldId: parseBeamHoldIdentifier,
+    releaseGuard: undefined,
+    async sweepRecent() {
+      return [{ key: UNREAD, reservationId, listedPaid: false, read: async () => Promise.reject(new Error("Acme 429 RATE_LIMIT_ERROR")) }];
+    },
+  });
+  const s = await runSweep(acmeDeps(kit), unguarded.gw, { ownsOrphans: true });
+  assert.deepEqual([s.released, s.errors], [1, 1]);
+  assert.equal(status(kit, reservationId), "canceled");
+  assert.equal(kit.logs.some((l) => l.message === "sweep_hold_payment_unread"), false);
+});
+
+test("sweep: a payment step 1 read but could not release (the Cloudbeds cancel failed) is not 'unread': the hold side retries it the same run, guarded", async () => {
+  const { kit, gw, calls, key, reservationId } = await held();
+  kit.fakeStripe.expire(key);
+  kit.now.ms += STALE_HOLD_MS + 5 * 60_000;
+  kit.fakeCb.failNext("putReservation", "http500");
+  const s = await runSweep(kit.deps, gw);
+  assert.deepEqual([s.errors, s.released], [1, 1], "step 1's release failed; the hold side's went through");
+  assert.equal(status(kit, reservationId), "canceled");
+  assert.deepEqual(calls.filter((c) => c.startsWith("guard")), [`guard ${key}`, `guard ${key}`]);
+  assert.equal(kit.logs.some((l) => l.message === "sweep_hold_payment_unread"), false);
+});
+
+test("sweep hold side: with two of the provider's payments for one hold, the guard must agree for each (one refusal keeps the hold)", async () => {
+  const { kit, key, reservationId } = await held();
+  kit.fakeStripe.expire(key);
+  kit.now.ms += STALE_HOLD_MS + 5 * 60_000;
+  const asked: string[] = [];
+  const refused = new Set([key]);
+  const { gw } = acmeGateway(kit, {
+    async releaseGuard(k: string) {
+      asked.push(k);
+      return !refused.has(k);
+    },
+  });
+  // The caller's step 1 (opts.recent) lists one payment for the hold; the hold record names another (its own page).
+  const OTHER = "cs_test_second_page";
+  const other: GatewayPayment = { ...(await stripeGateway(kit.deps).get(key)), key: OTHER, paymentId: OTHER, state: "expired" };
+  const recent: RecentPayments = { text: gw.text, byReservation: new Map([[reservationId, [other]]]), triedPaid: new Set(), counts: { sessionsChecked: 1, fulfilled: 0, released: 0, errors: 0 } };
+
+  const kept = await runSweep(kit.deps, gw, { recent });
+  assert.deepEqual(asked, [OTHER, key], "the first payment agrees, the second refuses");
+  assert.equal(kept.released, 0);
+  assert.equal(status(kit, reservationId), "not_confirmed");
+  assert.equal(cancels(kit), 0);
+  assert.equal(await holdIndexed(kit, reservationId), true, "still tracked");
+  assert.ok(kit.logs.some((l) => l.message === "release_refused_still_payable" && l.data?.reservationId === reservationId));
+
+  // Both agree: released.
+  refused.clear();
+  asked.length = 0;
+  const released = await runSweep(kit.deps, gw, { recent });
+  assert.equal(released.released, 1);
+  assert.deepEqual(asked, [OTHER, key]);
+  assert.equal(status(kit, reservationId), "canceled");
+});
+
+test("sweep: an owned orphan whose Cloudbeds cancel fails is alerted with its booking ref, as gw.parseHoldId reads it", async () => {
+  const kit = makeKit();
+  const ref = "MSV-20261005-BMCX";
+  const reservationId = await orphan(kit, ref, holdIdentifier(ref, "beam-playground"), "not_confirmed", "462958");
+  assert.equal(parseHoldIdentifier(kit.fakeCb.reservations.get(reservationId)?.thirdPartyIdentifier), null, "Stripe's parser can't read it");
+  // Past the alert age by Cloudbeds' own clock, read cautiously (up to 7 h young).
+  kit.now.ms += RELEASE_ALERT_AGE_MS + 7 * 3600_000 + 60_000;
+  const acme = acmeGateway(kit, { parseHoldId: parseBeamHoldIdentifier });
+  acme.view.blind = true;
+  kit.fakeCb.failNext("putReservation", "http500");
+
+  const s = await runSweep(acmeDeps(kit), acme.gw, { ownsOrphans: true });
+  assert.deepEqual([s.released, s.errors, s.holdsChecked], [0, 1, 1]);
+  assert.equal(status(kit, reservationId), "not_confirmed");
+  const alert = kit.alerts.find((a) => a.subject === `Hold ${reservationId} could not be released`);
+  assert.ok(alert?.lines[0].startsWith(`The sweeper could not release Cloudbeds reservation ${reservationId} (booking ${ref}), created `), alert?.lines[0]);
 });
 
 test("sweep: the hold-index-size alert is raised by the primary run only (the index is shared by every run)", async () => {

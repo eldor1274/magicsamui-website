@@ -27,6 +27,7 @@ import {
 } from "./beam.ts";
 import type { BeamMethodGroup } from "./beam.ts";
 import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE } from "./config.ts";
+import { percentOf } from "./quote.ts";
 import type { Quote } from "./types.ts";
 
 // Beam's published test vector: https://docs.beamcheckout.com/webhook-authentication.md
@@ -308,6 +309,14 @@ test("group link: the quote's fee must be the fee of the link's method group (ow
   assert.throws(() => buildPaymentLinkRequest(groupInput({ ...twoRoomsPromptPay, totalSatang: 2_472_000, dueNowSatang: 2_472_000 }, "promptpay")), RangeError);
   assert.throws(() => buildPaymentLinkRequest(groupInput({ ...twoRooms, cardFeeSatang: 0, totalSatang: 2_400_000, dueNowSatang: 2_400_000 }, "card_ewallet")), RangeError);
   assert.throws(() => buildPaymentLinkRequest(groupInput({ ...twoRooms, cardFeeSatang: 71_999, totalSatang: 2_471_999, dueNowSatang: 2_471_999 }, "card_ewallet")), RangeError);
+  // The amount is right but the quote's percent is not (it would label the line 'Payment processing fee (4%)').
+  const wrongPct: Quote = { ...twoRooms, cardFeePct: 4, cardFeeSatang: percentOf(twoRooms.feeBaseSatang, 3) };
+  assert.equal(wrongPct.cardFeeSatang, 72_000);
+  assert.equal(wrongPct.totalSatang, wrongPct.feeBaseSatang + wrongPct.cardFeeSatang);
+  assert.throws(
+    () => buildPaymentLinkRequest(groupInput(wrongPct, "card_ewallet")),
+    (e: unknown) => e instanceof RangeError && e.message === "Beam card_ewallet link: the quote's fee is 4% (72000 satang), not the 3% (72000 satang) this method group must carry",
+  );
 
   // The owner's override BEAM_PROMPTPAY_FEE_PCT=3 (S3.2): the expected fee follows it, so a 3% PromptPay link
   // is built with its fee line, and the fee-free quote is then the wrong one.

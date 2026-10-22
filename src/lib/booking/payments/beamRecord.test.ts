@@ -1,6 +1,7 @@
 // Beam keys, payment record, signed note and hold identifiers (design S2.4):
 // - every Stripe key name, TTL and hold identifier stays byte-identical, and every Beam key carries "beam:";
-// - the PaymentRecord round-trips with its 600-day TTL, stores only its own fields (no personal data) and
+// - the PaymentRecord round-trips with its TTL (past the farthest check-out plus the dispute window), stores
+//   only its own fields (no personal data) and
 //   reads back null when missing, malformed or another link's;
 // - the signed internalNote round-trips; any edited field, a structural change or another secret fails;
 //   it stays within 500 characters and carries no email or phone;
@@ -9,10 +10,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import { BOOKING_WINDOW_MONTHS, MAX_NIGHTS } from "../config.ts";
+import { addMonths, validateStayDates } from "../dates.ts";
 import { createMemoryKv } from "../kv.ts";
 import type { KvStore } from "../kv.ts";
 import {
   BEAM_HOLD_SUFFIX,
+  BEAM_DISPUTE_WINDOW_DAYS,
   BEAM_KEY_PREFIX,
   BEAM_RECORD_TTL_SECONDS,
   DONE_TTL_SECONDS,
@@ -211,20 +215,53 @@ test("a Beam payment key is 'beam:' + the link id; linkIdOf reads only that", ()
 
 /* ---------------------------------- record ---------------------------------- */
 
-test("writeRecord stores exactly the record's own fields for 600 days; readRecord reads it back until then", async () => {
+test("writeRecord stores exactly the record's own fields for 708 days; readRecord reads it back until then", async () => {
   const now = { ms: T0 };
   const kv = recordingKv(createMemoryKv(() => now.ms));
   await writeRecord(kv, { ...RECORD, ...PII } as PaymentRecord);
-  assert.equal(BEAM_RECORD_TTL_SECONDS, 600 * 24 * 3600);
-  assert.deepEqual(kv.writes, [{ op: "set", key: "msv:beam:pay:rGtqz6DafS", value: RECORD_JSON, ttl: 51_840_000 }]);
+  assert.equal(BEAM_RECORD_TTL_SECONDS, 708 * 24 * 3600, "18 months of 31 days + the 120-day dispute window + 30 days");
+  assert.equal(BEAM_DISPUTE_WINDOW_DAYS, 120);
+  assert.deepEqual(kv.writes, [{ op: "set", key: "msv:beam:pay:rGtqz6DafS", value: RECORD_JSON, ttl: 61_171_200 }]);
   assert.ok(!RECORD_JSON.includes("@") && !RECORD_JSON.includes("+66"), "no personal data is stored");
 
   assert.deepEqual(await readRecord(kv, LINK_ID), RECORD);
-  // Bookings up to 18 months ahead plus 90 days after check-out: still there a second before 600 days, gone at 600 days.
+  // Still there a second before the TTL, gone at the TTL.
   now.ms = T0 + BEAM_RECORD_TTL_SECONDS * 1000 - 1000;
   assert.deepEqual(await readRecord(kv, LINK_ID), RECORD);
   now.ms = T0 + BEAM_RECORD_TTL_SECONDS * 1000;
   assert.equal(await readRecord(kv, LINK_ID), null);
+});
+
+test("the record TTL covers the farthest check-out validateStayDates accepts plus the 120-day dispute window, on every booking day", async () => {
+  const DAY = 86_400_000;
+  const limits = (today: string) => ({ today, maxNights: MAX_NIGHTS, bookingWindowMonths: BOOKING_WINDOW_MONTHS });
+  let shortest = Number.POSITIVE_INFINITY;
+  // Every booking day of four years (a leap year included).
+  for (let day = Date.parse("2026-01-01T00:00:00Z"); day < Date.parse("2030-01-01T00:00:00Z"); day += DAY) {
+    const today = new Date(day).toISOString().slice(0, 10);
+    const checkOut = addMonths(today, BOOKING_WINDOW_MONTHS);
+    const checkIn = new Date(Date.parse(`${checkOut}T00:00:00Z`) - DAY).toISOString().slice(0, 10);
+    const dayAfter = new Date(Date.parse(`${checkOut}T00:00:00Z`) + DAY).toISOString().slice(0, 10);
+    assert.equal(validateStayDates(checkIn, checkOut, limits(today)), null, `${today}: ${checkOut} is the farthest check-out`);
+    assert.equal(validateStayDates(checkIn, dayAfter, limits(today)), "beyond_booking_window", `${today}: ${dayAfter} is refused`);
+    // Written at the earliest moment of the Bangkok booking day (00:00 +07:00); needed until the END of the
+    // dispute window's last day (check-out day + 120 days, 24:00 +07:00).
+    const writtenAt = Date.parse(`${today}T00:00:00+07:00`);
+    const neededUntil = Date.parse(`${checkOut}T00:00:00+07:00`) + (BEAM_DISPUTE_WINDOW_DAYS + 1) * DAY;
+    const spare = writtenAt + BEAM_RECORD_TTL_SECONDS * 1000 - neededUntil;
+    assert.ok(spare >= 0, `${today}: the record would expire ${Math.ceil(-spare / DAY)} days too early`);
+    shortest = Math.min(shortest, spare);
+  }
+  assert.ok(shortest >= 20 * DAY, `at least 20 days of margin on every booking day (${shortest / DAY} days)`);
+
+  // The edge case of round-2 triage: booked on 22 Oct 2026 for a stay ending 22 Apr 2028, a chargeback 120 days later.
+  const now = { ms: Date.parse("2026-10-22T03:00:00Z") };
+  const kv = createMemoryKv(() => now.ms);
+  const farthest = addMonths("2026-10-22", BOOKING_WINDOW_MONTHS);
+  assert.equal(farthest, "2028-04-22");
+  await writeRecord(kv, { ...RECORD, checkIn: "2028-04-19", checkOut: farthest, createdAt: now.ms, expiresAt: now.ms + 30 * 60_000 });
+  now.ms = Date.parse(`${farthest}T23:59:59+07:00`) + BEAM_DISPUTE_WINDOW_DAYS * DAY;
+  assert.equal((await readRecord(kv, LINK_ID))?.checkOut, farthest, "still mapped to its booking at the end of the dispute window");
 });
 
 test("readRecord: null when the record is missing, unreadable, malformed or another link's; a Redis failure throws", async () => {

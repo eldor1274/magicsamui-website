@@ -47,7 +47,12 @@
 // - gw.releaseGuard is asked inside the release lock before every release of a
 //   hold whose payment this run saw (releaseHold's stillReleasable), and
 //   fulfil.ts afterPaymentReleased follows every such release (the owner is
-//   warned when the payment was still unconfirmed at the bank).
+//   warned when the payment was still unconfirmed at the bank);
+// - with gw.releaseGuard set, a hold whose payment step 1 listed but could not
+//   read (RecentPayments.unread: a 429 or 5xx) is never released by that run,
+//   whatever the hold side sees: its state is unknown (it may be paid, and the
+//   listing may even say so), so the next run decides. Stripe sets no guard and
+//   keeps its old behaviour (round-2 triage).
 //
 // The run only counts as a sweep (msv:sweep:last, which checkout watches) when
 // its Cloudbeds side worked: a sweeper that can't list Cloudbeds reservations
@@ -214,6 +219,12 @@ export interface RecentPayments {
   byReservation: Map<string, GatewayPayment[]>;
   /** Paid (or refunded) payments step 1 already ran fulfil for (successfully or not). */
   triedPaid: Set<string>;
+  /**
+   * The reservations of the payments step 1 listed but could not read (listed.read() threw), with whether the
+   * listing said one of them was paid. With gw.releaseGuard set, the run's hold side never releases them.
+   * Absent on a view built by hand (none).
+   */
+  unread?: Map<string, { listedPaid: boolean }>;
   /** Step 1's share of the run's summary. */
   counts: Pick<SweepSummary, "sessionsChecked" | "fulfilled" | "released" | "errors">;
 }
@@ -260,12 +271,15 @@ export function listSweepReservations(deps: Pick<CoreDeps, "writer">, nowMs: num
  * run fails, as before the gateway).
  */
 export async function sweepRecentPayments(deps: CoreDeps, gw: PaymentGateway, nowMs: number = nowOf(deps)): Promise<RecentPayments> {
-  const recent: RecentPayments = { text: gw.text, byReservation: new Map(), triedPaid: new Set(), counts: { sessionsChecked: 0, fulfilled: 0, released: 0, errors: 0 } };
+  const unread = new Map<string, { listedPaid: boolean }>();
+  const recent: RecentPayments = { text: gw.text, byReservation: new Map(), triedPaid: new Set(), unread, counts: { sessionsChecked: 0, fulfilled: 0, released: 0, errors: 0 } };
   const { byReservation, triedPaid, counts } = recent;
   for (const listed of await gw.sweepRecent(nowMs - SWEEP_LOOKBACK_MS)) {
     counts.sessionsChecked++;
+    let read = false;
     try {
       const payment = await listed.read();
+      read = true;
       const list = byReservation.get(listed.reservationId) ?? [];
       list.push(payment);
       byReservation.set(listed.reservationId, list);
@@ -289,6 +303,8 @@ export async function sweepRecentPayments(deps: CoreDeps, gw: PaymentGateway, no
       }
     } catch (e) {
       counts.errors++;
+      // Its state is unknown this run: a guarded provider's hold side must not release its hold (see runSweep).
+      if (!read) unread.set(listed.reservationId, { listedPaid: (unread.get(listed.reservationId)?.listedPaid ?? false) || listed.listedPaid });
       if (listed.listedPaid) await alertFulfilPaymentFailure(deps, gw, listed.key, e).catch(() => undefined);
       else deps.log("sweep_session_error", { sessionId: listed.key, error: redactForLog(e instanceof Error ? e.message : String(e)) });
     }
@@ -567,6 +583,16 @@ export async function runSweep(deps: CoreDeps, gw: PaymentGateway = stripeGatewa
       const elsewhere = peers.flatMap((p) => p.byReservation.get(reservationId) ?? []).filter((x) => x.state !== "expired" && x.state !== "failed");
       if (elsewhere.length > 0) {
         deps.log("sweep_hold_left_to_peer", { reservationId, states: elsewhere.map((x) => x.state) });
+        summary.skippedOpen++;
+        summary.openHolds++;
+        continue;
+      }
+      // A guarded provider (Beam) listed a payment for it in step 1 that could not be read (a 429 or 5xx): it
+      // may be payable or paid - the listing may even say paid - and no guard would be asked for it (an orphan
+      // has no record to read it through). Kept for the next run. Stripe sets no guard: unchanged.
+      const unread = gw.releaseGuard ? recent.unread?.get(reservationId) : undefined;
+      if (unread) {
+        deps.log("sweep_hold_payment_unread", { reservationId, listedPaid: unread.listedPaid });
         summary.skippedOpen++;
         summary.openHolds++;
         continue;

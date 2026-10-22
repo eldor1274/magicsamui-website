@@ -429,7 +429,7 @@ async function fulfilLocked(key: string, deps: CoreDeps, gw: PaymentGateway): Pr
       gw,
       key,
       meta,
-      `The guest PAID (${money(meta.totalSatang)} via ${brand}, ${pi}) and the payment is recorded on the folio, but Cloudbeds reservation ${reservationId} is "${String(current.status).slice(0, 30)}", so it was not confirmed automatically. Check it in Cloudbeds: re-instate and confirm it, or refund ${text.refundWhere}.`,
+      `The guest PAID (${money(meta.totalSatang)} via ${brand}, ${pi}) and the payment is recorded on the folio, but Cloudbeds reservation ${reservationId} is "${String(current.status).slice(0, 30)}", so it was not confirmed automatically. Check it in Cloudbeds: re-instate and confirm it, or refund ${text.refundHow?.(payment.receipt) ?? text.refundWhere}.`,
     );
   }
   const feeWasMissing = !feeOk;
