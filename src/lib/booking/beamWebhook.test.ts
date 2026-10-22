@@ -543,7 +543,7 @@ test("refund.succeeded: the info alert keyed refund:{id}:SUCCEEDED with the foli
   assert.equal(withSubject(kit2, /^Beam refund done/)[0].subject, `Beam refund done for booking ${b.h.ref} (${money(half)})`);
 });
 
-test("a signed refund.failed body sent with the header refund.succeeded: no 'done' alert, the FAILED warning, the disagreement logged", async () => {
+test("a signed refund.failed body sent with the header refund.succeeded: no 'done' alert, the FAILED CRITICAL, the disagreement logged", async () => {
   const kit = makeBeamKit();
   const { h, chargeId } = await confirmedBooking(kit);
   const refundId = kit.fakeBeam.refund(chargeId, undefined, { status: "FAILED", failureCode: "RE_PROCESSING_FAILED" });
@@ -552,12 +552,37 @@ test("a signed refund.failed body sent with the header refund.succeeded: no 'don
   assert.equal(withSubject(kit, /refund done/i).length, 0);
   const failed = withSubject(kit, /^Beam refund FAILED/);
   assert.equal(failed.length, 1);
-  assert.equal(failed[0].severity, "warning");
+  assert.equal(failed[0].severity, "critical", "the guest is still owed money: stored and re-sent until delivered (round 5)");
   assert.equal(failed[0].subject, `Beam refund FAILED for booking ${h.ref}`);
   assert.deepEqual(failed[0].lines, [
     `Refund ${refundId} of ${money(h.quote.totalSatang)} on charge ${chargeId} failed (RE_PROCESSING_FAILED). Try again in Lighthouse; if Beam keeps refusing (low balance or the method), pay the guest back by bank transfer.`,
   ]);
   assert.deepEqual(logged(kit, "beam_webhook_event_mismatch").map((l) => l.data), [{ event: "refund.succeeded", kind: "refund", expected: "refund.failed" }]);
+});
+
+test("refund.failed while the mail relay is down: 200 (Beam won't retry), the CRITICAL is stored and the next sweeper run delivers it; only an alert that throws answers 503", async () => {
+  const kit = makeBeamKit();
+  const { h, chargeId } = await confirmedBooking(kit);
+  const refundId = kit.fakeBeam.refund(chargeId, undefined, { status: "FAILED", failureCode: "RE_INSUFFICIENT_BALANCE" });
+  const ev = kit.fakeBeam.signedEvent("refund.failed", refundId);
+  kit.mail.ok = false;
+  assert.deepEqual(await deliver(kit, ev), { status: 200, body: "refund failed" });
+  assert.equal(withSubject(kit, /^Beam refund FAILED/).length, 0);
+  assert.notEqual(await kit.deps.kv.get(keys.pendingAlert(SCOPE, `refund:${refundId}:FAILED`)), null, "stored under its key for the sweeper");
+  kit.mail.ok = true;
+  kit.now.ms += 10 * MIN;
+  const s = await runSweep(kit.deps, kit.gw);
+  assert.equal(s.undeliveredAlerts, 1);
+  const failed = withSubject(kit, /^Beam refund FAILED/);
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].severity, "critical");
+  assert.equal(failed[0].subject, `Beam refund FAILED for booking ${h.ref}`);
+  assert.ok(failed[0].lines[0].includes("failed (RE_INSUFFICIENT_BALANCE)"), failed[0].lines[0]);
+  assert.equal(await kit.deps.kv.get(keys.pendingAlert(SCOPE, `refund:${refundId}:FAILED`)), null, "delivered: no longer pending");
+  // A deps.alert that throws (never the production alerter) is the one case Beam is asked to retry.
+  const throwing: BeamGatewayDeps = { ...kit.deps, alert: async () => Promise.reject(new Error("alert down")) };
+  assert.deepEqual(await deliver(kit, ev, throwing), { status: 503, body: "refund alert failed - retry" });
+  assert.equal(logged(kit, "beam_webhook_alert_failed").length, 1);
 });
 
 test("a refund's status is Beam's, never the body's: a PENDING refund tells nothing; unreadable -> 503; unknown -> not ours", async () => {

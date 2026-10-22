@@ -586,18 +586,26 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
   /**
    * One CRITICAL per link (keys.beamReported 'merchant-switch'): a link of ours created under another Beam merchant
    * than BEAM_MERCHANT_ID, which Beam answers 404 for. The guest may have paid, or may still pay, on that
-   * merchant's page; nobody here can see it, so the hold is kept and the owner checks by hand.
+   * merchant's page; nobody here can see it, so the hold is kept and the owner checks by hand. A released link
+   * (the late or pending watch) has no hold left: a late payment on it can't be seen any more (round 5).
    */
-  async function reportOtherMerchant(t: Pick<TrackedLink, "linkId" | "facts" | "merchantId">): Promise<void> {
+  async function reportOtherMerchant(t: Pick<TrackedLink, "linkId" | "facts" | "merchantId" | "watched">): Promise<void> {
     if (!(await firstReport("merchant-switch", t.linkId))) return;
     const { ref, reservationId } = t.facts;
-    deps.log("beam_link_other_merchant", { linkId: t.linkId, ref });
+    const old = shown(t.merchantId);
+    deps.log("beam_link_other_merchant", { linkId: t.linkId, ref, released: t.watched });
+    const why = `Beam payment link ${t.linkId} (booking ${ref}, Cloudbeds reservation ${reservationId}) was created under Beam merchant ${old}, but this deployment's BEAM_MERCHANT_ID is ${shown(beam.merchantId)}, so Beam answers that the link does not exist.`;
     await deps.alert(
       `URGENT: Beam payment link ${t.linkId} for booking ${ref} belongs to another Beam merchant`,
-      [
-        `Beam payment link ${t.linkId} (booking ${ref}, Cloudbeds reservation ${reservationId}) was created under Beam merchant ${shown(t.merchantId)}, but this deployment's BEAM_MERCHANT_ID is ${shown(beam.merchantId)}, so Beam answers that the link does not exist. The sweeper can't tell whether the guest paid: the hold is kept and nothing was confirmed, cancelled or refunded.`,
-        `Check the link in the Beam Lighthouse of merchant ${shown(t.merchantId)}: if the guest paid, confirm reservation ${reservationId} by hand (or refund the full amount there); if nobody paid, disable the link there and cancel reservation ${reservationId} in Cloudbeds. Never change BEAM_MERCHANT_ID while payment links are still open.`,
-      ],
+      t.watched
+        ? [
+            `${why} Its hold was already released (no payment had succeeded when its time ran out), but the sweeper can no longer see a late payment on it.`,
+            `Check the link in the Beam Lighthouse of merchant ${old} until it has no pending payment: if the guest paid late, re-book the guest if the unit is still free, otherwise refund the full amount there. Never change BEAM_MERCHANT_ID while payment links are still open or watched.`,
+          ]
+        : [
+            `${why} The sweeper can't tell whether the guest paid: the hold is kept and nothing was confirmed, cancelled or refunded.`,
+            `Check the link in the Beam Lighthouse of merchant ${old}: if the guest paid, confirm reservation ${reservationId} by hand (or refund the full amount there); if nobody paid, disable the link there and cancel reservation ${reservationId} in Cloudbeds. Never change BEAM_MERCHANT_ID while payment links are still open.`,
+          ],
       { key: `beam-merchant-switch:${t.linkId}`, severity: "critical" },
     );
   }
@@ -610,7 +618,7 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
    * reading fails like any other (its hold is kept: RecentPayments.unread; told after 60 minutes of failures).
    * A link of another merchant also raises its CRITICAL (best effort: the hold is kept either way).
    */
-  async function missingProblem(t: Pick<TrackedLink, "linkId" | "facts" | "merchantId">): Promise<BeamApiError | null> {
+  async function missingProblem(t: Pick<TrackedLink, "linkId" | "facts" | "merchantId" | "watched">): Promise<BeamApiError | null> {
     if (t.merchantId !== beam.merchantId) {
       await reportOtherMerchant(t).catch((e: unknown) => deps.log("beam_merchant_alert_failed", { linkId: t.linkId, ...beamErrorInfo(e) }));
       return new BeamApiError(0, "LINK_OF_ANOTHER_MERCHANT", `Beam payment link ${t.linkId} was created under another Beam merchant than BEAM_MERCHANT_ID`);

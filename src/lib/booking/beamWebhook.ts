@@ -21,14 +21,18 @@
 //     alertFulfilPaymentFailure): the sweeper retries the paid entry on its next run (money review 7 and 12).
 //     Only a failure to write them answers 503, so a paid event is never acknowledged before it is durable.
 //   - open / processing -> 200 (a charge.failed leaves the link ACTIVE so the guest can retry).
-//   - expired (or failed) -> releasePayment (guarded by gw.releaseGuard), best effort -> 200: the sweeper owns
-//     releases (Beam sends no expiry event).
+//   - expired (or failed, which beamPaymentState never answers) -> releasePayment (guarded by gw.releaseGuard)
+//     with the reason 'Beam webhook: payment link expired', best effort -> 200: the sweeper owns releases (Beam
+//     sends no expiry event).
 //   - refunded -> fulfilPayment (needs_attention once, nothing once done) -> 200.
 // - Refund events: getRefund(refundId) for the real status (503 when it can't be read; a refund Beam does not
 //   know -> 200 not ours). The booking is found through the charge index (keys.beamCharge, 708 days), else the
 //   refund's referenceId (an MSV ref: its pointer and record when they still exist). The owner's alert is keyed
 //   refund:{refundId}:{status}: SUCCEEDED -> info 'Beam refund done for booking {ref} (THB x)' with the folio
-//   steps; FAILED -> warning with the bank-transfer fallback (gap review 17); PENDING -> nothing yet.
+//   steps; FAILED -> CRITICAL with the bank-transfer fallback (gap review 17): the guest is still owed money and
+//   this answer is 200 (Beam does not retry), so the alert is stored and re-sent by the sweeper until a mail goes
+//   out (round 5); PENDING -> nothing yet. Only a deps.alert that throws (never the production alerter, which
+//   stores a critical alert first and reports a failed send as false) answers 503.
 // - Transaction events: set-once keys.beamTxn (90 days), then one log line with the type, gross, fee, VAT, net,
 //   currency and sourceId (no personal data). A CHARGEBACK raises CRITICAL 'URGENT: chargeback on Beam payment
 //   for booking {ref}' (the booking from the charge index, the link's record or the referenceId).
@@ -389,8 +393,9 @@ async function handleRefunded(ctx: Ctx, key: string, linkId: string, meta: Payme
 async function handleClosed(ctx: Ctx, key: string, linkId: string, meta: PaymentMeta, state: "expired" | "failed"): Promise<BeamWebhookResult> {
   const { deps, gw } = ctx;
   try {
-    // Guarded: a charge that became payable or paid since this reading keeps the hold (money review 9).
-    const released = await releasePayment(key, deps, gw, `Beam webhook: payment link ${state}`);
+    // Guarded: a charge that became payable or paid since this reading keeps the hold (money review 9). 'failed' is
+    // handled as 'expired' (design S4.4 (e)): a link that can never be paid.
+    const released = await releasePayment(key, deps, gw, "Beam webhook: payment link expired");
     deps.log("beam_webhook_payment", { linkId, ref: meta.ref, state, outcome: released.state });
     return { status: 200, body: released.state };
   } catch (e) {
@@ -468,10 +473,11 @@ async function handleRefund(ctx: Ctx, refundId: string): Promise<BeamWebhookResu
         [
           `Refund ${refundId} of ${amount} on charge ${chargeId} failed (${refund.failureCode ? shown(refund.failureCode) : "no failure code"}). Try again in Lighthouse; if Beam keeps refusing (low balance or the method), pay the guest back by bank transfer.`,
         ],
-        { key: `refund:${refundId}:FAILED`, severity: "warning" },
+        { key: `refund:${refundId}:FAILED`, severity: "critical" },
       );
     }
   } catch (e) {
+    // Only a deps.alert that throws gets here (the production alerter never does): Beam's retry tells the owner.
     deps.log("beam_webhook_alert_failed", { kind: "refund", refundId, error: errorText(e) });
     return { status: 503, body: "refund alert failed - retry" };
   }

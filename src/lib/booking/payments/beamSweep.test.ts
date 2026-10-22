@@ -705,6 +705,32 @@ test("a merchant switch while links are open: a paid link (webhook lost) and a p
   }
 });
 
+test("a merchant switch with a released link still watched: one CRITICAL saying a late payment on it can't be seen any more", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit, "promptpay");
+  kit.now.ms += 5 * MIN;
+  kit.fakeBeam.payPending(h.linkId, "QR_PROMPT_PAY");
+  kit.now.ms = expiryOf(kit, h.linkId) + GRACE_MS + MIN;
+  assert.equal((await sweep(kit)).released, 1);
+  kit.now.ms += 10 * MIN;
+  await sweep(kit);
+  assert.equal(await inWatch(kit, h.linkId), true);
+  const after = switchedMerchant(kit);
+  kit.now.ms += 10 * MIN;
+  await runSweep(after.deps, after.gw);
+  kit.now.ms += PAST_ALERT_WINDOW_MS;
+  await runSweep(after.deps, after.gw);
+  const urgent = withSubject(kit, /belongs to another Beam merchant$/);
+  assert.equal(urgent.length, 1, "once per link");
+  assert.equal(urgent[0].severity, "critical");
+  assert.deepEqual(urgent[0].lines, [
+    `Beam payment link ${h.linkId} (booking ${h.ref}, Cloudbeds reservation ${h.reservationId}) was created under Beam merchant ${BEAM_MERCHANT_ID}, but this deployment's BEAM_MERCHANT_ID is ${NEW_MERCHANT_ID}, so Beam answers that the link does not exist. Its hold was already released (no payment had succeeded when its time ran out), but the sweeper can no longer see a late payment on it.`,
+    `Check the link in the Beam Lighthouse of merchant ${BEAM_MERCHANT_ID} until it has no pending payment: if the guest paid late, re-book the guest if the unit is still free, otherwise refund the full amount there. Never change BEAM_MERCHANT_ID while payment links are still open or watched.`,
+  ]);
+  assert.ok(logged(kit, "beam_link_other_merchant").some((l) => l.data?.linkId === h.linkId && l.data?.released === true));
+  assert.equal(res(kit, h.reservationId).status, "canceled");
+});
+
 /** The kit's gateway whose fetch answers Beam's unfiltered charge list (the scan) with `gate.status` while `gate.on`; link reads work. */
 function failingScan(kit: BeamKit, status = 503, errorCode = "INTERNAL_SERVER_ERROR"): { deps: BeamGatewayDeps; gw: BeamGateway; gate: { on: boolean; status: number; errorCode: string } } {
   const gate = { on: true, status, errorCode };

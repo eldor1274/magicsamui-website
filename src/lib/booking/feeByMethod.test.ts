@@ -21,7 +21,9 @@ import type { BookingConfig, Env } from "./config.ts";
 import { addDays } from "./dates.ts";
 import { demoInventory } from "./demoProvider.ts";
 import { computeQuote, feePctFor, isPayMethod, pagePayMethodOffered, payMethodOffered, percentOf } from "./quote.ts";
-import { HONEYMOON, NOW as KIT_NOW, ORIGIN, STRIPE_LIVE_ENV, STRIPE_TEST_ENV, TOKEN_SECRET, makeKit, refCharSequence, request, serverQuote } from "./testkit.ts";
+import { runAbandon } from "./abandon.ts";
+import { runStatus } from "./status.ts";
+import { HONEYMOON, NOW as KIT_NOW, ORIGIN, STRIPE_LIVE_ENV, STRIPE_TEST_ENV, TOKEN_SECRET, checkout, makeKit, refCharSequence, request, serverQuote, sessionIdOf } from "./testkit.ts";
 import { createBookingToken, isBookingSummary, verifyBookingToken } from "./token.ts";
 import type { BookingSummary, CartItemInput, PayMethod, Quote, RoomOffer } from "./types.ts";
 import { PAY_METHOD_UNREADABLE, parseCheckoutRequest } from "./validate.ts";
@@ -498,4 +500,69 @@ test("old tokens without payMethod still verify: every booking token the golden 
     assert.ok(v.ok, String(recorded.ref));
     assert.equal("payMethod" in v.payload.booking, false);
   }
+});
+
+test("a Stripe or demo token carrying any payMethod verifies, and status and abandon answer it exactly like one without (only Beam tokens are strict)", async () => {
+  // The shape check: on Stripe and the demo the field is never judged (production main had no such check at all).
+  for (const paymentMode of ["stripe-live", "stripe-test", "stripe-mock", "demo"] as const) {
+    for (const v of ANY_PAY_METHOD) {
+      const booking = { ...SUMMARY, paymentMode, payMethod: v };
+      assert.equal(isBookingSummary(booking), true, `${paymentMode} ${JSON.stringify(v)}`);
+      assert.ok(verifyBookingToken(createBookingToken(booking as unknown as BookingSummary, null, TOKEN_SECRET, 3600, NOW), TOKEN_SECRET, NOW + 1000).ok, paymentMode);
+    }
+  }
+  for (const paymentMode of ["beam-playground", "beam-live"] as const) {
+    assert.equal(isBookingSummary({ ...SUMMARY, paymentMode, payMethod: "bogus" }), false, `${paymentMode}: strict`);
+    assert.equal(isBookingSummary({ ...SUMMARY, paymentMode, payMethod: "promptpay" }), true, paymentMode);
+  }
+
+  /** The same token with `payMethod` added to its booking (signed as the server signed it). */
+  const withPayMethod = (t: string, secret: string, payMethod: unknown): string => {
+    const v = verifyBookingToken(t, secret, KIT_NOW);
+    assert.ok(v.ok);
+    const booking = { ...v.payload.booking, payMethod } as unknown as BookingSummary;
+    return createBookingToken(booking, v.payload.paymentLinkId, secret, v.payload.exp - v.payload.iat, v.payload.iat * 1000);
+  };
+  /** An answer as compared: the status answer echoes the token's booking (as production main does), its payMethod aside. */
+  const shown = (answer: unknown) => JSON.stringify(answer, (key, value: unknown) => (key === "payMethod" ? undefined : value));
+
+  // A real Stripe hold (test and live): status, then abandon, each on its own kit with the same refs.
+  for (const [name, env] of [["stripe-test", STRIPE_TEST_ENV], ["stripe-live", STRIPE_LIVE_ENV]] as const) {
+    const runs: { status: string; abandon: string; cb: string[]; stripe: string[] }[] = [];
+    for (const payMethod of [undefined, "bogus", null, 0] as const) {
+      const kit = makeKit({ env, pickRefChar: refCharSequence() });
+      const res = await checkout(kit);
+      assert.equal(res.status, 200, name);
+      const sessionId = sessionIdOf(res.body);
+      const session = kit.fakeStripe.session(sessionId);
+      assert.ok(session);
+      const plain = new URL(session.success_url.replace("{CHECKOUT_SESSION_ID}", "x")).searchParams.get("t") ?? "";
+      const t = payMethod === undefined ? plain : withPayMethod(plain, kit.config.tokenSecret, payMethod);
+      const status = await runStatus({ t, p: null, l: null, s: sessionId }, { config: kit.config, stripe: kit.deps, nowMs: KIT_NOW });
+      assert.equal(status.status, 200, `${name} ${String(payMethod)}: ${JSON.stringify(status.body)}`);
+      const abandon = await runAbandon({ t }, { config: kit.config, stripe: kit.deps, nowMs: KIT_NOW });
+      runs.push({
+        status: shown(status),
+        abandon: shown(abandon),
+        cb: kit.fakeCb.calls.map((c) => c.method),
+        stripe: kit.fakeStripe.calls.map((c) => `${c.method} ${c.path}`.replace(/cs_(?:test|live)_fake_[0-9a-f]+/, "{session}")),
+      });
+    }
+    assert.deepEqual(JSON.parse(runs[0].abandon), { status: 200, body: { ok: true, state: "released" } }, name);
+    for (const run of runs.slice(1)) assert.deepEqual(run, runs[0], name);
+  }
+
+  // The demo: no hold, the status comes from the token alone; abandon does not apply.
+  const demo = getBookingConfig({ BOOKING_TOKEN_SECRET: TOKEN_SECRET });
+  assert.equal(demo.paymentMode, "demo");
+  const demoBooking: BookingSummary = { ...SUMMARY, paymentMode: "demo" };
+  const demoRuns: string[] = [];
+  for (const payMethod of [undefined, "bogus", ["promptpay"]] as const) {
+    const t = createBookingToken((payMethod === undefined ? demoBooking : { ...demoBooking, payMethod }) as unknown as BookingSummary, null, TOKEN_SECRET, 3600, NOW);
+    const status = await runStatus({ t, p: null, l: null }, { config: demo, nowMs: NOW + 1000 });
+    assert.equal(status.status, 200, String(payMethod));
+    const abandon = await runAbandon({ t }, { config: demo, nowMs: NOW + 1000 });
+    demoRuns.push(shown({ status, abandon }));
+  }
+  for (const run of demoRuns.slice(1)) assert.equal(run, demoRuns[0]);
 });
