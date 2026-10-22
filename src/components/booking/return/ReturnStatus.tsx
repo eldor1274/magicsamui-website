@@ -1061,8 +1061,9 @@ export default function ReturnStatus({
   const guest = useMemo(() => (hydrated ? (readPersistedBooking()?.guest ?? null) : null), [hydrated]);
   const guestName = guest?.firstName.trim() || null;
 
-  // Poll while the payment (or, on Stripe, the Cloudbeds confirmation) is still running. Stripe: every
-  // ~3 s for 3 minutes; Beam: 1s, then 2s, 4s, 8s ... capped at 30s, for about 2 minutes (pollPlan).
+  // Poll while the payment (or the Cloudbeds confirmation) is still running (pollPlan). Stripe: every ~3 s for
+  // 3 minutes; Beam: 2 s, then each wait x1.5 up to 15 s, for 15 minutes; the demo: 1 s, then 2 s, 4 s, 8 s ...
+  // capped at 30 s, for about 2 minutes.
   useEffect(() => {
     if (!polling || !plan || !token || exhausted || kind === null) return;
     const controller = new AbortController();

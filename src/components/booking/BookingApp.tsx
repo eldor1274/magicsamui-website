@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { LoaderCircle } from "lucide-react";
 import { fetchAvailability, isAllowedPaymentRedirect, postAbandon, postCheckout, recallLinkToken, rememberLinkToken } from "@/lib/booking/apiClient";
 import { POLICY_VERSION, getCatalogueRoom } from "@/lib/booking/catalogue";
+import { abandonVerdict, attemptOf, attemptPayableMs, tracksAttempts } from "@/lib/booking/checkoutAttempt";
 import { createBookingAnalytics } from "@/lib/booking/clientAnalytics";
 import { formatThbWithCode } from "@/lib/booking/format";
 import { isGuestValid, normalizePostcode, validateGuest } from "@/lib/booking/guest";
@@ -79,11 +80,12 @@ export interface BookingAppProps {
    */
   classicHref?: string | null;
   /**
-   * Stripe's back link (cancel_url) landed here with this attempt's ref and
-   * signed token (?resume=payment&reason=cancelled&ref&t): its Checkout
-   * Session is expired and its room hold released at once (POST
-   * /api/booking/abandon), and Pay waits for that. Read on the server, so an
-   * App Router replay of a cleaned-up URL still has it. null otherwise.
+   * The payment page's back or Cancel link (Stripe's cancel_url, Beam's
+   * cancelUrl) landed here with this attempt's ref and signed token
+   * (?resume=payment&reason=cancelled&ref&t): its payment page is closed and
+   * its room hold released at once (POST /api/booking/abandon), and Pay waits
+   * for that. Read on the server (checkoutAttempt.ts cancelledAttemptOf), so
+   * an App Router replay of a cleaned-up URL still has it. null otherwise.
    */
   cancelledAttempt?: { ref: string; t: string } | null;
 }
@@ -177,7 +179,7 @@ export default function BookingApp({
 }: BookingAppProps) {
   const [state, dispatch] = useReducer(bookingReducer, undefined, initialBookingState);
   const [secureInfoOpen, setSecureInfoOpen] = useState(false);
-  /** Stripe: an earlier checkout attempt is being expired (its room hold released) before Pay is allowed again. */
+  /** Stripe and hold-first Beam: an earlier checkout attempt is being closed (its room hold released) before Pay is allowed again. */
   const [releasing, setReleasing] = useState(cancelledAttempt !== null);
   const stateRef = useRef(state);
   const abortRef = useRef<AbortController | null>(null);
@@ -220,22 +222,24 @@ export default function BookingApp({
   }, []);
 
   /**
-   * Stripe: expire an earlier checkout attempt's session and release its room
-   * hold (POST /api/booking/abandon). A paid or still-processing attempt is
-   * never cancelled: the guest goes to its return page instead ("left").
-   * "error": the earlier session could not be checked - it is kept, so the
-   * next Pay asks again (Stripe's 30-minute expiry and the sweeper still
-   * release that hold). The caller sets `releasing` first (Pay waits).
+   * Stripe and hold-first Beam: close an earlier checkout attempt's payment
+   * page and release its room hold (POST /api/booking/abandon). A paid or
+   * still-processing attempt (Beam: unconfirmed included) is never cancelled:
+   * the guest goes to its return page instead ("left"). "error": the earlier
+   * attempt could not be checked - it is kept, so the next Pay asks again (the
+   * payment page's expiry and the sweeper still release that hold). The
+   * caller sets `releasing` first (Pay waits).
    */
   const finishRelease = useCallback(
     (attempt: { ref: string; t: string }, res: AbandonResponse): "continue" | "left" | "error" => {
-      if (res.ok && (res.state === "paid" || res.state === "pending")) {
+      const verdict = abandonVerdict(res);
+      if (verdict === "return-page") {
         window.location.assign(returnPagePath(configRef.current.bookingPath, attempt.ref, attempt.t, theme));
         return "left";
       }
       setReleasing(false);
-      if (!res.ok) return "error";
-      // Released, already closed or not a Stripe booking: forget it.
+      if (verdict === "error") return "error";
+      // Released, already closed or not this provider's booking: forget it.
       clearAttempt(attempt.ref);
       return "continue";
     },
@@ -250,7 +254,7 @@ export default function BookingApp({
   /* ------------------------- hydrate + persist ------------------------- */
 
   useEffect(() => {
-    // Stripe's back link (cancel_url) landed here: expire that session and release its hold right away
+    // The payment page's back or Cancel link landed here: close that page and release its hold right away
     // (`releasing` started true for it, so Pay waits for the answer).
     if (cancelledAttempt) {
       void postAbandon({ t: cancelledAttempt.t, l: recallLinkToken(cancelledAttempt.ref) }).then((res) => finishRelease(cancelledAttempt, res));
@@ -261,9 +265,9 @@ export default function BookingApp({
       initialSearch,
       resume,
       resumeReason,
-      // Stripe: a cancelled attempt's hold is released (by this landing, or by the abandon the return page ran),
-      // so the notice must never say the room is still held - with or without a token in the link.
-      holdReleased: cancelledAttempt !== null || configRef.current.provider === "stripe",
+      // Stripe and hold-first Beam: a cancelled attempt's hold is released (by this landing, or by the abandon the
+      // return page ran), so the notice must never say the room is still held - with or without a token in the link.
+      holdReleased: cancelledAttempt !== null || tracksAttempts(configRef.current),
       landingKey,
       today,
     });
@@ -489,18 +493,19 @@ export default function BookingApp({
     analytics.addPaymentInfo(q);
     dispatch({ type: "checkoutStarted" });
     announce(providerCopy(cfg).payAnnouncement);
-    if (cfg.provider === "stripe") {
-      // An earlier attempt from this tab (e.g. the guest used the browser's Back button on Stripe's page)
-      // still holds the room: release it first - or, if it was paid meanwhile, show its confirmation.
+    if (tracksAttempts(cfg)) {
+      // An earlier attempt from this tab (e.g. the guest used the browser's Back button on the payment page)
+      // still holds the room: release it first - or, if it was paid (or is still being paid) meanwhile, show its return page.
       const prior = readAttempt();
       if (prior) {
         setReleasing(true);
         const released = await releaseAttempt({ ref: prior.ref, t: prior.token, l: prior.token });
         if (released === "left") return;
         if (released === "error") {
-          // Never open a second payable Stripe session while the earlier one might still be paid
-          // (a guest paying both would be charged twice). Once it has certainly expired, carry on.
-          if (attemptMayStillBePaid(prior, Date.now())) {
+          // Never open a second payable page while the earlier one might still be paid (a guest paying both would be
+          // charged twice): Stripe's 33 minutes, Beam's attemptPayableMinutes (53 by default: a PromptPay or 3-D Secure
+          // payment can still succeed inside the pending grace). Once it has certainly expired, carry on.
+          if (attemptMayStillBePaid(prior, Date.now(), attemptPayableMs(cfg))) {
             announce("Payment could not be started. Nothing was charged.");
             dispatch({
               type: "checkoutFailed",
@@ -527,8 +532,8 @@ export default function BookingApp({
       // The terms version this page showed next to the box the guest ticked (Stripe refuses any other: terms_changed).
       termsVersion: POLICY_VERSION,
       theme,
-      // Stripe: the reservation is created in Cloudbeds before payment, so the server needs the lead guest.
-      // Sent only in the request body (never in a URL); demo/Beam modes keep the details in the browser.
+      // Hold-first (Stripe, Beam): the reservation is created in Cloudbeds before payment, so the server needs the lead
+      // guest. Sent only in the request body (never in a URL); the demo keeps the details in the browser.
       ...(cfg.requiresGuestDetails ? { guest: { ...s.guest, postcode: normalizePostcode(s.guest.postcode ?? "") } } : {}),
     });
     if (res.ok) {
@@ -538,7 +543,8 @@ export default function BookingApp({
         return;
       }
       rememberLinkToken(res.ref, res.linkToken);
-      if (res.provider === "stripe" && res.linkToken) rememberAttempt({ ref: res.ref, token: res.linkToken, startedAt: Date.now() });
+      const attempt = attemptOf(res, Date.now());
+      if (attempt) rememberAttempt(attempt);
       dispatch({ type: "checkoutRedirecting" });
       window.location.assign(res.redirectUrl);
       return;

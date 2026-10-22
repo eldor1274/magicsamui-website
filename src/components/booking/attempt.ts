@@ -1,43 +1,27 @@
-// The last Stripe checkout attempt started in this tab: its booking ref and
-// signed link token (no personal data - the token carries the booking facts
-// and the Checkout Session id, signed by our server).
+// The last hold-first checkout attempt (Stripe, or a hold-first Beam mode) started in this tab: its booking ref
+// and signed link token (no personal data - the token carries the booking facts and the payment id: the Checkout
+// Session or the Beam link, signed by our server).
 //
-// Why: Stripe holds the room in Cloudbeds while the guest is on Checkout. If
-// the guest comes back with the browser's Back button (not Stripe's own back
-// link) and presses Pay again, the old hold would still block the room. So
-// before a NEW checkout the booking page asks /api/booking/abandon about the
-// previous attempt: "paid"/"pending" -> show its return page (never charge
-// twice); otherwise the old session is expired and its hold released first.
+// Why: the payment page holds the room in Cloudbeds while the guest is on it. If the guest comes back with the
+// browser's Back button (not the payment page's own back or Cancel link) and presses Pay again, the old hold would
+// still block the room. So before a NEW checkout the booking page asks /api/booking/abandon about the previous
+// attempt: "paid"/"pending" -> show its return page (never charge twice); otherwise the old payment page is closed
+// and its hold released first. The rules (which pages track attempts, how long one may still be paid) are in
+// lib/booking/checkoutAttempt.ts (Beam design S5.1).
 
 import { isBookingRef } from "@/lib/booking/ref";
+import type { CheckoutAttempt } from "@/lib/booking/checkoutAttempt";
+
+export type { CheckoutAttempt } from "@/lib/booking/checkoutAttempt";
+export { attemptMayStillBePaid } from "@/lib/booking/checkoutAttempt";
 
 const KEY = "msv_booking_attempt_v1";
-
-export interface CheckoutAttempt {
-  ref: string;
-  /** Signed link token (a valid booking token that also carries the session id). */
-  token: string;
-  /** When the checkout was started (ms since epoch; 0 when unknown). */
-  startedAt: number;
-}
-
-/**
- * How long an attempt's Checkout Session can still be paid: Stripe's 30-minute
- * session lifetime plus a margin (the server adds a minute for clock skew).
- * After this the session is expired at Stripe whatever we were able to do.
- */
-export const ATTEMPT_PAYABLE_MS = 33 * 60_000;
-
-/** True while the attempt's session might still be paid (so a second payable session must not be opened). */
-export function attemptMayStillBePaid(attempt: CheckoutAttempt, nowMs: number): boolean {
-  return attempt.startedAt > 0 && nowMs - attempt.startedAt < ATTEMPT_PAYABLE_MS;
-}
 
 export function rememberAttempt(attempt: CheckoutAttempt): void {
   try {
     sessionStorage.setItem(KEY, JSON.stringify(attempt));
   } catch {
-    // storage blocked: Stripe's 30-minute expiry still releases the hold
+    // storage blocked: the payment page's 30-minute expiry still releases the hold
   }
 }
 

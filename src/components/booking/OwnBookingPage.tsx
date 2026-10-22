@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import BookingApp from "@/components/booking/BookingAppLazy";
 import type { SearchDraft } from "@/components/booking/state";
+import { cancelledAttemptOf } from "@/lib/booking/checkoutAttempt";
 import { BOOKING_WINDOW_MONTHS, MAX_NIGHTS, MAX_SEARCH_ADULTS, getPublicBookingConfig } from "@/lib/booking/config";
 import { addMonths, todayInBangkok, validateStayDates } from "@/lib/booking/dates";
 import { promoInputOffered } from "@/lib/booking/quote";
-import { isBookingRef } from "@/lib/booking/ref";
 import { parseTheme } from "@/lib/booking/theme";
 import type { ThemeName } from "@/lib/booking/types";
 import { parseResumeReason } from "@/lib/booking/urls";
@@ -77,11 +77,9 @@ export default function OwnBookingPage({
   const themeHref: Record<ThemeName, string> = { magic: basePath, classic: `${basePath}?theme=classic` };
   const config = getPublicBookingConfig();
   const resume = one(sp.resume) === "payment" ? "payment" : null;
-  // Stripe back link (cancel_url = ?resume=payment&reason=cancelled&ref&t): BookingApp releases that hold.
-  const ref = one(sp.ref);
-  const t = one(sp.t);
-  const cancelledAttempt =
-    resume === "payment" && config.provider === "stripe" && isBookingRef(ref) && t && t.length <= 4096 ? { ref, t } : null;
+  // The payment page's back or Cancel link (Stripe's cancel_url, Beam's cancelUrl = ?resume=payment&reason=cancelled&ref&t)
+  // on a page that tracks attempts (Stripe, hold-first Beam): BookingApp releases that hold.
+  const cancelledAttempt = cancelledAttemptOf(config, { resume, ref: one(sp.ref), t: one(sp.t) });
 
   return (
     <div className="mx-auto max-w-6xl px-3 py-6 sm:px-5 sm:py-10">

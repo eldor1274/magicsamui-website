@@ -126,6 +126,38 @@ export function providerCopy(config: CopyConfig): ProviderCopy {
   };
 }
 
+/** The fields guestStepCopy() reads. */
+export type GuestStepCopyConfig = Pick<PublicBookingConfig, "provider" | "live" | "requiresGuestDetails" | "sendsBookingConfirmationEmail">;
+
+/**
+ * The guest-details step's email hint and the note under its Continue button (`config` undefined: no booking
+ * context). Stripe and the demo keep their words exactly. A hold-first Beam page (requiresGuestDetails) sends the
+ * details to our reservation system only - Beam gets no name, email or phone from us - and promises no receipt:
+ * Beam sends none, the Cloudbeds confirmation email is the guest's written confirmation (owner decision 6; beam-live
+ * checkout requires it) - Beam design S5.1.
+ */
+export function guestStepCopy(config: GuestStepCopyConfig | undefined): { emailHint: string; detailsNote: string } {
+  // Only a live booking sends a confirmation; the preview modes say what would happen.
+  const live = config?.live === true;
+  const stripe = config?.provider === "stripe";
+  // Stripe: Cloudbeds only emails a confirmation when CLOUDBEDS_SEND_STATUS_EMAIL is on; otherwise the receipt is the only email.
+  const stripeEmails = config?.sendsBookingConfirmationEmail ? "payment receipt and booking confirmation are" : "payment receipt is";
+  const emailHint = stripe
+    ? live
+      ? `Your ${stripeEmails} sent here.`
+      : `In live mode your ${stripeEmails} sent here.`
+    : live
+      ? "Your booking confirmation is sent here."
+      : "In live mode your booking confirmation is sent here.";
+  const detailsNote =
+    config?.requiresGuestDetails === true
+      ? config.provider === "beam"
+        ? "When you press Pay, your details go securely to our reservation system to hold your room. Nothing is charged until you pay."
+        : "When you press Pay, your details go securely to our reservation system to hold your room, and your email to Stripe for your receipt. Nothing is charged until you pay."
+      : "Preview: your details stay in this browser and are not sent anywhere. Nothing is booked until you pay.";
+  return { emailHint, detailsNote };
+}
+
 /** Short mode label for the preview banner and notes. */
 export type ModeKind = "demo" | "mock" | "test" | "live";
 

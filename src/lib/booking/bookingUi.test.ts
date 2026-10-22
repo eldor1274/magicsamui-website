@@ -1,19 +1,25 @@
 // UI-facing booking rules (WI-5/7/9/12): provider copy and badges, the
 // preview banner headline, which return-page view a status gets (and that a
 // paid booking is never offered "Try again"), polling plans, the own-engine
-// URLs, the restriction-message classifier, and the BOOKING_ENGINE switch as
-// the pages see it.
+// URLs, the restriction-message classifier, the BOOKING_ENGINE switch as the
+// pages see it, and the booking page's checkout attempts and guest-step copy
+// for Stripe and the hold-first Beam modes (design S5.1).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { isRestrictionMessage } from "./checkoutMessages.ts";
-import { getPublicBookingConfig, resolveBookingEngine } from "./config.ts";
+import { runAbandon } from "./abandon.ts";
+import { BEAM_LIVE_ENV, BEAM_TEST_ENV, beamHeld, makeBeamKit, makeParityKit } from "./beamTestkit.ts";
+import type { BeamKit } from "./beamTestkit.ts";
+import { abandonVerdict, attemptMayStillBePaid, attemptOf, attemptPayableMs, cancelledAttemptOf, tracksAttempts } from "./checkoutAttempt.ts";
+import { getPublicBookingConfig, resolveBookingEngine, toPublicConfig } from "./config.ts";
 import type { Env } from "./config.ts";
-import { DEMO_COPY_CONFIG, joinList, modeKind, paymentMethodLabels, payWithText, previewHeadline, providerCopy } from "./paymentCopy.ts";
+import { DEMO_COPY_CONFIG, guestStepCopy, joinList, modeKind, paymentMethodLabels, payWithText, previewHeadline, providerCopy } from "./paymentCopy.ts";
 import { canRetryPayment, isPollingView, pollPlan, returnViewKind } from "./returnView.ts";
 import { RESTRICTION_MESSAGES } from "./stripeCheckout.ts";
-import { STRIPE_LIVE_ENV, STRIPE_TEST_ENV, checkout, makeKit, sessionIdOf } from "./testkit.ts";
+import type { ProviderDepsFn } from "./stripeDeps.ts";
+import { NOW, STRIPE_LIVE_ENV, STRIPE_TEST_ENV, checkout, makeKit, sessionIdOf } from "./testkit.ts";
 import type { CheckoutSuccess, FulfilmentState, PaymentMode, PaymentStatus, PublicBookingConfig, StatusResponse } from "./types.ts";
 import { homeSearchPath, resumePaymentPath, returnPagePath, safeBookingBasePath, stripeCancelUrl } from "./urls.ts";
 
@@ -178,9 +184,34 @@ test("return view: polling views and plans (Stripe ~3 s for 3 minutes; Beam back
   assert.equal(stripe.nextMs(40), 3_000);
   assert.equal(stripe.maxMs, 180_000);
   const beam = pollPlan({ paymentMode: "beam-playground" });
-  assert.deepEqual([1, 2, 3, 4, 5, 6].map(beam.nextMs), [2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
-  assert.equal(beam.firstMs, 1_000);
-  assert.equal(beam.maxMs, 120_000);
+  // Design S5.1 (gap review 14): 2 s, then each wait x1.5 up to 15 s, for 15 minutes.
+  assert.deepEqual([1, 2, 3, 4, 5, 6].map(beam.nextMs), [3_000, 4_500, 6_750, 10_125, 15_000, 15_000]);
+  assert.equal(beam.firstMs, 2_000);
+  assert.equal(beam.maxMs, 900_000);
+});
+
+test("return view: beam-live polls as the playground does; the demo keeps its old backoff (1 s, then 2 s, 4 s ... 30 s, 2 minutes)", () => {
+  const plan = (mode: PaymentMode) => {
+    const p = pollPlan({ paymentMode: mode });
+    return { firstMs: p.firstMs, next: [1, 2, 3, 4, 5, 6, 40].map(p.nextMs), maxMs: p.maxMs };
+  };
+  assert.deepEqual(plan("beam-live"), plan("beam-playground"));
+  assert.deepEqual(plan("beam-live"), { firstMs: 2_000, next: [3_000, 4_500, 6_750, 10_125, 15_000, 15_000, 15_000], maxMs: 15 * 60_000 });
+  assert.deepEqual(plan("demo"), { firstMs: 1_000, next: [2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000], maxMs: 120_000 });
+  for (const mode of ["stripe-mock", "stripe-test", "stripe-live"] as const) {
+    assert.deepEqual(plan(mode), { firstMs: 2_000, next: [3_000, 3_000, 3_000, 3_000, 3_000, 3_000, 3_000], maxMs: 180_000 }, mode);
+  }
+  // A Beam page checks about 63 times in its 15 minutes, never faster than every 2 s nor slower than every 15 s.
+  const beam = pollPlan({ paymentMode: "beam-live" });
+  let elapsed = beam.firstMs;
+  let checks = 1;
+  while (elapsed < beam.maxMs) {
+    const wait = beam.nextMs(checks);
+    assert.ok(wait >= 2_000 && wait <= 15_000, String(wait));
+    elapsed += wait;
+    checks += 1;
+  }
+  assert.ok(checks >= 60 && checks <= 66, String(checks));
 });
 
 /* ---------------------------------- URLs ---------------------------------- */
@@ -225,6 +256,225 @@ test("checkout through the real server code: success/cancel URLs use the page's 
     // testkit GUEST: owner-test@example.com, +66 95 246 6011, postcode 84320, "Late dinner please".
     assert.doesNotMatch(u, /owner-test|84320|Late(%20|\+| )dinner|95(%20|\+| )246/i);
   }
+});
+
+/* ----------------------- checkout attempts (design S5.1) ----------------------- */
+
+const MIN = 60_000;
+const LOCKED_STRIPE_ENV: Env = { BOOKING_PAYMENT_PROVIDER: "stripe", STRIPE_SECRET_KEY: "sk_live_abcdefghijkl" };
+/** The routes' providerDeps for a Beam kit: Beam's deps and gateway, nothing for any other provider. */
+const beamProviderDeps = (kit: BeamKit): ProviderDepsFn => (provider) => (provider === "beam" ? { deps: kit.deps, gw: kit.gw } : null);
+/** POST /api/booking/abandon as the booking page sends it. */
+const abandonOn = (kit: BeamKit, body: { t: string; l: string | null }) =>
+  runAbandon(body, { config: kit.config, providerDeps: beamProviderDeps(kit), nowMs: kit.now.ms, log: kit.deps.log });
+/** The public config the kit's booking page gets. */
+const pageConfig = (kit: BeamKit, env: Env = BEAM_TEST_ENV) => toPublicConfig(kit.config, env);
+/** Every GET of a Beam link answers HTTP 500 (Beam can't be read) while `on()`. */
+function unreadableLinks(kit: BeamKit, on: () => boolean): void {
+  const real = kit.deps.fetchImpl ?? kit.fakeBeam.fetch;
+  kit.deps.fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (on() && (init?.method ?? "GET").toUpperCase() === "GET" && url.pathname.startsWith("/api/v1/payment-links/")) {
+      const body = { code: 500, message: "simulated outage", error: { errorCode: "INTERNAL_SERVER_ERROR", errorMessage: "simulated outage" } };
+      return new Response(JSON.stringify(body), { status: 500, headers: { "content-type": "application/json" } });
+    }
+    return real(input, init);
+  }) as typeof fetch;
+}
+
+test("attempts: every Stripe page tracks its checkout attempt as before (a locked one included), the hold-first Beam modes now too, never the demo", () => {
+  for (const env of [MOCK_ENV, STRIPE_TEST_ENV, STRIPE_LIVE_ENV, LOCKED_STRIPE_ENV]) {
+    const c = config(env);
+    assert.equal(c.provider, "stripe");
+    assert.equal(tracksAttempts(c), true, c.paymentMode);
+    assert.equal(c.attemptPayableMinutes, undefined, "no Stripe config carries a Beam window");
+    assert.equal(attemptPayableMs(c), 33 * MIN, "Stripe's window is unchanged");
+  }
+  const playground = config(BEAM_ENV);
+  assert.equal(playground.paymentMode, "beam-playground");
+  assert.equal(tracksAttempts(playground), true);
+  const live = pageConfig(makeBeamKit({ env: BEAM_LIVE_ENV }), BEAM_LIVE_ENV);
+  assert.equal(live.paymentMode, "beam-live");
+  assert.equal(tracksAttempts(live), true);
+  // The demo, also with BOOKING_PAYMENT_PROVIDER=beam and no Beam keys: no attempt flow, as before.
+  for (const env of [{}, { BOOKING_PAYMENT_PROVIDER: "beam" }]) {
+    const c = config(env);
+    assert.equal(c.paymentMode, "demo");
+    assert.equal(tracksAttempts(c), false, JSON.stringify(env));
+    assert.equal(attemptPayableMs(c), 33 * MIN);
+  }
+  // A locked Beam page keeps the Beam shape (its window) but runs no attempt flow: Pay is off and its paymentMode is the demo's.
+  const locked = config(BEAM_LIVE_ENV);
+  assert.deepEqual([locked.paymentStatus, locked.provider, locked.paymentMode, locked.attemptPayableMinutes], ["locked", "beam", "demo", 53]);
+  assert.equal(tracksAttempts(locked), false);
+  // Every (provider, mode) pair, hand-made ones included: Stripe as before (the provider alone), Beam only in its hold-first modes.
+  const modes: PaymentMode[] = ["demo", "beam-playground", "beam-live", "stripe-mock", "stripe-test", "stripe-live"];
+  for (const provider of ["stripe", "beam", "demo"] as const) {
+    for (const paymentMode of modes) {
+      const expected = provider === "stripe" || (provider === "beam" && paymentMode.startsWith("beam-"));
+      assert.equal(tracksAttempts({ provider, paymentMode }), expected, `${provider} / ${paymentMode}`);
+    }
+  }
+});
+
+test("attempts: a checkout answer starts an attempt for Stripe exactly as before and for Beam's hold-first link; never for the demo", async () => {
+  const stripeKit = makeParityKit("stripe");
+  const s = await stripeKit.held();
+  // Byte for byte what BookingApp stored before: { ref, token: linkToken, startedAt }.
+  assert.equal(JSON.stringify(attemptOf(s.body, NOW)), JSON.stringify({ ref: s.body.ref, token: s.body.linkToken, startedAt: NOW }));
+  const kit = makeBeamKit();
+  const b = await beamHeld(kit);
+  assert.deepEqual(attemptOf(b.body, NOW), { ref: b.ref, token: b.body.linkToken, startedAt: NOW });
+  assert.equal(b.body.provider, "beam");
+  const demo: CheckoutSuccess = { ...b.body, provider: "demo", paymentMode: "demo", linkToken: null, holdReservationId: null };
+  assert.equal(attemptOf(demo, NOW), null);
+  assert.equal(attemptOf({ ...demo, linkToken: "tok" }, NOW), null, "the demo never, whatever it carries");
+  assert.equal(attemptOf({ ...demo, provider: "beam", linkToken: "tok" }, NOW), null, "Beam in the demo mode never");
+  assert.equal(attemptOf({ ...b.body, paymentMode: "stripe-live" }, NOW), null, "a Beam answer in a Stripe mode never (hand-made)");
+  assert.equal(attemptOf({ ...b.body, provider: "demo" }, NOW), null, "a demo answer in a Beam mode never (hand-made)");
+  assert.equal(attemptOf({ ...s.body, linkToken: null }, NOW), null, "no link token, no attempt (as before)");
+});
+
+test("a Beam attempt is released before a new Pay: abandon with its link token disables the link and cancels the hold; paid or pending goes to its return page", async () => {
+  const kit = makeBeamKit();
+  const cfg = pageConfig(kit);
+  assert.equal(tracksAttempts(cfg), true);
+  const a = await beamHeld(kit);
+  const prior = attemptOf(a.body, kit.now.ms)!;
+  // BookingApp: releaseAttempt({ ref: prior.ref, t: prior.token, l: prior.token }) before the new checkout.
+  const released = await abandonOn(kit, { t: prior.token, l: prior.token });
+  assert.deepEqual(released, { status: 200, body: { ok: true, state: "released" } });
+  assert.equal(abandonVerdict(released.body), "forget");
+  assert.equal(kit.fakeBeam.link(a.linkId).status, "DISABLED", "the first link can never be paid afterwards");
+  assert.equal(kit.fakeCb.reservations.get(a.reservationId)?.status, "canceled");
+  // Only now the new Pay opens the second link (the room is free again).
+  const links = kit.fakeBeam.count(/^POST \/api\/v1\/payment-links$/);
+  const b = await beamHeld(kit);
+  assert.equal(kit.fakeBeam.count(/^POST \/api\/v1\/payment-links$/), links + 1);
+  // Paid meanwhile (another tab): its return page, never a second link.
+  kit.fakeBeam.pay(b.linkId, "CARD");
+  const paid = await abandonOn(kit, { t: b.body.linkToken!, l: b.body.linkToken });
+  assert.deepEqual(paid.body, { ok: true, state: "paid" });
+  assert.equal(abandonVerdict(paid.body), "return-page");
+  assert.equal(kit.fakeCb.reservations.get(b.reservationId)?.status, "confirmed");
+  // A PromptPay payment the bank is still confirming: its return page; the link and the hold are kept.
+  const c = await beamHeld(kit, "promptpay", [{ slug: "garden-suite", ratePlanId: "standard", adults: 2, addonIds: [] }]);
+  kit.fakeBeam.payPending(c.linkId);
+  const pending = await abandonOn(kit, { t: c.body.linkToken!, l: c.body.linkToken });
+  assert.deepEqual(pending.body, { ok: true, state: "pending" });
+  assert.equal(abandonVerdict(pending.body), "return-page");
+  assert.notEqual(kit.fakeCb.reservations.get(c.reservationId)?.status, "canceled");
+  // Every other answer: closed and not_applicable forget the attempt, an error keeps it.
+  assert.equal(abandonVerdict({ ok: true, state: "closed" }), "forget");
+  assert.equal(abandonVerdict({ ok: true, state: "not_applicable" }), "forget");
+  assert.equal(abandonVerdict({ ok: false, error: "upstream_error", message: "x" }), "error");
+});
+
+test("no second Beam link while the first may still be paid: 53 minutes (30 + the 20-minute pending grace + 3) when Beam can't be read; Stripe keeps 33", async () => {
+  const kit = makeBeamKit();
+  const cfg = pageConfig(kit);
+  assert.equal(cfg.attemptPayableMinutes, 53);
+  assert.equal(attemptPayableMs(cfg), 53 * MIN);
+  const a = await beamHeld(kit);
+  const prior = attemptOf(a.body, kit.now.ms)!;
+  let down = true;
+  unreadableLinks(kit, () => down);
+  const failed = await abandonOn(kit, { t: prior.token, l: prior.token });
+  assert.equal(failed.status, 502, JSON.stringify(failed.body));
+  assert.equal(abandonVerdict(failed.body), "error");
+  assert.equal(kit.fakeBeam.link(a.linkId).status, "ACTIVE", "nothing was closed: the attempt is kept");
+  assert.notEqual(kit.fakeCb.reservations.get(a.reservationId)?.status, "canceled");
+  // BookingApp refuses the new Pay while attemptMayStillBePaid(prior, now, attemptPayableMs(cfg)).
+  const at = (ms: number) => attemptMayStillBePaid(prior, prior.startedAt + ms, attemptPayableMs(cfg));
+  assert.deepEqual([0, 30 * MIN, 33 * MIN, 53 * MIN - 1, 53 * MIN, 60 * MIN].map(at), [true, true, true, true, false, false]);
+  // Stripe: 33 minutes, as before (also the default when no window is passed).
+  const stripe = config(STRIPE_LIVE_ENV);
+  assert.deepEqual([33 * MIN - 1, 33 * MIN].map((ms) => attemptMayStillBePaid(prior, prior.startedAt + ms, attemptPayableMs(stripe))), [true, false]);
+  assert.deepEqual([33 * MIN - 1, 33 * MIN].map((ms) => attemptMayStillBePaid(prior, prior.startedAt + ms)), [true, false]);
+  assert.equal(attemptMayStillBePaid({ startedAt: 0 }, NOW, attemptPayableMs(cfg)), false, "an unknown start never blocks");
+  // The window follows BEAM_PENDING_GRACE_MINUTES.
+  assert.equal(attemptPayableMs(config({ ...BEAM_ENV, BEAM_PENDING_GRACE_MINUTES: "45" })), 78 * MIN);
+  // Beam answers again: the retry releases the first link and the hold.
+  down = false;
+  assert.deepEqual((await abandonOn(kit, { t: prior.token, l: prior.token })).body, { ok: true, state: "released" });
+  assert.equal(kit.fakeBeam.link(a.linkId).status, "DISABLED");
+});
+
+test("the Beam cancel landing calls abandon: Beam's Cancel URL gives the page the attempt to release, and abandon disables the link and cancels the hold", async () => {
+  for (const storage of ["link token remembered", "storage blocked"] as const) {
+    const kit = makeBeamKit();
+    const cfg = pageConfig(kit);
+    const h = await beamHeld(kit);
+    const cancel = new URL(kit.fakeBeam.link(h.linkId).cancelUrl ?? "");
+    assert.deepEqual([...cancel.searchParams.keys()].sort(), ["reason", "ref", "resume", "t"]);
+    assert.equal(cancel.searchParams.get("reason"), "cancelled");
+    // OwnBookingPage reads the landing exactly so.
+    const sp = cancel.searchParams;
+    const landing = cancelledAttemptOf(cfg, { resume: sp.get("resume") === "payment" ? "payment" : null, ref: sp.get("ref") ?? undefined, t: sp.get("t") ?? undefined });
+    assert.deepEqual(landing, { ref: h.ref, t: sp.get("t") }, storage);
+    // BookingApp's mount: postAbandon({ t: cancelledAttempt.t, l: recallLinkToken(cancelledAttempt.ref) }).
+    const l = storage === "link token remembered" ? h.body.linkToken : null;
+    const res = await abandonOn(kit, { t: landing!.t, l });
+    assert.deepEqual(res, { status: 200, body: { ok: true, state: "released" } }, storage);
+    assert.equal(abandonVerdict(res.body), "forget");
+    assert.equal(kit.fakeBeam.link(h.linkId).status, "DISABLED", storage);
+    assert.equal(kit.fakeCb.reservations.get(h.reservationId)?.status, "canceled", storage);
+  }
+  // The same landing elsewhere: a Stripe page as before (any resume=payment with a booking ref and a token), never the demo.
+  const ref = "MSV-20261005-7F3K";
+  const landing = { resume: "payment", ref, t: "signed.token" };
+  for (const env of [MOCK_ENV, STRIPE_TEST_ENV, STRIPE_LIVE_ENV, LOCKED_STRIPE_ENV]) assert.deepEqual(cancelledAttemptOf(config(env), landing), { ref, t: "signed.token" });
+  for (const env of [{}, { BOOKING_PAYMENT_PROVIDER: "beam" }, BEAM_LIVE_ENV]) assert.equal(cancelledAttemptOf(config(env), landing), null, JSON.stringify(env));
+  const stripe = config(STRIPE_LIVE_ENV);
+  for (const bad of [{ resume: null }, { resume: "pay" }, { ref: "MSV-1" }, { ref: undefined }, { t: "" }, { t: undefined }, { t: "x".repeat(4097) }]) {
+    assert.equal(cancelledAttemptOf(stripe, { ...landing, ...bad }), null, JSON.stringify(bad));
+  }
+  assert.deepEqual(cancelledAttemptOf(stripe, { ...landing, t: "x".repeat(4096) }), { ref, t: "x".repeat(4096) });
+});
+
+test("booking page wiring (design S5.1): the attempt flow, its window and the cancel landing follow the mode", () => {
+  const app = repoSrc("components/booking/BookingApp.tsx");
+  assert.ok(app.includes("holdReleased: cancelledAttempt !== null || tracksAttempts(configRef.current),"));
+  assert.match(app, /if \(tracksAttempts\(cfg\)\) \{\s*(\/\/[^\n]*\n\s*)*const prior = readAttempt\(\);/);
+  assert.ok(app.includes("const released = await releaseAttempt({ ref: prior.ref, t: prior.token, l: prior.token });"));
+  assert.ok(app.includes("if (attemptMayStillBePaid(prior, Date.now(), attemptPayableMs(cfg))) {"));
+  assert.match(app, /const attempt = attemptOf\(res, Date\.now\(\)\);\s*if \(attempt\) rememberAttempt\(attempt\);/);
+  assert.ok(app.includes("const verdict = abandonVerdict(res);"));
+  assert.ok(app.includes("void postAbandon({ t: cancelledAttempt.t, l: recallLinkToken(cancelledAttempt.ref) }).then((res) => finishRelease(cancelledAttempt, res));"));
+  assert.doesNotMatch(app, /provider === "stripe"/, "no Stripe-only attempt rule is left in the booking page");
+  const own = repoSrc("components/booking/OwnBookingPage.tsx");
+  assert.ok(own.includes("const cancelledAttempt = cancelledAttemptOf(config, { resume, ref: one(sp.ref), t: one(sp.t) });"));
+  assert.ok(own.includes("cancelledAttempt={cancelledAttempt}"));
+  const guest = repoSrc("components/booking/checkout/GuestDetailsStep.tsx");
+  assert.ok(guest.includes("const { emailHint: confirmationHint, detailsNote } = guestStepCopy(bookingConfig);"));
+  assert.ok(guest.includes('hint={confirmationHint}') && guest.includes("{detailsNote}"));
+});
+
+test("guest step copy (design S5.1): Stripe and the demo word it exactly as before; a Beam page names no Stripe and promises no receipt", () => {
+  const STRIPE_NOTE =
+    "When you press Pay, your details go securely to our reservation system to hold your room, and your email to Stripe for your receipt. Nothing is charged until you pay.";
+  const PREVIEW_NOTE = "Preview: your details stay in this browser and are not sent anywhere. Nothing is booked until you pay.";
+  const BEAM_NOTE = "When you press Pay, your details go securely to our reservation system to hold your room. Nothing is charged until you pay.";
+  assert.deepEqual(guestStepCopy(config(STRIPE_LIVE_ENV)), { emailHint: "Your payment receipt is sent here.", detailsNote: STRIPE_NOTE });
+  assert.deepEqual(guestStepCopy(config({ ...STRIPE_LIVE_ENV, CLOUDBEDS_SEND_STATUS_EMAIL: "true" })), {
+    emailHint: "Your payment receipt and booking confirmation are sent here.",
+    detailsNote: STRIPE_NOTE,
+  });
+  for (const env of [STRIPE_TEST_ENV, MOCK_ENV, LOCKED_STRIPE_ENV]) {
+    assert.deepEqual(guestStepCopy(config(env)), { emailHint: "In live mode your payment receipt is sent here.", detailsNote: STRIPE_NOTE }, JSON.stringify(env));
+  }
+  assert.deepEqual(guestStepCopy(config({ ...STRIPE_TEST_ENV, CLOUDBEDS_SEND_STATUS_EMAIL: "true" })).emailHint, "In live mode your payment receipt and booking confirmation are sent here.");
+  for (const c of [config({}), config({ BOOKING_PAYMENT_PROVIDER: "beam" }), undefined]) {
+    assert.deepEqual(guestStepCopy(c), { emailHint: "In live mode your booking confirmation is sent here.", detailsNote: PREVIEW_NOTE });
+  }
+  const live = pageConfig(makeBeamKit({ env: BEAM_LIVE_ENV }), BEAM_LIVE_ENV);
+  assert.deepEqual(guestStepCopy(live), { emailHint: "Your booking confirmation is sent here.", detailsNote: BEAM_NOTE });
+  const beamPages = [config(BEAM_ENV), config({ ...BEAM_ENV, CLOUDBEDS_SEND_STATUS_EMAIL: "true" }), pageConfig(makeBeamKit()), config(BEAM_LIVE_ENV)];
+  for (const c of beamPages) {
+    const copy = guestStepCopy(c);
+    assert.deepEqual(copy, { emailHint: "In live mode your booking confirmation is sent here.", detailsNote: BEAM_NOTE }, c.paymentMode);
+  }
+  for (const c of [live, ...beamPages]) assert.doesNotMatch(Object.values(guestStepCopy(c)).join(" "), /Stripe|receipt/i);
 });
 
 /* ----------------------------- restrictions ------------------------------- */

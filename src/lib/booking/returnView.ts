@@ -1,7 +1,7 @@
 // Which view the return page shows for a verified status (WI-7), and whether
 // it keeps polling. Pure and isomorphic so the rules are unit-tested:
 //
-//   paid + confirmed (or not_applicable: demo/beam)  -> "paid"        success
+//   paid + confirmed (or not_applicable: demo)       -> "paid"        success
 //   paid + confirming                                -> "confirming"  "Payment received - confirming your booking", poll
 //   paid + needs_attention                           -> "attention"   "Payment received - we'll contact you" (never "try again")
 //   pending                                          -> "pending"     waiting for the payment, poll
@@ -47,14 +47,32 @@ export interface PollPlan {
   maxMs: number;
 }
 
+/** Beam's first check (ms), the growth of each later wait, the longest wait and how long it keeps checking (design S5.1). */
+export const BEAM_POLL_FIRST_MS = 2_000;
+export const BEAM_POLL_GROWTH = 1.5;
+export const BEAM_POLL_MAX_WAIT_MS = 15_000;
+export const BEAM_POLL_MAX_MS = 15 * 60_000;
+
 /**
  * Stripe: a steady ~3 s poll (the webhook usually lands within seconds; a
  * PromptPay or delayed payment can take longer) for up to 3 minutes.
- * Beam/demo: the original backoff (1 s, 2 s, 4 s ... capped at 30 s, about 2 minutes).
+ * Beam (beam-playground, beam-live; design S5.1, gap review 14): the first check
+ * after 2 s, then each wait x1.5 (3 s, 4.5 s, 6.75 s, 10.1 s) up to 15 s, for 15
+ * minutes - a PromptPay or 3-D Secure confirmation can take minutes, and the
+ * browser reports the purchase once it is confirmed.
+ * The demo: the original backoff (1 s, 2 s, 4 s ... capped at 30 s, about 2 minutes).
  */
 export function pollPlan(result: Pick<StatusResponse, "paymentMode">): PollPlan {
-  if (providerOf(result.paymentMode) === "stripe") {
+  const provider = providerOf(result.paymentMode);
+  if (provider === "stripe") {
     return { firstMs: 2_000, nextMs: () => 3_000, maxMs: 180_000 };
+  }
+  if (provider === "beam") {
+    return {
+      firstMs: BEAM_POLL_FIRST_MS,
+      nextMs: (attempt) => Math.min(Math.round(BEAM_POLL_FIRST_MS * BEAM_POLL_GROWTH ** attempt), BEAM_POLL_MAX_WAIT_MS),
+      maxMs: BEAM_POLL_MAX_MS,
+    };
   }
   return { firstMs: 1_000, nextMs: (attempt) => Math.min(2_000 * 2 ** (attempt - 1), 30_000), maxMs: 120_000 };
 }

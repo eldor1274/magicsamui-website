@@ -7,12 +7,14 @@
 // appear after the first submit and focus moves to the first invalid field.
 // The <form id={formId}> is also submitted by the summary CTA / mobile bar
 // (form="guest-form").
-// Guest details are personal data. Demo/Beam modes keep them in the browser;
-// Stripe modes (config.requiresGuestDetails) send them in the checkout request
-// body only - to Cloudbeds for the reservation and to Stripe for the receipt -
-// never in a URL, token, log or analytics payload. Stripe modes also ask for
-// an optional postcode (Cloudbeds guestZip; the server re-validates it).
-// Keep GuestDetailsStepProps stable.
+// Guest details are personal data. The demo keeps them in the browser; the
+// hold-first modes (config.requiresGuestDetails: Stripe, Beam) send them in the
+// checkout request body only - to Cloudbeds for the reservation, and on Stripe
+// the email to Stripe for the receipt (Beam gets none of them) - never in a
+// URL, token, log or analytics payload. The hold-first modes also ask for an
+// optional postcode (Cloudbeds guestZip; the server re-validates it). The
+// email hint and the note under the button are lib/booking/paymentCopy.ts
+// guestStepCopy (Beam design S5.1). Keep GuestDetailsStepProps stable.
 
 import { useContext } from "react";
 import type { FormEvent } from "react";
@@ -20,6 +22,7 @@ import { ArrowRight, Clock, Lock, Plane, ShieldCheck, Users } from "lucide-react
 import { HOUSE_POLICIES } from "@/lib/booking/catalogue";
 import { ARRIVAL_TIME_OPTIONS, GUEST_LIMITS, validateGuest } from "@/lib/booking/guest";
 import type { GuestDetails, GuestErrors, GuestField } from "@/lib/booking/guest";
+import { guestStepCopy } from "@/lib/booking/paymentCopy";
 import CountrySelect from "./CountrySelect";
 import FieldShell, { FIELD_CONTROL_CLASS, describedBy } from "./FormField";
 import { revealAboveBars } from "../bottomBars";
@@ -68,20 +71,9 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
     agreedToPolicy: `${formId}-agreedToPolicy`,
   };
   const bookingConfig = useContext(BookingContext)?.config;
-  // Only a live booking sends a confirmation; the preview modes say what would happen.
-  const live = bookingConfig?.live === true;
-  const stripe = bookingConfig?.provider === "stripe";
   const collectPostcode = bookingConfig?.collectPostcode === true;
-  const sendsDetails = bookingConfig?.requiresGuestDetails === true;
-  // Stripe: Cloudbeds only emails a confirmation when CLOUDBEDS_SEND_STATUS_EMAIL is on; otherwise the receipt is the only email.
-  const stripeEmails = bookingConfig?.sendsBookingConfirmationEmail ? "payment receipt and booking confirmation are" : "payment receipt is";
-  const confirmationHint = stripe
-    ? live
-      ? `Your ${stripeEmails} sent here.`
-      : `In live mode your ${stripeEmails} sent here.`
-    : live
-      ? "Your booking confirmation is sent here."
-      : "In live mode your booking confirmation is sent here.";
+  // What the email is for and where the details go, per mode (Stripe and the demo as before; Beam promises no receipt).
+  const { emailHint: confirmationHint, detailsNote } = guestStepCopy(bookingConfig);
   const err = (field: GuestField): string | null => (showErrors ? (errors[field] ?? null) : null);
   // Code + number share one field and one message.
   const errorCount = showErrors ? Object.keys(errors).filter((k) => !(k === "dialCode" && errors.phone)).length : 0;
@@ -402,9 +394,7 @@ export default function GuestDetailsStep({ formId, guest, errors, showErrors, on
         </button>
         <p className="flex items-start justify-center gap-1.5 text-center text-xs text-(--bk-text-subtle)">
           <Lock size={12} aria-hidden="true" className="mt-0.5 shrink-0" />
-          {sendsDetails
-            ? "When you press Pay, your details go securely to our reservation system to hold your room, and your email to Stripe for your receipt. Nothing is charged until you pay."
-            : "Preview: your details stay in this browser and are not sent anywhere. Nothing is booked until you pay."}
+          {detailsNote}
         </p>
       </div>
     </form>
