@@ -8,8 +8,9 @@
 // While a Beam config exists (the fulfilment config is a Beam mode, or getBeamDrainConfig finishes Beam payments
 // after a switch away from beam), the pages name Beam. They name Stripe while it is the provider or still drains
 // (getStripeDrainConfig). Upstash is named too: it holds the hold-first bookings' holds, payment status and abuse
-// limits, the drained ones included. Beam-live is no Beam config while LIVE_FULFILMENT_READY.beam is false (no
-// fulfilment config, no drain), because no payment can go through Beam then.
+// limits, the drained ones included. Since S7.1 (LIVE_FULFILMENT_READY.beam true) beam-live is a Beam config too:
+// active, or the Beam drain of a Stripe page that carries the live Beam variables - so production names Beam once
+// those variables are set, even while BOOKING_PAYMENT_PROVIDER is still stripe.
 // The legal entity stays site.legalName: the Beam merchant account must be held by it (a go-live gate, Beam
 // question 17). If it is not, /legal, /privacy and the JSON-LD change here.
 

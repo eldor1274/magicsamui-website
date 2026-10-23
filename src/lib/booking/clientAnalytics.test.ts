@@ -150,8 +150,8 @@ test("beam-live needs the server's confirmation: purchase fires once per ref wit
   const live = createBookingAnalytics("beam-live", "production");
   // A behaviour change of S0.3 (Beam design), not a refactor: before it, beam-live sent the purchase on its own,
   // with the booking ref as transaction_id. Now, as in Stripe, only the server's confirmation (StatusResponse.purchase)
-  // sends it, and transaction_id is the Cloudbeds reservationID it carries. The Beam status path does not return one
-  // yet (config.test.ts guards LIVE_FULFILMENT_READY.beam on it).
+  // sends it, and transaction_id is the Cloudbeds reservationID it carries. The Beam status path returns one since S4.6
+  // (config.test.ts's guard keeps LIVE_FULFILMENT_READY.beam, true since S7.1, on it).
   const confirmed: PurchaseView = { transactionId: "48213377", valueBaht: booking.dueNowSatang / 100, currency: "THB" };
   live.purchase(booking, confirmed);
   live.purchase(booking, confirmed);

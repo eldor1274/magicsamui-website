@@ -14,7 +14,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import { buildOffers } from "./availability.ts";
-import { BEAM_LIVE_ENV, BEAM_TEST_ENV, makeBeamKit } from "./beamTestkit.ts";
+import { BEAM_LIVE_ENV, BEAM_LIVE_STOPPED_ENV, BEAM_TEST_ENV, makeBeamKit } from "./beamTestkit.ts";
 import { createBookingAnalytics } from "./clientAnalytics.ts";
 import type { RecordedBookingEvent } from "./clientAnalytics.ts";
 import { getPublicBookingConfig, toPublicConfig } from "./config.ts";
@@ -59,7 +59,7 @@ const STRIPE_DEMO_ENVS: Record<string, Env> = {
 const config = (env: Env): PublicBookingConfig => getPublicBookingConfig(env);
 const beamPage = (env: Env = {}) => config({ ...BEAM_TEST_ENV, ...env });
 const beamLivePage = () => toPublicConfig(makeBeamKit({ env: BEAM_LIVE_ENV }).config, BEAM_LIVE_ENV);
-/** Every Beam method-choice page shape: playground (defaults and each switch), beam-live, and a locked Beam page. */
+/** Every Beam method-choice page shape: playground (defaults and each switch), beam-live, and a locked Beam page (the emergency stop since S7.1). */
 const BEAM_PAGES: Record<string, () => PublicBookingConfig> = {
   playground: () => beamPage(),
   "wechat-on": () => beamPage({ BEAM_WECHAT_PAY: "on" }),
@@ -67,7 +67,7 @@ const BEAM_PAGES: Record<string, () => PublicBookingConfig> = {
   "promptpay-off": () => beamPage({ BEAM_PROMPTPAY: "off" }),
   "promptpay-fee-1": () => beamPage({ BEAM_PROMPTPAY_FEE_PCT: "1" }),
   live: beamLivePage,
-  locked: () => config(BEAM_LIVE_ENV),
+  locked: () => config(BEAM_LIVE_STOPPED_ENV),
 };
 const strip = (html: string) => html.replace(/<!-- -->/g, "");
 
@@ -716,7 +716,7 @@ test("the payment step on Beam (design S5.2): a required choice with no default,
   assert.doesNotMatch(off, /PromptPay/);
   assert.match(payButton(off), /disabled=""/);
   // A locked Beam page: payments are locked, so no choice is offered - and no "No fee with Thai PromptPay QR" either (round 7).
-  const lockedStep = render(config(BEAM_LIVE_ENV), null);
+  const lockedStep = render(config(BEAM_LIVE_STOPPED_ENV), null);
   assert.doesNotMatch(lockedStep, /name="payMethod"/);
   assert.doesNotMatch(lockedStep, /No fee with Thai PromptPay QR/);
   // The server's 'Please choose how to pay' answer points to the choice.
@@ -759,7 +759,7 @@ test("the reservation summary on Beam (design S5.2): the fee line with 'No fee w
   assert.match(card, /Payment processing fee \(3%\)/);
   assert.doesNotMatch(card, /No fee with Thai PromptPay QR/);
   // Round 7 (round-6 triage): a locked Beam page shows no choice, so its summary has no "No fee with Thai PromptPay QR" either.
-  const locked = config(BEAM_LIVE_ENV);
+  const locked = config(BEAM_LIVE_STOPPED_ENV);
   assert.equal(locked.paymentStatus, "locked");
   assert.equal(pageOffersMethodChoice(locked), true);
   const lockedHtml = render(locked, null);
@@ -776,12 +776,13 @@ test("the reservation summary on Beam (design S5.2): the fee line with 'No fee w
 /* ------------------- round 7: the round-6 triage's copy and wiring gaps ------------------- */
 
 test("noFeeAlternative on a locked Beam page is null (round 7: it offers no choice, as its payment step shows none); every other Beam page as before", () => {
-  const locked = config(BEAM_LIVE_ENV);
+  const locked = config(BEAM_LIVE_STOPPED_ENV);
   assert.equal(locked.paymentStatus, "locked");
   for (const m of [null, undefined, "card_ewallet", "promptpay"]) assert.equal(noFeeAlternative(locked, m), null, String(m));
   assert.equal(noFeeAlternative({ ...locked, paymentStatus: "ok" }, null), "No fee with Thai PromptPay QR", "the same page unlocked");
   assert.equal(noFeeAlternative(beamPage(), null), "No fee with Thai PromptPay QR");
   assert.equal(noFeeAlternative(beamLivePage(), null), "No fee with Thai PromptPay QR");
+  assert.equal(noFeeAlternative(config(BEAM_LIVE_ENV), null), "No fee with Thai PromptPay QR", "the beam-live page itself (since S7.1)");
   assert.equal(noFeeAlternative(beamPage(), "promptpay"), null);
   assert.equal(noFeeAlternative(beamPage({ BEAM_PROMPTPAY: "off" }), null), null);
   // Stripe and the demo: null, also when locked.

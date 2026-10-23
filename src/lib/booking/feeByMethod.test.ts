@@ -31,7 +31,7 @@ import { PAY_METHOD_UNREADABLE, parseCheckoutRequest } from "./validate.ts";
 const KEYS = { BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k" };
 /** beam-playground with no Cloudbeds variables (demo rates, the mock writer locally). */
 const BEAM_PG: Env = { BOOKING_PAYMENT_PROVIDER: "beam", BEAM_API_BASE: BEAM_PLAYGROUND_BASE, ...KEYS, BOOKING_TOKEN_SECRET: TOKEN_SECRET };
-/** beam-live with every beamLiveBlockers condition (the code switch is overridden where it is used). */
+/** beam-live with every beamLiveBlockers condition (the code switch is on since S7.1; READY is passed where it was before). */
 const BEAM_LIVE: Env = {
   ...BEAM_PG,
   BEAM_API_BASE: BEAM_LIVE_BASE,
@@ -54,8 +54,10 @@ const LIMITS = { today: "2026-10-05", maxNights: 30, bookingWindowMonths: 18, ma
 const BEAM_LIMITS = { ...LIMITS, payMethods: true };
 /** Every kind of payMethod a hand-made request can carry: the two groups, the empty values and garbage. */
 const ANY_PAY_METHOD: unknown[] = ["bogus", "CARD", 0, false, [], {}, null, "", "promptpay", "card_ewallet", " promptpay", "PROMPTPAY", true, 1, ["promptpay"]];
-/** The code switch overridden (tests only): beam-live resolves. */
+/** The code switch overridden (tests only): beam-live resolves (also without it since S7.1). */
 const READY = { liveFulfilmentReady: true };
+/** The emergency stop: a locked beam-live page (since S7.1 the code switch no longer locks it). */
+const STOPPED: Env = { BOOKING_ALLOW_LIVE_PAYMENTS: "false" };
 
 /** A config_warning (Beam with BOOKING_CARD_FEE_PCT set) is expected in some tests: keep it out of the output. */
 function quiet(t: TestContext): void {
@@ -186,15 +188,16 @@ test("feePctFor agrees with the public feeByMethod on every Beam config, and Str
     assert.equal(feePctFor(config, "card_ewallet"), pub.cardFeePct, `${name}: the card/e-wallet fee is cardFeePct`);
   }
   assert.deepEqual(getPublicBookingConfig({ ...BEAM_PG, BEAM_PROMPTPAY: "off" }).feeByMethod, { card_ewallet: 3 });
-  // A locked beam-live page shows the fees the unlocked config would charge.
-  const locked = getPublicBookingConfig({ ...BEAM_LIVE, BEAM_PROMPTPAY_FEE_PCT: "1.5" });
+  // A locked beam-live page (the emergency stop; since S7.1 the code switch locks nothing) shows the fees the unlocked config would charge.
+  const locked = getPublicBookingConfig({ ...BEAM_LIVE, ...STOPPED, BEAM_PROMPTPAY_FEE_PCT: "1.5" });
   assert.equal(locked.paymentStatus, "locked");
   const unlocked = getBookingConfig({ ...BEAM_LIVE, BEAM_PROMPTPAY_FEE_PCT: "1.5" }, READY);
+  assert.deepEqual(toPublicConfig(unlocked, BEAM_LIVE).feeByMethod, getPublicBookingConfig({ ...BEAM_LIVE, BEAM_PROMPTPAY_FEE_PCT: "1.5" }).feeByMethod, "the beam-live page itself");
   assert.equal(unlocked.paymentMode, "beam-live");
   assert.deepEqual(locked.feeByMethod, { card_ewallet: feePctFor(unlocked, "card_ewallet"), promptpay: feePctFor(unlocked, "promptpay") });
   // Both fee variables set (round-3 triage): the locked page follows BOOKING_CARD_FEE_PCT, not a hard-coded 3.
   const feesEnv = { ...BEAM_LIVE, BOOKING_CARD_FEE_PCT: "4", BEAM_PROMPTPAY_FEE_PCT: "1.5" };
-  const lockedFees = getPublicBookingConfig(feesEnv);
+  const lockedFees = getPublicBookingConfig({ ...feesEnv, ...STOPPED });
   const unlockedFees = getBookingConfig(feesEnv, READY);
   assert.equal(lockedFees.paymentStatus, "locked");
   assert.deepEqual(lockedFees.feeByMethod, { card_ewallet: 4, promptpay: 1.5 });
@@ -202,7 +205,7 @@ test("feePctFor agrees with the public feeByMethod on every Beam config, and Str
   assert.equal(lockedFees.cardFeePct, 4);
   assert.deepEqual(lockedFees.feeByMethod, toPublicConfig(unlockedFees, feesEnv).feeByMethod);
   // A locked page with PromptPay switched off offers the card/e-wallet fee only.
-  assert.deepEqual(getPublicBookingConfig({ ...feesEnv, BEAM_PROMPTPAY: "off" }).feeByMethod, { card_ewallet: 4 });
+  assert.deepEqual(getPublicBookingConfig({ ...feesEnv, ...STOPPED, BEAM_PROMPTPAY: "off" }).feeByMethod, { card_ewallet: 4 });
 
   for (const env of [STRIPE_TEST_ENV, STRIPE_LIVE_ENV, MOCK_ENV, {}]) {
     const pub = getPublicBookingConfig(env);
@@ -240,7 +243,8 @@ test("the public config offers exactly what the server takes: no promptpay fee w
   for (const extra of [{}, { BEAM_PROMPTPAY: "off" }, { BEAM_PROMPTPAY: "no", BEAM_EWALLETS: "off" }, { BEAM_PROMPTPAY: "maybe" }, { BEAM_PROMPTPAY: "off", BEAM_PROMPTPAY_FEE_PCT: "2" }]) {
     // [label, the page's env, the env the server config is built from (the locked page's unlocked twin)]
     cases.push([`beam-playground ${JSON.stringify(extra)}`, { ...BEAM_PG, ...extra }, { ...BEAM_PG, ...extra }]);
-    cases.push([`locked beam-live ${JSON.stringify(extra)}`, { ...BEAM_LIVE, ...extra }, { ...BEAM_LIVE, ...extra }]);
+    cases.push([`beam-live ${JSON.stringify(extra)}`, { ...BEAM_LIVE, ...extra }, { ...BEAM_LIVE, ...extra }]);
+    cases.push([`locked beam-live (the emergency stop) ${JSON.stringify(extra)}`, { ...BEAM_LIVE, ...STOPPED, ...extra }, { ...BEAM_LIVE, ...extra }]);
   }
   for (const [label, pageEnv, serverEnv] of cases) {
     const page = getPublicBookingConfig(pageEnv);
@@ -251,7 +255,8 @@ test("the public config offers exactly what the server takes: no promptpay fee w
       assert.equal(page.paymentMethods.includes(m === "promptpay" ? "promptpay" : "card"), payMethodOffered(server, m), `${label} ${m}: the badge`);
     }
   }
-  assert.deepEqual(getPublicBookingConfig({ ...BEAM_LIVE, BEAM_PROMPTPAY: "off" }).feeByMethod, { card_ewallet: 3 }, "a locked page too");
+  assert.deepEqual(getPublicBookingConfig({ ...BEAM_LIVE, ...STOPPED, BEAM_PROMPTPAY: "off" }).feeByMethod, { card_ewallet: 3 }, "a locked page too");
+  assert.deepEqual(getPublicBookingConfig({ ...BEAM_LIVE, BEAM_PROMPTPAY: "off" }).feeByMethod, { card_ewallet: 3 }, "the beam-live page (since S7.1)");
   // A stored choice the page no longer offers is dropped; anything that is not one of the two groups never counts.
   const off = getPublicBookingConfig({ ...BEAM_PG, BEAM_PROMPTPAY: "off" });
   assert.equal(pagePayMethodOffered(off, "promptpay"), false);

@@ -4,7 +4,7 @@ This file began as the notes of a **preview**: a direct booking page whose Beam 
 
 **The runbook is `docs/booking-engine.md`**: how it works (section 1), every variable (section 2, "Beam variables"), the WI-0 script (section 3), the owner setup (4.H), the tests (section 5, "Beam: Stage A, Stage B and Stage C"), go-live and rollback (section 6), the alerts and log lines (section 7), the refunds (section 8), the limits (section 9) and the owner TODOs (section 10). This file keeps the owner's Stage B checklist, the routes and the Beam facts the code relies on, and the parts of the preview notes that are still true. Sections marked **Superseded** say where the current text is.
 
-`beam-live` (real Beam payments) is **locked in code** (`LIVE_FULFILMENT_READY.beam = false`) until the owner-gated design step S7.1. Production keeps taking payments through Stripe.
+`beam-live` (real Beam payments) is **unlocked in code** since design S7.1 (`LIVE_FULFILMENT_READY.beam = true`, owner decision of 23 Oct 2026): the environment alone decides. Production keeps taking payments through Stripe until the owner switches `BOOKING_PAYMENT_PROVIDER` to `beam` (runbook section 6, item 7).
 
 ---
 
@@ -205,7 +205,7 @@ The Beam payment-link id is only known after the redirect URLs have been built, 
 
 ## Modes (superseded)
 
-Superseded by `docs/booking-engine.md` section 1 ("Providers and modes", "Beam live conditions") and section 2. In short: `demo` (the default), `beam-playground` (`BOOKING_PAYMENT_PROVIDER=beam`, the Playground base and both keys; real Cloudbeds holds with `CLOUDBEDS_API_KEY_BOOKING`, the fake Cloudbeds locally without it) and `beam-live` (the live base and every Beam live condition, one of them the code switch `LIVE_FULFILMENT_READY.beam`, which is `false`). Still true from the preview: a live base with a condition missing is refused (`live_payments_locked`), an unrecognised base is `invalid_beam_base`, a strong `BOOKING_TOKEN_SECRET` (32+ random characters) is required in the Beam modes and on every Vercel deployment, and in a Beam mode a failed Cloudbeds read is never replaced by demo data (503, nothing charged). No longer true: "no reservation is created", "the webhook only logs", "guest details never leave the browser" and "promos are demo-only" (Beam pages sell Cloudbeds' own codes and discounts, as Stripe pages do).
+Superseded by `docs/booking-engine.md` section 1 ("Providers and modes", "Beam live conditions") and section 2. In short: `demo` (the default), `beam-playground` (`BOOKING_PAYMENT_PROVIDER=beam`, the Playground base and both keys; real Cloudbeds holds with `CLOUDBEDS_API_KEY_BOOKING`, the fake Cloudbeds locally without it) and `beam-live` (the live base and every Beam live condition, one of them the code switch `LIVE_FULFILMENT_READY.beam`, which is `true` since S7.1). Still true from the preview: a live base with a condition missing is refused (`live_payments_locked`), an unrecognised base is `invalid_beam_base`, a strong `BOOKING_TOKEN_SECRET` (32+ random characters) is required in the Beam modes and on every Vercel deployment, and in a Beam mode a failed Cloudbeds read is never replaced by demo data (503, nothing charged). No longer true: "no reservation is created", "the webhook only logs", "guest details never leave the browser" and "promos are demo-only" (Beam pages sell Cloudbeds' own codes and discounts, as Stripe pages do).
 
 | dataSource | When |
 |---|---|

@@ -7,7 +7,7 @@
 // Covered:
 // - A Stripe-primary deployment with (a) no Beam variables, (b) valid Beam playground drain variables and (c) invalid
 //   Beam variables (an unknown base with short keys; the playground keys without BEAM_WEBHOOK_HMAC_KEY; the live
-//   base while LIVE_FULFILMENT_READY.beam is false): every Stripe answer - checkout, status, abandon, the Stripe
+//   base without the beam-live fulfilment conditions): every Stripe answer - checkout, status, abandon, the Stripe
 //   webhook, the sweep - and every Stripe and Cloudbeds call, Stripe store write and log line is the same in all of
 //   them, apart from the sweep's runs field (and the Beam run's own lines and writes in (b)); no Beam config error
 //   ever reaches a Stripe answer. The Beam webhook answers (a) and (c) 503 before the body is read, (b) 401 unsigned;
@@ -24,7 +24,9 @@
 //   variables (nothing Beam built, no Beam call); a lock, a missing or weak token secret, invalid_beam_base and a
 //   typo without Beam deps keep the config error for Beam bookings too, and without Beam variables abandon reads no
 //   body (today's code path).
-// - stripe-live with the same Beam variants, on every path that needs no Cloudbeds call: the same answers.
+// - stripe-live with the same Beam variants, on every path that needs no Cloudbeds call: the same answers - also with
+//   the live Beam variables, a beam-live drain since S7.1 (LIVE_FULFILMENT_READY.beam on; production's setup for the
+//   owner's controlled live launch).
 
 import { test } from "node:test";
 import type { TestContext } from "node:test";
@@ -89,7 +91,7 @@ const STRIPE_VARIANTS: [string, Env, Variant][] = [
   ["(b) valid Beam playground drain variables", { ...STRIPE_PRIMARY, ...BEAM_VARS }, "drain"],
   ["(c) invalid Beam variables: an unknown base, short keys", { ...STRIPE_PRIMARY, BEAM_API_BASE: "https://beam.invalid", BEAM_MERCHANT_ID: "x", BEAM_API_KEY: "y", BEAM_WEBHOOK_HMAC_KEY: "short" }, "none"],
   ["(c) invalid Beam variables: the playground keys without BEAM_WEBHOOK_HMAC_KEY", { ...STRIPE_PRIMARY, ...BEAM_VARS, BEAM_WEBHOOK_HMAC_KEY: undefined }, "none"],
-  ["(c) invalid Beam variables: the live base while the code switch is off", { ...STRIPE_PRIMARY, ...BEAM_VARS, BEAM_API_BASE: BEAM_LIVE_BASE }, "none"],
+  ["(c) invalid Beam variables: the live base without the beam-live fulfilment conditions (not production, the mock writer)", { ...STRIPE_PRIMARY, ...BEAM_VARS, BEAM_API_BASE: BEAM_LIVE_BASE }, "none"],
 ];
 const [ENV_A, ENV_B] = [STRIPE_VARIANTS[0][1], STRIPE_VARIANTS[1][1]];
 
@@ -659,7 +661,7 @@ const LIVE_VARIANTS: [string, Env][] = [
   ["stripe-live, (b) valid Beam playground drain variables", { ...LIVE, ...BEAM_VARS }],
   ["stripe-live, (c) an unknown Beam base, short keys", { ...LIVE, BEAM_API_BASE: "https://beam.invalid", BEAM_MERCHANT_ID: "x", BEAM_API_KEY: "y", BEAM_WEBHOOK_HMAC_KEY: "short" }],
   ["stripe-live, (c) the playground keys without BEAM_WEBHOOK_HMAC_KEY", { ...LIVE, ...BEAM_VARS, BEAM_WEBHOOK_HMAC_KEY: undefined }],
-  ["stripe-live, (c) the live Beam base while the code switch is off", { ...LIVE, ...BEAM_VARS, BEAM_API_BASE: BEAM_LIVE_BASE }],
+  ["stripe-live, (b) the live Beam variables: a beam-live drain since S7.1 (the code switch is on)", { ...LIVE, ...BEAM_VARS, BEAM_API_BASE: BEAM_LIVE_BASE }],
 ];
 
 test("stripe-live: on every path that needs no Cloudbeds call (Cloudbeds is blocked here) the answers, Stripe calls, store writes and log lines are the same with no Beam variables (a), a valid Beam playground drain (b) and invalid Beam variables (c)", async (t) => {
@@ -1060,9 +1062,10 @@ test("the fallback is for typos only: a lock (live_payments_locked), a missing t
     ["a provider typo on a Vercel preview: the Beam drain can't run there without real writes", { ...TYPO_ENV, VERCEL_ENV: "preview" }, NOT_CONFIGURED, "payment_misconfigured"],
     ["a provider typo with a weak BOOKING_TOKEN_SECRET: no Beam config can sign with it", { ...TYPO_ENV, BOOKING_TOKEN_SECRET: "short-secret" }, NOT_CONFIGURED, "payment_misconfigured"],
     ["a provider typo with the Beam base but neither Beam key", { ...TYPO_ENV, BEAM_MERCHANT_ID: undefined, BEAM_API_KEY: undefined }, NOT_CONFIGURED, "payment_misconfigured"],
-    // Round 7: what getBeamDrainConfig also requires - BEAM_WEBHOOK_HMAC_KEY, and the live base only once LIVE_FULFILMENT_READY.beam is true.
+    // Round 7: what getBeamDrainConfig also requires - BEAM_WEBHOOK_HMAC_KEY, and for the live base every beam-live fulfilment
+    // condition (LIVE_FULFILMENT_READY.beam among them, true since S7.1).
     ["a provider typo with the Beam playground keys but no BEAM_WEBHOOK_HMAC_KEY (no Beam drain)", { ...TYPO_ENV, BEAM_WEBHOOK_HMAC_KEY: undefined }, NOT_CONFIGURED, "payment_misconfigured"],
-    ["a provider typo with the live Beam base while LIVE_FULFILMENT_READY.beam is false (no Beam drain)", { ...TYPO_ENV, BEAM_API_BASE: BEAM_LIVE_BASE }, NOT_CONFIGURED, "payment_misconfigured"],
+    ["a provider typo with the live Beam base without the beam-live fulfilment conditions (no Beam drain)", { ...TYPO_ENV, BEAM_API_BASE: BEAM_LIVE_BASE }, NOT_CONFIGURED, "payment_misconfigured"],
     ["a provider typo with the live Beam base and no BEAM_WEBHOOK_HMAC_KEY", { ...TYPO_ENV, BEAM_API_BASE: BEAM_LIVE_BASE, BEAM_WEBHOOK_HMAC_KEY: undefined }, NOT_CONFIGURED, "payment_misconfigured"],
     // Round 8: what the Beam-mode branch of the config requires of the Cloudbeds writes (no Beam drain without them).
     ["a provider typo with the booking key but no Redis", { ...TYPO_WRITES_ENV, UPSTASH_REDIS_REST_URL: undefined, UPSTASH_REDIS_REST_TOKEN: undefined }, NOT_CONFIGURED, "payment_misconfigured"],
@@ -1095,7 +1098,7 @@ test("the fallback is for typos only: a lock (live_payments_locked), a missing t
   });
 });
 
-test("beamFallbackPossible asks what getBeamDrainConfig asks, from the variables alone (rounds 7 and 8): a typo error, a provider other than beam, a recognised base (the live one only with LIVE_FULFILMENT_READY.beam), both keys, BEAM_WEBHOOK_HMAC_KEY, a strong secret and the Cloudbeds writes the Beam config accepts", async () => {
+test("beamFallbackPossible asks what getBeamDrainConfig asks, from the variables alone (rounds 7 and 8): a typo error, a provider other than beam, a recognised base (the live one only with every beam-live fulfilment condition, LIVE_FULFILMENT_READY.beam among them), both keys, BEAM_WEBHOOK_HMAC_KEY, a strong secret and the Cloudbeds writes the Beam config accepts", async () => {
   // routeFallback.ts imports runtime.ts (next/server): loaded once the resolve hook is in place.
   await loadRoutes();
   const { beamFallbackPossible } = await import("./routeFallback.ts");
@@ -1107,12 +1110,16 @@ test("beamFallbackPossible asks what getBeamDrainConfig asks, from the variables
     }
     return null;
   };
-  assert.equal(LIVE_FULFILMENT_READY.beam, false);
+  assert.equal(LIVE_FULFILMENT_READY.beam, true, "S7.1");
   const cases: [string, Env, boolean][] = [
     ["the Beam playground drain variables", TYPO_ENV, true],
     ["no BEAM_WEBHOOK_HMAC_KEY", { ...TYPO_ENV, BEAM_WEBHOOK_HMAC_KEY: undefined }, false],
     ["a blank BEAM_WEBHOOK_HMAC_KEY", { ...TYPO_ENV, BEAM_WEBHOOK_HMAC_KEY: "  " }, false],
-    ["the live base (the code switch is off)", { ...TYPO_ENV, BEAM_API_BASE: BEAM_LIVE_BASE }, false],
+    ["the live base without the beam-live fulfilment conditions (not production, no real writes)", { ...TYPO_ENV, BEAM_API_BASE: BEAM_LIVE_BASE }, false],
+    // Since S7.1: the live base with every beam-live fulfilment condition (production, real writes, Redis, live data, a sweep secret).
+    ["the live base with every beam-live fulfilment condition", { ...TYPO_WRITES_ENV, BEAM_API_BASE: BEAM_LIVE_BASE, VERCEL_ENV: "production" }, true],
+    ["the live base with every condition but a short HMAC key", { ...TYPO_WRITES_ENV, BEAM_API_BASE: BEAM_LIVE_BASE, VERCEL_ENV: "production", BEAM_WEBHOOK_HMAC_KEY: "c2hvcnQ=" }, false],
+    ["the live base with every condition on a Vercel preview", { ...TYPO_WRITES_ENV, BEAM_API_BASE: BEAM_LIVE_BASE, VERCEL_ENV: "preview" }, false],
     ["no BEAM_MERCHANT_ID", { ...TYPO_ENV, BEAM_MERCHANT_ID: undefined }, false],
     ["no BEAM_API_KEY", { ...TYPO_ENV, BEAM_API_KEY: undefined }, false],
     ["an unknown base", { ...TYPO_ENV, BEAM_API_BASE: "https://beam.invalid" }, false],
@@ -1134,7 +1141,7 @@ test("beamFallbackPossible asks what getBeamDrainConfig asks, from the variables
     const e = errorOf(env);
     assert.ok(e instanceof BookingConfigError && e.code === "payment_misconfigured", label);
     assert.equal(beamFallbackPossible(e, env), possible, label);
-    // Round 8: exactly when the Beam drain builds a config (the live base aside: no beam-live drain before S7.1).
+    // Round 8: exactly when the Beam drain builds a config (since S7.1 for the live base too).
     assert.equal(getBeamDrainConfig(env) !== null, possible, `${label}: getBeamDrainConfig`);
   }
   // Never for an error that is not a typo, nor without one.

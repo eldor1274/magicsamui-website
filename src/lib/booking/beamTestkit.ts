@@ -96,7 +96,7 @@ export const BEAM_TEST_ENV: Env = {
   UPSTASH_REDIS_REST_TOKEN: "token-testkit",
 };
 
-/** beam-live with every beamLiveBlockers condition; LIVE_FULFILMENT_READY.beam is overridden by makeBeamKit (tests only). */
+/** beam-live with every beamLiveBlockers condition (LIVE_FULFILMENT_READY.beam is true since S7.1). */
 export const BEAM_LIVE_ENV: Env = {
   ...BEAM_TEST_ENV,
   BEAM_API_BASE: BEAM_LIVE_BASE,
@@ -105,6 +105,12 @@ export const BEAM_LIVE_ENV: Env = {
   BOOKING_SWEEP_SECRET: "sweep-secret-testkit-0123456789",
   CLOUDBEDS_SEND_STATUS_EMAIL: "true",
 };
+
+/**
+ * BEAM_LIVE_ENV emergency-stopped (BOOKING_ALLOW_LIVE_PAYMENTS=false): a locked beam-live page (checkout), while
+ * fulfilment still runs. Since S7.1 the code switch no longer locks beam-live, so this is the tests' locked Beam page.
+ */
+export const BEAM_LIVE_STOPPED_ENV: Env = { ...BEAM_LIVE_ENV, BOOKING_ALLOW_LIVE_PAYMENTS: "false" };
 
 export interface BeamKit {
   config: BookingConfig;
@@ -144,7 +150,7 @@ export function makeBeamKit(
 ): BeamKit {
   const now = options.now ?? { ms: NOW };
   const env = options.env ?? BEAM_TEST_ENV;
-  // beam-live stays locked in code (LIVE_FULFILMENT_READY.beam = false); tests unlock it here only.
+  // The code switch is passed explicitly (true, as in code since S7.1): a kit's beam-live never depends on it.
   const config = getBookingConfig(env, { liveFulfilmentReady: true });
   const beam = config.beam;
   if (!beam) throw new Error(`makeBeamKit: ${config.paymentMode} is not a Beam mode`);

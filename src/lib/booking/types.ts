@@ -21,7 +21,7 @@ export type PaymentProvider = "demo" | "beam" | "stripe";
 /**
  * Concrete payment mode (provider + test/live):
  * - demo: simulated payment, nothing leaves our servers.
- * - beam-playground / beam-live: Beam payment links (beam-live is locked in code: no fulfilment).
+ * - beam-playground / beam-live: Beam payment links, hold-first (beam-live: every beamLiveBlockers condition).
  * - stripe-mock: in-repo fake Stripe + fake Cloudbeds (local click-through, clearly labelled MOCK).
  * - stripe-test: Stripe test keys (sk_test_/rk_test_). Cloudbeds writes are REAL when
  *   CLOUDBEDS_API_KEY_BOOKING is set (guarded), otherwise mocked.

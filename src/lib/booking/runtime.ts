@@ -331,9 +331,9 @@ export function getStripeFulfilmentDeps(env: Record<string, string | undefined> 
  * config's when it is a Beam mode (its beam-live branch included: emergency
  * stop, no Cloudbeds email), else the Beam drain config's (getBeamDrainConfig:
  * BOOKING_PAYMENT_PROVIDER switched away from beam), logging beam_drain_mode
- * once. null when Beam is not configured, and for a beam-live drain while
- * LIVE_FULFILMENT_READY.beam is false. `timing`: getBeamDeps'. Never use this
- * for checkout.
+ * once. null when Beam is not configured (a beam-live drain also needs
+ * LIVE_FULFILMENT_READY.beam, true since S7.1, and every fulfilment condition).
+ * `timing`: getBeamDeps'. Never use this for checkout.
  */
 export function getBeamFulfilmentDeps(env: Record<string, string | undefined> = process.env, timing: BeamTiming = {}): BeamGatewayDeps | null {
   let config: BookingConfig | null = null;

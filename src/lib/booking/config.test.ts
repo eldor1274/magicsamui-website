@@ -79,15 +79,31 @@ test("live mode is locked unless every condition holds", () => {
   assert.equal(resolvePaymentMode(full, { liveFulfilmentReady: true }), "beam-live");
 });
 
-test("beam live mode is hard-stopped in code (no Beam fulfilment)", () => {
-  assert.equal(LIVE_FULFILMENT_READY.beam, false, "Beam has no fulfilment: beam-live stays locked");
-  const full = { ...KEYS, ...SECRET, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production", CLOUDBEDS_API_KEY: "cbat_x" };
-  assert.throws(
-    () => resolvePaymentMode(full),
-    (e: unknown) => e instanceof BookingConfigError && e.code === "live_payments_locked",
-  );
-  assert.throws(() => getBookingConfig(full), BookingConfigError);
-  assert.equal(getPublicBookingConfig(full).paymentStatus, "locked");
+// Rewritten in S7.1 (owner decision, 23 Oct 2026): beam-live is no longer hard-stopped in code. The environment alone
+// decides: every beam-live condition unlocks it, and any one missing still locks it (beamConfig.test.ts has the whole
+// lock matrix). With the code switch off again (tests only may pass it), it would be locked whatever the environment.
+test("beam live mode: unlocked in code since S7.1; the full environment is beam-live, any one condition missing locks it, the switch off locks it in code", () => {
+  assert.equal(LIVE_FULFILMENT_READY.beam, true, "S7.1: Beam has fulfilment (hold-first checkout, webhook, fulfil, sweeper)");
+  const full = { ...KEYS, ...SECRET, ...BEAM_WRITES, ...BEAM_LIVE_EXTRA, CLOUDBEDS_API_KEY: "cbat_x", BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };
+  assert.equal(resolvePaymentMode(full), "beam-live");
+  assert.equal(getBookingConfig(full).paymentMode, "beam-live");
+  assert.equal(getPublicBookingConfig(full).paymentStatus, "ok");
+  assert.equal(getPublicBookingConfig(full).live, true);
+  const locked = (e: unknown) => e instanceof BookingConfigError && e.code === "live_payments_locked";
+  // The environment the old test used (no writes, no HMAC key, no sweep secret, no Cloudbeds email): still locked.
+  const partial = { ...KEYS, ...SECRET, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production", CLOUDBEDS_API_KEY: "cbat_x" };
+  assert.throws(() => resolvePaymentMode(partial), locked);
+  assert.throws(() => getBookingConfig(partial), BookingConfigError);
+  assert.equal(getPublicBookingConfig(partial).paymentStatus, "locked");
+  // Any one condition missing locks it (without BEAM_API_BASE it is no live Beam config at all; the read key alone is
+  // not a condition: the booking key also reads live Cloudbeds data).
+  for (const name of Object.keys(full).filter((k) => k !== "BEAM_API_BASE" && k !== "CLOUDBEDS_API_KEY")) {
+    assert.throws(() => resolvePaymentMode({ ...full, [name]: undefined }), locked, name);
+    assert.equal(getPublicBookingConfig({ ...full, [name]: undefined }).paymentStatus, "locked", name);
+  }
+  // The code switch off (as before S7.1): locked in code, whatever the environment says.
+  assert.throws(() => resolvePaymentMode(full, { liveFulfilmentReady: false }), locked);
+  assert.throws(() => getBookingConfig(full, { liveFulfilmentReady: false }), BookingConfigError);
 });
 
 /**
@@ -121,9 +137,10 @@ async function beamLivePaidAnswer(): Promise<{ body: StatusResponse; dueNowSatan
 
 // Guard for the Beam work (step S4.5 before S7.1). Since S0.3 the browser sends the GA4 purchase in every mode but
 // the demo ONLY with the server's confirmation (StatusResponse.purchase: the Cloudbeds reservationID as transaction
-// id). Unlocked without it, beam-live would take money and never count a purchase. This test fails as soon as the
-// switch is flipped while Beam's paid answer carries no purchase (it does since S4.6: the test below).
+// id). Unlocked without it, beam-live would take money and never count a purchase. The switch is on since S7.1, so
+// Beam's paid answer must carry the purchase (it does since S4.6: the test below); this fails if it ever stops.
 test("guard: LIVE_FULFILMENT_READY.beam may only be true once Beam's paid status answer carries the purchase", async () => {
+  assert.equal(LIVE_FULFILMENT_READY.beam, true, "S7.1");
   const { body } = await beamLivePaidAnswer();
   assert.ok(
     body.purchase !== null || !LIVE_FULFILMENT_READY.beam,

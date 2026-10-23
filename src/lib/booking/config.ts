@@ -11,8 +11,9 @@
 //   A live key is only ever used when EVERY condition in stripeLiveBlockers()
 //   holds; anything missing throws live_payments_locked (nothing charged).
 // - beam-live likewise needs every condition in beamLiveBlockers() (design
-//   S3.4), one of which is the code switch LIVE_FULFILMENT_READY.beam: it stays
-//   false, so beam-live stays locked in code (Beam has no fulfilment yet).
+//   S3.4), one of which is the code switch LIVE_FULFILMENT_READY.beam: true
+//   since design S7.1 (owner decision, 23 Oct 2026), so the environment alone
+//   decides; with BOOKING_PAYMENT_PROVIDER=stripe Beam only drains.
 // - stripe-test with a Cloudbeds write key writes REAL reservations, so the
 //   checkout refuses holds unless the arrival is 12+ months out and the guest
 //   email is BOOKING_TEST_GUEST_EMAIL (see stripeCheckout.ts).
@@ -115,10 +116,12 @@ export type ReservationPaymentMethod = (typeof RESERVATION_PAYMENT_METHODS)[numb
  * Code-level switch per provider: is there fulfilment that turns a paid
  * session into a confirmed Cloudbeds reservation?
  * - stripe: yes (hold-first + webhook/return-page fulfil + sweeper).
- * - beam: no (its webhook only logs), so beam-live stays refused whatever the
- *   environment says (beamLiveBlockers names it; design S7.1 flips it).
+ * - beam: yes since design S7.1 (owner decision, 23 Oct 2026: the hold-first
+ *   Beam checkout, the HMAC webhook, fulfil and the sweeper's charge scan).
+ *   beam-live still needs every other beamLiveBlockers condition; false again
+ *   would lock it in code whatever the environment says.
  */
-export const LIVE_FULFILMENT_READY: Record<"beam" | "stripe", boolean> = { beam: false, stripe: true };
+export const LIVE_FULFILMENT_READY: Record<"beam" | "stripe", boolean> = { beam: true, stripe: true };
 
 export type Env = Record<string, string | undefined>;
 
@@ -446,8 +449,8 @@ function resolveBeamMode(env: Env, options: ModeOptions, fulfilment = false): Pa
     const missing = beamLiveBlockers(env, { ...options, fulfilment });
     if (missing.includes(BEAM_CODE_SWITCH_BLOCKER)) {
       // While the code switch is off nothing in the environment can unlock beam-live, so the error names only the
-      // switch (missing: []); the message lists the rest. The routes log `missing`, and the golden route record
-      // 'provider beam live (locked in code)' pins that log line until S7.1.
+      // switch (missing: []); the message lists the rest. The routes log `missing`. Unreachable while the switch is
+      // on (since S7.1): the golden route record 'provider beam live (locked in code)' now logs the missing names.
       const rest = missing.filter((m) => m !== BEAM_CODE_SWITCH_BLOCKER);
       throw new BookingConfigError(
         "live_payments_locked",
@@ -1141,8 +1144,9 @@ export function getStripeDrainConfig(env: Env = process.env, options: ModeOption
  * config as if the provider were beam (and BOOKING_ENGINE=cloudbeds) - never
  * for checkout. An invalid provider value still drains. null when the
  * provider is beam (the normal config covers it), Beam is not configured, or
- * that config is not valid: it never throws (money review 11). While
- * LIVE_FULFILMENT_READY.beam is false a beam-live drain is null.
+ * that config is not valid: it never throws (money review 11). A beam-live
+ * drain needs LIVE_FULFILMENT_READY.beam (true since S7.1) and every
+ * fulfilment condition of beamLiveBlockers.
  */
 export function getBeamDrainConfig(env: Env = process.env, options: ModeOptions = {}): BookingConfig | null {
   try {

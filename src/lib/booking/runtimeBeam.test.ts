@@ -273,10 +273,18 @@ test("getBeamFulfilmentDeps and getFulfilmentProviderDeps(env, 'beam'): the acti
     assert.deepEqual([timed.deadlineMs, timed.clock], [50, clock]);
   });
 
-  // beam-live stays locked in code (LIVE_FULFILMENT_READY.beam is false): no active Beam deps, and the provider is beam, so no drain.
-  await withRuntime(t, BEAM_LIVE_ENV, async ({ runtime }) => {
-    assert.equal(runtime.getBeamFulfilmentDeps(BEAM_LIVE_ENV), null);
-    assert.equal(runtime.getFulfilmentProviderDeps(BEAM_LIVE_ENV, "beam"), null);
+  // beam-live (since S7.1: LIVE_FULFILMENT_READY.beam is true): the active Beam config's deps, no drain line.
+  await withRuntime(t, BEAM_LIVE_ENV, async ({ runtime, rt, lines }) => {
+    assert.equal(runtime.getBeamFulfilmentDeps(BEAM_LIVE_ENV)?.config.paymentMode, "beam-live");
+    assert.equal(runtime.getFulfilmentProviderDeps(BEAM_LIVE_ENV, "beam")?.gw.provider, "beam");
+    assert.deepEqual(lines.filter((l) => l.includes("beam_drain_mode")), []);
+    assert.equal(rt.warnedBeamDrain, undefined);
+  });
+  // beam-live locked for fulfilment too (no sweep secret): no active Beam deps, and the provider is beam, so no drain.
+  const lockedLive = { ...BEAM_LIVE_ENV, BOOKING_SWEEP_SECRET: undefined };
+  await withRuntime(t, lockedLive, async ({ runtime }) => {
+    assert.equal(runtime.getBeamFulfilmentDeps(lockedLive), null);
+    assert.equal(runtime.getFulfilmentProviderDeps(lockedLive, "beam"), null);
   });
 
   // A Stripe deployment that kept the Beam playground variables: the drain, built when a Beam booking asks, logged once.
@@ -305,12 +313,26 @@ test("getBeamFulfilmentDeps and getFulfilmentProviderDeps(env, 'beam'): the acti
     assert.equal(runtime.getBeamFulfilmentDeps(demoDrain)?.config.paymentMode, "beam-playground");
   });
 
-  // Not configured: no Beam variables, no HMAC key, the live Beam variables on a Stripe deployment (code switch off), the demo.
+  // The live Beam variables on a Stripe live deployment (production's setup for the controlled live launch): since S7.1
+  // a beam-live drain, built only when a Beam booking asks, logged once.
+  const liveDrain: Env = { ...STRIPE_LIVE_ENV, ...BEAM_VARS, BEAM_API_BASE: BEAM_LIVE_BASE };
+  await withRuntime(t, liveDrain, async ({ runtime, rt, lines }) => {
+    const stripeConfig = getFulfilmentConfig(liveDrain);
+    assert.equal(stripeConfig.paymentMode, "stripe-live");
+    const fn = runtime.providerDepsFor(stripeConfig, liveDrain);
+    assert.equal(fn("stripe")?.gw.provider, "stripe");
+    assert.equal(rt.warnedBeamDrain, undefined, "no Beam drain is built before a Beam booking asks");
+    assert.equal(fn("beam")?.deps.config.paymentMode, "beam-live");
+    assert.equal(runtime.getBeamFulfilmentDeps(liveDrain)?.config.paymentMode, "beam-live");
+    assert.deepEqual(lines.filter((l) => l.includes("beam_drain_mode")), ['info [booking] beam_drain_mode {"mode":"beam-live"}'], "logged once");
+  });
+
+  // Not configured: no Beam variables, no HMAC key, the live Beam variables on a Stripe deployment with a short HMAC key, the demo.
   for (const env of [
     STRIPE_TEST_ENV,
     { ...STRIPE_WITH_BEAM_DRAIN, BEAM_WEBHOOK_HMAC_KEY: undefined },
     { ...STRIPE_WITH_BEAM_DRAIN, BEAM_API_KEY: " " },
-    { ...STRIPE_LIVE_ENV, ...BEAM_VARS, BEAM_API_BASE: BEAM_LIVE_BASE },
+    { ...STRIPE_LIVE_ENV, ...BEAM_VARS, BEAM_API_BASE: BEAM_LIVE_BASE, BEAM_WEBHOOK_HMAC_KEY: "c2hvcnQ=" },
     { ...STRIPE_TEST_ENV, BOOKING_PAYMENT_PROVIDER: "demo" },
     { BOOKING_PAYMENT_PROVIDER: "demo" },
   ] as Env[]) {

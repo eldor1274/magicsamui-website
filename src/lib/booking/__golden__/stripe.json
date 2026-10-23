@@ -8869,7 +8869,7 @@
         {
           "step": "runtime deps",
           "answer": {
-            "getStripeDeps(getFulfilmentConfig())": {"thrown":"live_payments_locked"},
+            "getStripeDeps(getFulfilmentConfig())": null,
             "getStripeFulfilmentDeps()": {"paymentMode":"stripe-live","kv":"redis","writer":"live","restrictions":true,"stripe":{"livemode":true,"mock":false,"webhookSecretSet":true}}
           },
           "logs": [
@@ -8879,62 +8879,50 @@
         {
           "step": "status: bad token",
           "answer": {
-            "status": 503,
+            "status": 400,
             "cacheControl": "no-store",
             "contentType": "application/json",
-            "body": {"ok":false,"error":"live_payments_locked","message":"Online payment on this page is paused right now. No payment was taken."}
-          },
-          "logs": [
-            "error [booking] config error: live_payments_locked"
-          ]
+            "body": {"ok":false,"error":"invalid_token","message":"This booking link is not valid."}
+          }
         },
         {
           "step": "status: a stripe-live booking with no session recorded yet",
           "answer": {
-            "status": 503,
+            "status": 200,
             "cacheControl": "no-store",
             "contentType": "application/json",
-            "body": {"ok":false,"error":"live_payments_locked","message":"Online payment on this page is paused right now. No payment was taken."}
+            "body": {"ok":true,"ref":"MSV-20261005-GQ7K","paymentMode":"stripe-live","provider":"stripe","status":"pending","failureCode":null,"booking":{"ref":"MSV-20261005-GQ7K","paymentMode":"stripe-live","checkIn":"2027-11-10","checkOut":"2027-11-13","nights":3,"items":[{"slug":"honeymoon-suite","ratePlanId":"standard","adults":2,"addonIds":[]}],"itemRoomSatang":[2700000],"promoCode":null,"totalSatang":2835000,"cardFeeSatang":135000,"dueNowSatang":2835000,"createdAt":"2026-10-05T03:00:00.000Z","linkExpiresAt":"2026-10-05T03:30:00.000Z"},"fulfilment":{"state":"awaiting_payment","reservationId":null},"purchase":null,"checkedAt":"2026-10-05T03:00:00.000Z"}
           },
           "logs": [
-            "error [booking] config error: live_payments_locked"
+            "info stripe_drain_mode"
           ]
         },
         {
           "step": "status: a stripe-test booking",
           "answer": {
-            "status": 503,
+            "status": 409,
             "cacheControl": "no-store",
             "contentType": "application/json",
-            "body": {"ok":false,"error":"live_payments_locked","message":"Online payment on this page is paused right now. No payment was taken."}
-          },
-          "logs": [
-            "error [booking] config error: live_payments_locked"
-          ]
+            "body": {"ok":false,"error":"invalid_token","message":"This booking was made in a different payment mode."}
+          }
         },
         {
           "step": "abandon: a stripe-live booking with no session recorded yet",
           "answer": {
-            "status": 503,
+            "status": 200,
             "cacheControl": "no-store",
             "contentType": "application/json",
-            "body": {"ok":false,"error":"live_payments_locked","message":"Online payment on this page is paused right now. No payment was taken."}
-          },
-          "logs": [
-            "error [booking] config error: live_payments_locked"
-          ]
+            "body": {"ok":true,"state":"closed"}
+          }
         },
         {
           "step": "abandon: not JSON",
           "answer": {
-            "status": 503,
+            "status": 415,
             "cacheControl": "no-store",
             "contentType": "application/json",
-            "body": {"ok":false,"error":"live_payments_locked","message":"Online payment on this page is paused right now. No payment was taken."}
-          },
-          "logs": [
-            "error [booking] config error: live_payments_locked"
-          ]
+            "body": {"ok":false,"error":"invalid_request","message":"Expected a JSON request body."}
+          }
         },
         {
           "step": "webhook: no signature",
@@ -8948,7 +8936,6 @@
             {"op":"incr","key":"msv:live:webhook:badsig","ttl":3600,"result":1}
           ],
           "logs": [
-            "info stripe_drain_mode",
             "info stripe_webhook_bad_signature"
           ]
         },

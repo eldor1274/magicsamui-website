@@ -12,7 +12,9 @@
 //
 // Step S3.4: beamLiveBlockers (the live-lock matrix), the Beam branch of getFulfilmentConfig (checkout-only conditions),
 // getBeamDrainConfig (drains in both directions), finishesLivePayments and resolveBookingEngine for beam-live.
-// LIVE_FULFILMENT_READY.beam stays false: the beam-live cases override it (READY), as tests only may.
+// Step S7.1 (owner decision, 23 Oct 2026): LIVE_FULFILMENT_READY.beam is true, so READY (the override tests only may
+// pass) is now the default; SWITCH_OFF passes the switch as it was before S7.1, for the locked-in-code path. A locked
+// beam-live page is the emergency stop's (STOPPED) where a test needs one.
 
 import { test } from "node:test";
 import type { TestContext } from "node:test";
@@ -82,6 +84,10 @@ const LIVE_EXTRA: Env = {
 /** beam-live with every beamLiveBlockers condition (the code switch is overridden where it is used). */
 const BEAM_LIVE: Env = { ...BEAM_PG, ...WRITES, ...LIVE_EXTRA, BEAM_API_BASE: BEAM_LIVE_BASE, BOOKING_ALLOW_LIVE_PAYMENTS: "true", VERCEL_ENV: "production" };
 const READY = { liveFulfilmentReady: true };
+/** The code switch off, as before S7.1 (tests only): beam-live is locked in code. */
+const SWITCH_OFF = { liveFulfilmentReady: false };
+/** The emergency stop on the full beam-live fixture: a locked beam-live page (checkout only; fulfilment still runs). */
+const STOPPED: Env = { BOOKING_ALLOW_LIVE_PAYMENTS: "false" };
 const MOCK_ENV: Env = { BOOKING_PAYMENT_PROVIDER: "stripe", BOOKING_STRIPE_MOCK: "true" };
 const BEAM_SETTING_VARS: Env = {
   BEAM_PROMPTPAY: "off",
@@ -230,8 +236,8 @@ test("Beam with live Cloudbeds rates: the direct-rate promo, the automatic disco
   assert.deepEqual(getInventoryConfig({ ...env, BOOKING_AUTO_DISCOUNT_PLANS: "Long term" }).cloudbeds?.autoDiscountPlans, ["Long term"]);
   // No Cloudbeds rates: every code points to the classic booking page.
   assert.equal(getBookingConfig(BEAM_PG).promo.mode, "classic-only");
-  // Locked (beam-live is switched off in code): availability still uses the Beam rules.
-  const lockedEnv = { ...BEAM_LIVE };
+  // Locked (the emergency stop; since S7.1 the code switch no longer locks beam-live): availability still uses the Beam rules.
+  const lockedEnv = { ...BEAM_LIVE, ...STOPPED };
   assert.throws(() => getBookingConfig(lockedEnv), BookingConfigError);
   assert.deepEqual(getInventoryConfig(lockedEnv).cloudbeds?.baseRateOnly, true);
   assert.deepEqual(getInventoryConfig(lockedEnv).promo.mode, "direct-rate");
@@ -362,8 +368,8 @@ test("payment methods: card, PromptPay and the e-wallets by default; BEAM_EWALLE
   // The card brands Beam pages name: Visa, Mastercard, JCB, Amex (no UnionPay).
   assert.deepEqual(getPublicBookingConfig(BEAM_PG).acceptedCardBrands, ["visa", "mastercard", "jcb", "amex"]);
   assert.deepEqual([...BEAM_CARD_BRANDS], ["visa", "mastercard", "jcb", "amex"]);
-  // A locked Beam page shows the same.
-  const locked = getPublicBookingConfig({ ...BEAM_LIVE, BEAM_EWALLETS: "off" });
+  // A locked Beam page (the emergency stop) shows the same.
+  const locked = getPublicBookingConfig({ ...BEAM_LIVE, ...STOPPED, BEAM_EWALLETS: "off" });
   assert.equal(locked.paymentStatus, "locked");
   assert.deepEqual(locked.paymentMethods, ["card", "promptpay"]);
   assert.deepEqual(locked.acceptedCardBrands, ["visa", "mastercard", "jcb", "amex"]);
@@ -375,7 +381,8 @@ test("the Beam-only fields: present for Beam (ok and locked), absent in every St
   const hasBeamFields = (pub: PublicBookingConfig) => "feeByMethod" in pub || "attemptPayableMinutes" in pub;
   assert.equal(hasBeamFields(getPublicBookingConfig(BEAM_PG)), true);
   assert.equal(hasBeamFields(getPublicBookingConfig(BEAM_PG_WRITES)), true);
-  assert.equal(hasBeamFields(getPublicBookingConfig(BEAM_LIVE)), true, "locked");
+  assert.equal(hasBeamFields(getPublicBookingConfig({ ...BEAM_LIVE, ...STOPPED })), true, "locked");
+  assert.equal(hasBeamFields(getPublicBookingConfig(BEAM_LIVE)), true, "beam-live (since S7.1)");
   assert.equal(hasBeamFields(toPublicConfig(getBookingConfig(BEAM_LIVE, READY), BEAM_LIVE)), true);
 
   const stripeEnvs: [string, Env][] = [
@@ -695,16 +702,21 @@ test("Beam payment method problems never lock the config: fulfilment, release an
     assert.equal(getFulfilmentConfig(env).paymentMode, "beam-playground", `${label}: fulfilment`);
     assert.equal(getPublicBookingConfig(env).paymentStatus, getPublicBookingConfig({ ...BEAM_PG_WRITES, ...BEAM_METHOD }).paymentStatus, `${label}: the page is not locked by it`);
   }
-  // beam-live (the code switch overridden, as tests only may): loads with the problem. Locked in code, it is locked the
-  // same way with or without a usable method: the method is not a live-lock condition.
+  // beam-live (the code switch on since S7.1; READY changes nothing): loads with the problem. Locked (the emergency
+  // stop), it is locked the same way with or without a usable method: the method is not a live-lock condition.
   const live = { ...BEAM_LIVE, CLOUDBEDS_BEAM_PAYMENT_METHOD: "Beam website" };
-  assert.equal(getBookingConfig(live, READY).paymentMode, "beam-live");
-  assert.match(getBookingConfig(live, READY).cloudbedsPaymentMethodProblem ?? "", /^CLOUDBEDS_BEAM_PAYMENT_METHOD "Beam website" is not a Cloudbeds payment method value/);
-  assert.equal(getFulfilmentConfig(live, READY).paymentMode, "beam-live");
-  const locked = thrown(() => getBookingConfig(live));
-  assert.equal(locked?.code, "live_payments_locked");
-  assert.deepEqual(locked, thrown(() => getBookingConfig({ ...BEAM_LIVE, ...BEAM_METHOD })));
+  assert.equal(getBookingConfig(live).paymentMode, "beam-live");
+  assert.deepEqual(getBookingConfig(live), getBookingConfig(live, READY));
+  assert.match(getBookingConfig(live).cloudbedsPaymentMethodProblem ?? "", /^CLOUDBEDS_BEAM_PAYMENT_METHOD "Beam website" is not a Cloudbeds payment method value/);
+  assert.equal(getFulfilmentConfig(live).paymentMode, "beam-live");
+  const locked = thrown(() => getBookingConfig({ ...live, ...STOPPED }));
+  assert.deepEqual(locked, { code: "live_payments_locked", missing: ["BOOKING_ALLOW_LIVE_PAYMENTS=true"] });
+  assert.deepEqual(locked, thrown(() => getBookingConfig({ ...BEAM_LIVE, ...BEAM_METHOD, ...STOPPED })));
   assert.ok(!locked?.missing.some((m) => m.includes("PAYMENT_METHOD")), JSON.stringify(locked));
+  assert.equal(getFulfilmentConfig({ ...live, ...STOPPED }).paymentMode, "beam-live", "the emergency stop never stops fulfilment");
+  // The code switch off (as before S7.1): locked in code the same way with or without a usable method.
+  assert.deepEqual(thrown(() => getBookingConfig(live, SWITCH_OFF)), thrown(() => getBookingConfig({ ...BEAM_LIVE, ...BEAM_METHOD }, SWITCH_OFF)));
+  assert.equal(thrown(() => getBookingConfig(live, SWITCH_OFF))?.code, "live_payments_locked");
 
   // Checkout with real Cloudbeds writes refuses before the provider is asked or anything is held, with the
   // existing alert: the subject and second line unchanged, the problem line naming Beam's variable and method.
@@ -779,13 +791,21 @@ function messageOf(fn: () => unknown): string {
   throw new Error("did not throw");
 }
 
-test("beamLiveBlockers names every beam-live condition, in order; fulfilment skips the emergency stop and the Cloudbeds email; the fixture lacks only the code switch", () => {
-  assert.deepEqual(beamLiveBlockers({}), ALL_BLOCKERS);
+test("beamLiveBlockers names every beam-live condition, in order; fulfilment skips the emergency stop and the Cloudbeds email; the fixture meets every one (the code switch is on since S7.1)", () => {
+  const ENV_BLOCKERS = ALL_BLOCKERS.filter((m) => m !== SWITCH_BLOCKER);
+  assert.deepEqual(beamLiveBlockers({}), ENV_BLOCKERS, "the code switch is on (S7.1): only the environment's conditions");
+  assert.deepEqual(beamLiveBlockers({}, SWITCH_OFF), ALL_BLOCKERS, "the switch off: named last");
   assert.deepEqual(
     beamLiveBlockers({}, { fulfilment: true }),
+    ENV_BLOCKERS.filter((m) => m !== ALLOW_BLOCKER && m !== EMAIL_BLOCKER),
+  );
+  assert.deepEqual(
+    beamLiveBlockers({}, { ...SWITCH_OFF, fulfilment: true }),
     ALL_BLOCKERS.filter((m) => m !== ALLOW_BLOCKER && m !== EMAIL_BLOCKER),
   );
-  assert.deepEqual(beamLiveBlockers(BEAM_LIVE), [SWITCH_BLOCKER], "LIVE_FULFILMENT_READY.beam stays false");
+  assert.equal(LIVE_FULFILMENT_READY.beam, true, "S7.1");
+  assert.deepEqual(beamLiveBlockers(BEAM_LIVE), [], "LIVE_FULFILMENT_READY.beam is true since S7.1");
+  assert.deepEqual(beamLiveBlockers(BEAM_LIVE, SWITCH_OFF), [SWITCH_BLOCKER], "the switch off: it alone");
   assert.deepEqual(beamLiveBlockers(BEAM_LIVE, READY), []);
   assert.deepEqual(beamLiveBlockers(BEAM_LIVE, FULFIL), []);
   // The same alternatives Stripe accepts: a trailing slash, Vercel's CRON_SECRET, the Vercel names of Redis.
@@ -797,9 +817,12 @@ test("beamLiveBlockers names every beam-live condition, in order; fulfilment ski
   // The playground base is not the live one (that env is beam-playground, not a locked beam-live).
   assert.deepEqual(beamLiveBlockers({ ...BEAM_LIVE, BEAM_API_BASE: BEAM_PLAYGROUND_BASE }, READY), ["BEAM_API_BASE (https://api.beamcheckout.com)"]);
   assert.equal(getBookingConfig({ ...BEAM_LIVE, BEAM_API_BASE: BEAM_PLAYGROUND_BASE }).paymentMode, "beam-playground");
-  // The Stripe live deployment with the Beam live variables, switched to beam: the Cloudbeds email (checkout) and the code switch.
-  assert.deepEqual(beamLiveBlockers({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" }), [EMAIL_BLOCKER, SWITCH_BLOCKER]);
-  assert.deepEqual(beamLiveBlockers({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" }, { fulfilment: true }), [SWITCH_BLOCKER]);
+  // The Stripe live deployment with the Beam live variables, switched to beam: the Cloudbeds email (checkout) only since
+  // S7.1, nothing for fulfilment; the code switch too while it is off.
+  assert.deepEqual(beamLiveBlockers({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" }), [EMAIL_BLOCKER]);
+  assert.deepEqual(beamLiveBlockers({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" }, { fulfilment: true }), []);
+  assert.deepEqual(beamLiveBlockers({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" }, SWITCH_OFF), [EMAIL_BLOCKER, SWITCH_BLOCKER]);
+  assert.deepEqual(beamLiveBlockers({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" }, { ...SWITCH_OFF, fulfilment: true }), [SWITCH_BLOCKER]);
   // The Cloudbeds payment method is not a condition (S3.3): checkout refuses with an alert instead.
   assert.ok(!ALL_BLOCKERS.some((m) => m.includes("PAYMENT_METHOD")));
   assert.deepEqual(beamLiveBlockers({ ...BEAM_LIVE, CLOUDBEDS_BEAM_PAYMENT_METHOD: "credit" }, READY), []);
@@ -828,6 +851,7 @@ test("the beam-live lock matrix: each blocker alone locks checkout and names onl
     ["a short sweep secret", { BOOKING_SWEEP_SECRET: "short" }, SWEEP_BLOCKER, false],
   ];
   assert.equal(getBookingConfig(BEAM_LIVE, READY).paymentMode, "beam-live", "the full fixture is beam-live");
+  assert.equal(getBookingConfig(BEAM_LIVE).paymentMode, "beam-live", "also without the override (S7.1)");
   for (const [label, patch, blocker, checkoutOnly] of cases) {
     const env = { ...BEAM_LIVE, ...patch };
     const locked = { code: "live_payments_locked", missing: [blocker] };
@@ -845,43 +869,80 @@ test("the beam-live lock matrix: each blocker alone locks checkout and names onl
       assert.deepEqual(beamLiveBlockers(env, FULFIL), [blocker], label);
       assert.deepEqual(thrown(() => getFulfilmentConfig(env, READY)), locked, `${label}: fulfilment too`);
     }
-    // The code switch as it is (false): locked in code, checkout and fulfilment alike.
-    assert.deepEqual(thrown(() => getBookingConfig(env)), { code: "live_payments_locked", missing: [] }, label);
-    assert.equal(thrown(() => getFulfilmentConfig(env))?.code, "live_payments_locked", label);
+    // The code switch as it is (true since S7.1): the same lock without the override, naming its blocker.
+    assert.deepEqual(beamLiveBlockers(env), [blocker], label);
+    assert.deepEqual(thrown(() => getBookingConfig(env)), locked, label);
+    if (checkoutOnly) assert.equal(getFulfilmentConfig(env).paymentMode, "beam-live", label);
+    else assert.deepEqual(thrown(() => getFulfilmentConfig(env)), locked, label);
+    // The code switch off (as before S7.1): locked in code, checkout and fulfilment alike, naming only the switch.
+    assert.deepEqual(thrown(() => getBookingConfig(env, SWITCH_OFF)), { code: "live_payments_locked", missing: [] }, label);
+    assert.equal(thrown(() => getFulfilmentConfig(env, SWITCH_OFF))?.code, "live_payments_locked", label);
   }
 });
 
-test("the code switch: while LIVE_FULFILMENT_READY.beam is false beam-live is locked in code for checkout and fulfilment; the error names only the switch (missing: [], the routes' log line) and its message the rest", () => {
-  assert.equal(LIVE_FULFILMENT_READY.beam, false);
-  const stopped: Env = { ...BEAM_LIVE, BOOKING_ALLOW_LIVE_PAYMENTS: "false" };
+// Rewritten in S7.1 (owner decision, 23 Oct 2026): the switch is on, so the environment alone decides; the
+// locked-in-code path is still pinned with the switch passed off (tests only), as it behaved before S7.1.
+test("the code switch: on since S7.1, beam-live unlocks with every condition and still locks with any one missing (naming it); switched off, beam-live is locked in code for checkout and fulfilment and the error names only the switch (missing: []) and its message the rest", () => {
+  assert.equal(LIVE_FULFILMENT_READY.beam, true, "S7.1");
+  const stopped: Env = { ...BEAM_LIVE, ...STOPPED };
   const noEmail: Env = { ...BEAM_LIVE, CLOUDBEDS_SEND_STATUS_EMAIL: undefined };
-  for (const env of [BEAM_LIVE, stopped, noEmail]) {
+  // On: the full fixture is beam-live end to end; the emergency stop and the missing email lock checkout only.
+  assert.equal(resolvePaymentMode(BEAM_LIVE), "beam-live");
+  assert.equal(getBookingConfig(BEAM_LIVE).paymentMode, "beam-live");
+  assert.equal(getFulfilmentConfig(BEAM_LIVE).paymentMode, "beam-live");
+  assert.equal(getPublicBookingConfig(BEAM_LIVE).paymentStatus, "ok");
+  assert.equal(getPublicBookingConfig(BEAM_LIVE).live, true);
+  assert.equal(resolveBookingEngine({ ...BEAM_LIVE, BOOKING_ENGINE: "own" }), "own");
+  assert.equal(finishesLivePayments(BEAM_LIVE), true);
+  assert.equal(getBeamDrainConfig({ ...BEAM_LIVE, BOOKING_PAYMENT_PROVIDER: "stripe" })?.paymentMode, "beam-live");
+  for (const [env, blocker] of [[stopped, ALLOW_BLOCKER], [noEmail, EMAIL_BLOCKER]] as [Env, string][]) {
     const label = JSON.stringify({ allow: env.BOOKING_ALLOW_LIVE_PAYMENTS, email: env.CLOUDBEDS_SEND_STATUS_EMAIL ?? null });
-    assert.deepEqual(thrown(() => resolvePaymentMode(env)), { code: "live_payments_locked", missing: [] }, label);
-    assert.deepEqual(thrown(() => getBookingConfig(env)), { code: "live_payments_locked", missing: [] }, label);
-    assert.deepEqual(thrown(() => getFulfilmentConfig(env)), { code: "live_payments_locked", missing: [] }, label);
+    assert.deepEqual(thrown(() => resolvePaymentMode(env)), { code: "live_payments_locked", missing: [blocker] }, label);
+    assert.deepEqual(thrown(() => getBookingConfig(env)), { code: "live_payments_locked", missing: [blocker] }, label);
+    assert.equal(getFulfilmentConfig(env).paymentMode, "beam-live", label);
     assert.equal(getPublicBookingConfig(env).paymentStatus, "locked", label);
     assert.equal(resolveBookingEngine({ ...env, BOOKING_ENGINE: "own" }), "cloudbeds", label);
-    assert.equal(finishesLivePayments(env), false, label);
-    assert.equal(getBeamDrainConfig({ ...env, BOOKING_PAYMENT_PROVIDER: "stripe" }), null, label);
+    assert.equal(finishesLivePayments(env), true, label);
+    assert.equal(getBeamDrainConfig({ ...env, BOOKING_PAYMENT_PROVIDER: "stripe" })?.paymentMode, "beam-live", label);
   }
   assert.equal(
-    messageOf(() => getBookingConfig(BEAM_LIVE)),
+    messageOf(() => getBookingConfig({ ...BEAM_LIVE, BEAM_WEBHOOK_HMAC_KEY: undefined, CLOUDBEDS_SEND_STATUS_EMAIL: undefined })),
+    `BEAM_API_BASE points at the live Beam API but live Beam payments are locked. Missing: ${HMAC_BLOCKER}; ${EMAIL_BLOCKER}.`,
+  );
+  // Off (as before S7.1): locked in code, checkout and fulfilment alike, whatever the environment says.
+  for (const env of [BEAM_LIVE, stopped, noEmail]) {
+    const label = JSON.stringify({ allow: env.BOOKING_ALLOW_LIVE_PAYMENTS, email: env.CLOUDBEDS_SEND_STATUS_EMAIL ?? null });
+    assert.deepEqual(thrown(() => resolvePaymentMode(env, SWITCH_OFF)), { code: "live_payments_locked", missing: [] }, label);
+    assert.deepEqual(thrown(() => getBookingConfig(env, SWITCH_OFF)), { code: "live_payments_locked", missing: [] }, label);
+    assert.deepEqual(thrown(() => getFulfilmentConfig(env, SWITCH_OFF)), { code: "live_payments_locked", missing: [] }, label);
+    assert.equal(resolveBookingEngine({ ...env, BOOKING_ENGINE: "own" }, SWITCH_OFF), "cloudbeds", label);
+    assert.equal(finishesLivePayments(env, SWITCH_OFF), false, label);
+    assert.equal(getBeamDrainConfig({ ...env, BOOKING_PAYMENT_PROVIDER: "stripe" }, SWITCH_OFF), null, label);
+  }
+  assert.equal(
+    messageOf(() => getBookingConfig(BEAM_LIVE, SWITCH_OFF)),
     "Live Beam payments are switched off in code (LIVE_FULFILMENT_READY.beam=false): Beam has no fulfilment, so a real payment could not be " +
       "turned into a reservation. Use BOOKING_PAYMENT_PROVIDER=stripe.",
   );
-  const rest = messageOf(() => getBookingConfig({ ...BEAM_LIVE, BEAM_WEBHOOK_HMAC_KEY: undefined, CLOUDBEDS_SEND_STATUS_EMAIL: undefined }));
+  const rest = messageOf(() => getBookingConfig({ ...BEAM_LIVE, BEAM_WEBHOOK_HMAC_KEY: undefined, CLOUDBEDS_SEND_STATUS_EMAIL: undefined }, SWITCH_OFF));
   assert.ok(rest.endsWith(` Also missing: ${HMAC_BLOCKER}; ${EMAIL_BLOCKER}.`), rest);
-  // Names only, never a value.
-  const all = messageOf(() => getBookingConfig({ ...BEAM_LIVE, BEAM_WEBHOOK_HMAC_KEY: "c2hvcnQ=", BOOKING_SWEEP_SECRET: "short-secret" }));
-  for (const value of ["c2hvcnQ=", "short-secret", SECRET.BOOKING_TOKEN_SECRET, WRITES.UPSTASH_REDIS_REST_TOKEN ?? "", WRITES.CLOUDBEDS_API_KEY_BOOKING ?? ""]) {
-    assert.ok(!all.includes(value), value);
+  // Names only, never a value (with the switch on and off).
+  for (const options of [{}, SWITCH_OFF]) {
+    const all = messageOf(() => getBookingConfig({ ...BEAM_LIVE, BEAM_WEBHOOK_HMAC_KEY: "c2hvcnQ=", BOOKING_SWEEP_SECRET: "short-secret" }, options));
+    for (const value of ["c2hvcnQ=", "short-secret", SECRET.BOOKING_TOKEN_SECRET, WRITES.UPSTASH_REDIS_REST_TOKEN ?? "", WRITES.CLOUDBEDS_API_KEY_BOOKING ?? ""]) {
+      assert.ok(!all.includes(value), value);
+    }
   }
-  // The golden route env 'provider beam live (locked in code), Stripe live credentials kept': the same lock for the
-  // status and abandon routes (getFulfilmentConfig), missing [] (their log line, pinned by the golden record).
+  // The golden route env 'provider beam live (locked in code), Stripe live credentials kept' (STRIPE_LIVE_ENV, the live
+  // Beam variables, provider beam, no CLOUDBEDS_SEND_STATUS_EMAIL). Since S7.1 (its one sanctioned golden change):
+  // checkout is locked by the Cloudbeds email alone (the routes log that name), status and abandon answer from Beam
+  // (getFulfilmentConfig is beam-live) and the Stripe drain still finishes the Stripe bookings, as before.
   const golden = { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BOOKING_PAYMENT_PROVIDER: "beam" };
-  assert.deepEqual(thrown(() => getFulfilmentConfig(golden)), { code: "live_payments_locked", missing: [] });
+  assert.deepEqual(thrown(() => getBookingConfig(golden)), { code: "live_payments_locked", missing: [EMAIL_BLOCKER] });
+  assert.equal(getFulfilmentConfig(golden).paymentMode, "beam-live");
   assert.equal(getStripeDrainConfig(golden)?.paymentMode, "stripe-live", "the Stripe drain finishes the Stripe bookings, as before");
+  // ...and as it was before S7.1: the same lock for the status and abandon routes, missing [].
+  assert.deepEqual(thrown(() => getFulfilmentConfig(golden, SWITCH_OFF)), { code: "live_payments_locked", missing: [] });
 });
 
 test("the webhook HMAC key: base64 (the standard alphabet, padding optional), at least 16 bytes once decoded", () => {
@@ -952,10 +1013,11 @@ test("getFulfilmentConfig: beam-live locked only by the emergency stop or the Cl
   assert.deepEqual(getFulfilmentConfig({}), getBookingConfig({}));
 });
 
-test("getBeamDrainConfig: provider stripe (or demo, or an invalid value) with the Beam variables drains Beam once the switch is overridden; provider beam with Stripe variables keeps the unchanged Stripe drain", () => {
+test("getBeamDrainConfig: provider stripe (or demo, or an invalid value) with the Beam variables drains Beam (the code switch is on since S7.1); provider beam with Stripe variables keeps the unchanged Stripe drain", () => {
   const stripePrimary = { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS };
   assert.equal(getBookingConfig(stripePrimary).paymentMode, "stripe-live", "the active config is Stripe's");
-  assert.equal(getBeamDrainConfig(stripePrimary), null, "while LIVE_FULFILMENT_READY.beam is false a beam-live drain is null");
+  assert.deepEqual(getBeamDrainConfig(stripePrimary), getBeamDrainConfig(stripePrimary, READY), "since S7.1 the drain needs no override");
+  assert.equal(getBeamDrainConfig(stripePrimary, SWITCH_OFF), null, "with the code switch off a beam-live drain is null");
   const drain = getBeamDrainConfig(stripePrimary, READY);
   assert.equal(drain?.paymentMode, "beam-live");
   assert.equal(drain?.provider, "beam");
@@ -1059,14 +1121,19 @@ test("finishesLivePayments: finishesLiveStripePayments, or beam-live through the
     MOCK_ENV,
     {},
     BEAM_PG_WRITES,
-    BEAM_LIVE,
-    stopped,
   ] as Env[]) {
     assert.equal(finishesLivePayments(env), finishesLiveStripePayments(env), JSON.stringify(env).slice(0, 120));
   }
-  assert.equal(finishesLivePayments(BEAM_LIVE), false, "nothing live is finished on Beam while the code switch is off");
-  // With the switch overridden: beam-live through fulfilment (also during the emergency stop, without the email) or the drain.
-  for (const env of [BEAM_LIVE, stopped, noEmail]) assert.equal(finishesLivePayments(env, READY), true);
+  // The code switch off (as before S7.1): beam-live finishes nothing, so the answer is finishesLiveStripePayments'.
+  for (const env of [BEAM_LIVE, stopped, noEmail]) {
+    assert.equal(finishesLivePayments(env, SWITCH_OFF), finishesLiveStripePayments(env), JSON.stringify(env).slice(0, 120));
+    assert.equal(finishesLivePayments(env, SWITCH_OFF), false, "nothing live is finished on Beam while the code switch is off");
+  }
+  // On (since S7.1; READY changes nothing): beam-live through fulfilment (also during the emergency stop, without the email) or the drain.
+  for (const env of [BEAM_LIVE, stopped, noEmail]) {
+    assert.equal(finishesLivePayments(env), true);
+    assert.equal(finishesLivePayments(env, READY), true);
+  }
   const stripeTestPrimary = { ...STRIPE_TEST_ENV, ...BEAM_LIVE_VARS, VERCEL_ENV: "production", BOOKING_SWEEP_SECRET: LIVE_EXTRA.BOOKING_SWEEP_SECRET };
   assert.equal(finishesLiveStripePayments(stripeTestPrimary), false);
   assert.equal(finishesLivePayments(stripeTestPrimary, READY), true, "the Beam drain");
@@ -1081,7 +1148,8 @@ test("finishesLivePayments: finishesLiveStripePayments, or beam-live through the
 
 test("resolveBookingEngine: 'own' on production once beam-live checkout is fully unlocked, as for stripe-live; every Stripe answer is unchanged", () => {
   const own = { ...BEAM_LIVE, BOOKING_ENGINE: "own" };
-  assert.equal(resolveBookingEngine(own), "cloudbeds", "locked in code");
+  assert.equal(resolveBookingEngine(own), "own", "the code switch is on since S7.1");
+  assert.equal(resolveBookingEngine(own, SWITCH_OFF), "cloudbeds", "the switch off: locked in code");
   assert.equal(resolveBookingEngine(own, READY), "own");
   assert.equal(getBookingConfig(own, READY).bookingEngine, "own");
   for (const patch of [{ BOOKING_ALLOW_LIVE_PAYMENTS: "false" }, { CLOUDBEDS_SEND_STATUS_EMAIL: undefined }, { BEAM_WEBHOOK_HMAC_KEY: undefined }, { BOOKING_SWEEP_SECRET: undefined }, { BEAM_API_BASE: BEAM_PLAYGROUND_BASE }] as Env[]) {
@@ -1113,7 +1181,8 @@ test("the legacy no-provider rule is unchanged (BEAM_API_BASE alone picks Beam);
   assert.equal(getBookingConfig({ ...BEAM_PG_WRITES, BOOKING_PAYMENT_PROVIDER: undefined }).paymentMode, "beam-playground");
   const legacy = { ...BEAM_LIVE, BOOKING_PAYMENT_PROVIDER: undefined };
   assert.equal(resolveProvider(legacy), "beam");
-  assert.deepEqual(thrown(() => resolvePaymentMode(legacy)), { code: "live_payments_locked", missing: [] }, "locked, as before");
+  assert.deepEqual(thrown(() => resolvePaymentMode(legacy)), { code: "live_payments_locked", missing: ["BOOKING_PAYMENT_PROVIDER=beam"] }, "locked by the provider rule (the code switch is on since S7.1)");
+  assert.deepEqual(thrown(() => resolvePaymentMode(legacy, SWITCH_OFF)), { code: "live_payments_locked", missing: [] }, "the switch off: locked in code, as before S7.1");
   assert.deepEqual(thrown(() => resolvePaymentMode(legacy, READY)), { code: "live_payments_locked", missing: ["BOOKING_PAYMENT_PROVIDER=beam"] });
   assert.deepEqual(thrown(() => getFulfilmentConfig({ ...legacy, BOOKING_ALLOW_LIVE_PAYMENTS: "false" }, READY)), {
     code: "live_payments_locked",

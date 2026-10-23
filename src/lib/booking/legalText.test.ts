@@ -1,6 +1,8 @@
 // Beam design S5.4: what /privacy and /legal say per provider set - Stripe only, Beam only, Beam with a Stripe drain,
 // Stripe with a Beam drain, the demo with a Beam drain - and that every deployment without a Beam config (active or
-// drain) renders exactly what it rendered before; plus the preview banner's Beam lines. The two pages and the banner
+// drain) renders exactly what it rendered before; plus the preview banner's Beam lines. Since S7.1 (the code switch
+// LIVE_FULFILMENT_READY.beam is on) beam-live is a Beam config too: active, or the drain of a Stripe page with the live
+// Beam variables (production's controlled-launch setup), so those pages name Beam. The two pages and the banner
 // are loaded through a "@/" resolve hook, transpiled with the repo's TypeScript and rendered with react-dom/server
 // under each environment (process.env is swapped for the render and restored at once).
 
@@ -13,7 +15,7 @@ import { createElement } from "react";
 import type { ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
-import { BEAM_API_KEY, BEAM_HMAC_KEY_B64, BEAM_LIVE_ENV, BEAM_MERCHANT_ID, BEAM_TEST_ENV } from "./beamTestkit.ts";
+import { BEAM_API_KEY, BEAM_HMAC_KEY_B64, BEAM_LIVE_ENV, BEAM_LIVE_STOPPED_ENV, BEAM_MERCHANT_ID, BEAM_TEST_ENV } from "./beamTestkit.ts";
 import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, getPublicBookingConfig } from "./config.ts";
 import type { Env } from "./config.ts";
 import { BEAM_LEGAL_NAME, BEAM_SITE_URL, beamConfigExists, paymentProcessorsOf } from "./legalText.ts";
@@ -25,6 +27,8 @@ import type { PublicBookingConfig } from "./types.ts";
 /* ------------------------------- environments ------------------------------- */
 
 const READY = { liveFulfilmentReady: true };
+/** The code switch off, as before S7.1 (tests only). */
+const SWITCH_OFF = { liveFulfilmentReady: false };
 const STRIPE_KEYS: Env = { STRIPE_SECRET_KEY: "rk_test_drainkit0123456789", STRIPE_WEBHOOK_SECRET: STRIPE_TEST_ENV.STRIPE_WEBHOOK_SECRET };
 const STRIPE_LIVE_KEYS: Env = { STRIPE_SECRET_KEY: STRIPE_LIVE_ENV.STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET: STRIPE_TEST_ENV.STRIPE_WEBHOOK_SECRET };
 const BEAM_PG_VARS: Env = { BEAM_API_BASE: BEAM_PLAYGROUND_BASE, BEAM_MERCHANT_ID, BEAM_API_KEY, BEAM_WEBHOOK_HMAC_KEY: BEAM_HMAC_KEY_B64 };
@@ -43,12 +47,12 @@ const NO_BEAM_CONFIG: Record<string, Env> = {
   "demo with a Stripe drain": { ...STRIPE_TEST_ENV, BOOKING_PAYMENT_PROVIDER: "demo" },
   "provider beam without Beam keys (the demo)": { BOOKING_PAYMENT_PROVIDER: "beam" },
   "provider typo": { ...STRIPE_LIVE_ENV, BOOKING_PAYMENT_PROVIDER: "stirpe" },
-  "stripe-live with live Beam variables (code switch off: no Beam drain)": { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS },
+  "stripe-live with live Beam variables and a short webhook key (no Beam drain)": { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS, BEAM_WEBHOOK_HMAC_KEY: "c2hvcnQ=" },
   "stripe-live with playground Beam keys but no webhook key (no Beam drain)": { ...STRIPE_LIVE_ENV, ...BEAM_PG_VARS, BEAM_WEBHOOK_HMAC_KEY: "" },
   "stripe-live with a Beam base only": { ...STRIPE_LIVE_ENV, BEAM_API_BASE: BEAM_PLAYGROUND_BASE },
   "stripe-live with Beam keys but no base": { ...STRIPE_LIVE_ENV, ...BEAM_PG_VARS, BEAM_API_BASE: "" },
-  "beam-live locked in code, Stripe keys kept": { ...BEAM_LIVE_ENV, ...STRIPE_LIVE_KEYS },
-  "beam-live locked in code": BEAM_LIVE_ENV,
+  "beam-live locked for fulfilment too (a preview deployment), Stripe keys kept": { ...BEAM_LIVE_ENV, ...STRIPE_LIVE_KEYS, VERCEL_ENV: "preview" },
+  "beam-live locked for fulfilment too (no sweep secret)": { ...BEAM_LIVE_ENV, BOOKING_SWEEP_SECRET: undefined },
 };
 
 /** The provider sets with a Beam config, and what the pages name for each. */
@@ -64,6 +68,14 @@ const WITH_BEAM: Record<string, { env: Env; expect: PaymentProcessors }> = {
   "the demo with a Beam drain": { env: { ...BEAM_TEST_ENV, BOOKING_PAYMENT_PROVIDER: "demo" }, expect: { stripe: false, beam: true, upstash: true } },
   "the demo with a Beam drain and a Stripe drain": {
     env: { ...BEAM_TEST_ENV, ...STRIPE_KEYS, BOOKING_PAYMENT_PROVIDER: "demo" },
+    expect: { stripe: true, beam: true, upstash: true },
+  },
+  // Since S7.1 (the code switch is on): beam-live, active or as the drain of a Stripe page.
+  "beam-live": { env: BEAM_LIVE_ENV, expect: { stripe: false, beam: true, upstash: true } },
+  "beam-live, emergency-stopped (fulfilment still runs)": { env: BEAM_LIVE_STOPPED_ENV, expect: { stripe: false, beam: true, upstash: true } },
+  "beam-live with a Stripe drain": { env: { ...BEAM_LIVE_ENV, ...STRIPE_LIVE_KEYS }, expect: { stripe: true, beam: true, upstash: true } },
+  "stripe-live with the live Beam variables: a beam-live drain (production's controlled-launch setup)": {
+    env: { ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS },
     expect: { stripe: true, beam: true, upstash: true },
   },
 };
@@ -184,13 +196,17 @@ test("with a Beam config: Beam always, Stripe while it is the provider or drains
     assert.equal(beamConfigExists(env), true, label);
     assert.deepEqual(paymentProcessorsOf(env), expect, label);
   }
-  // beam-live counts once the code switch is on: active (also during an emergency stop) or as the drain of a Stripe page.
+  // beam-live counts since the code switch is on (S7.1; READY changes nothing): active (also during an emergency stop)
+  // or as the drain of a Stripe page.
   assert.deepEqual(paymentProcessorsOf(BEAM_LIVE_ENV, READY), { stripe: false, beam: true, upstash: true });
   assert.deepEqual(paymentProcessorsOf({ ...BEAM_LIVE_ENV, BOOKING_ALLOW_LIVE_PAYMENTS: "false" }, READY), { stripe: false, beam: true, upstash: true });
   assert.deepEqual(paymentProcessorsOf({ ...BEAM_LIVE_ENV, ...STRIPE_LIVE_KEYS }, READY), { stripe: true, beam: true, upstash: true });
   assert.deepEqual(paymentProcessorsOf({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS }, READY), { stripe: true, beam: true, upstash: true });
-  // ...and not while it is off (the default): nothing can be paid through Beam then.
-  assert.deepEqual(paymentProcessorsOf({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS }), { stripe: true, beam: false, upstash: true });
+  assert.deepEqual(paymentProcessorsOf({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS }), { stripe: true, beam: true, upstash: true });
+  // ...and not with the switch off (as before S7.1): nothing can be paid through Beam then.
+  assert.deepEqual(paymentProcessorsOf({ ...STRIPE_LIVE_ENV, ...BEAM_LIVE_VARS }, SWITCH_OFF), { stripe: true, beam: false, upstash: true });
+  assert.deepEqual(paymentProcessorsOf(BEAM_LIVE_ENV, SWITCH_OFF), { stripe: false, beam: false, upstash: false });
+  assert.equal(beamConfigExists(BEAM_LIVE_ENV, SWITCH_OFF), false);
 });
 
 test("privacy and legal without a Beam config: Stripe's wording on a Stripe page, none on the demo, no Beam word anywhere", async () => {
@@ -213,12 +229,12 @@ test("privacy and legal without a Beam config: Stripe's wording on a Stripe page
 test("Beam variables that make no Beam config change no byte of either page", async () => {
   const { Privacy, Legal } = await loadPages();
   const same: Array<[string, Env]> = [
-    ["stripe-live with live Beam variables (code switch off: no Beam drain)", STRIPE_LIVE_ENV],
+    ["stripe-live with live Beam variables and a short webhook key (no Beam drain)", STRIPE_LIVE_ENV],
     ["stripe-live with playground Beam keys but no webhook key (no Beam drain)", STRIPE_LIVE_ENV],
     ["stripe-live with a Beam base only", STRIPE_LIVE_ENV],
     ["stripe-live with Beam keys but no base", STRIPE_LIVE_ENV],
-    ["beam-live locked in code, Stripe keys kept", {}],
-    ["beam-live locked in code", {}],
+    ["beam-live locked for fulfilment too (a preview deployment), Stripe keys kept", {}],
+    ["beam-live locked for fulfilment too (no sweep secret)", {}],
     ["provider beam without Beam keys (the demo)", {}],
     ["demo with a Stripe drain", {}],
   ];
@@ -233,7 +249,7 @@ test("privacy and legal, Beam only: Beam's processing in plain words, no Stripe 
   // Beam's legal name as its public terms give it, and its public site (where its terms and privacy policy are).
   assert.equal(BEAM_LEGAL_NAME, "Beam Data Co., Ltd.");
   assert.equal(BEAM_SITE_URL, "https://www.beamcheckout.com/");
-  for (const label of ["Beam only (beam-playground)", "Beam only (legacy rule: no provider variable, BEAM_API_BASE set)", "the demo with a Beam drain"]) {
+  for (const label of ["Beam only (beam-playground)", "Beam only (legacy rule: no provider variable, BEAM_API_BASE set)", "the demo with a Beam drain", "beam-live", "beam-live, emergency-stopped (fulfilment still runs)"]) {
     const html = render(Privacy, WITH_BEAM[label].env);
     const privacy = textOf(html);
     assert.ok(privacy.includes("Last updated: 23 October 2026"), label);
@@ -257,7 +273,14 @@ test("privacy and legal, Beam only: Beam's processing in plain words, no Stripe 
 
 test("privacy and legal with both providers (a Stripe drain on Beam, or a Beam drain on Stripe): both named, the Stripe line kept", async () => {
   const { Privacy, Legal } = await loadPages();
-  for (const label of ["Beam with a Stripe drain", "Stripe (live) with a Beam drain (the instant fallback)", "Stripe (test) with a Beam drain", "the demo with a Beam drain and a Stripe drain"]) {
+  for (const label of [
+    "Beam with a Stripe drain",
+    "Stripe (live) with a Beam drain (the instant fallback)",
+    "Stripe (test) with a Beam drain",
+    "the demo with a Beam drain and a Stripe drain",
+    "beam-live with a Stripe drain",
+    "stripe-live with the live Beam variables: a beam-live drain (production's controlled-launch setup)",
+  ]) {
     const html = render(Privacy, WITH_BEAM[label].env);
     const privacy = textOf(html);
     assert.ok(privacy.includes("Last updated: 23 October 2026"), label);
@@ -311,10 +334,12 @@ test("preview banner, Beam lines: the playground says whether the Cloudbeds rese
   assert.equal(getPublicBookingConfig(localEnv).cloudbedsWrites, "mock");
   assert.ok(simulated.includes("payments go to Beam's playground (Beam test cards and test payments only, no real money moves); the reservation is simulated."));
   assert.ok(simulated.includes("Reservation simulated"));
-  // A fully live Beam page shows no banner; a locked one only the lock (no writes chip).
+  // A fully live Beam page shows no banner (the beam-live page itself since S7.1); a locked one (the emergency stop) only
+  // the lock (no writes chip).
   const live = { ...getPublicBookingConfig(BEAM_TEST_ENV), paymentMode: "beam-live", live: true, testMode: false } as PublicBookingConfig;
   assert.equal(bannerOf(Banner, live), "");
-  const locked = textOf(bannerOf(Banner, getPublicBookingConfig(BEAM_LIVE_ENV)));
+  assert.equal(bannerOf(Banner, getPublicBookingConfig(BEAM_LIVE_ENV)), "");
+  const locked = textOf(bannerOf(Banner, getPublicBookingConfig(BEAM_LIVE_STOPPED_ENV)));
   assert.ok(locked.includes("Beam · Locked") && locked.includes("Payments locked"));
   assert.doesNotMatch(locked, /Real Cloudbeds reservations|Reservation simulated|No reservation is made/);
 });

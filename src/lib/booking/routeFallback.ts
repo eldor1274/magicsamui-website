@@ -58,7 +58,7 @@ function providerNamed(env: Env): ReturnType<typeof resolveProvider> | null {
  * the Cloudbeds writes (round 8): with CLOUDBEDS_API_KEY_BOOKING a numeric CLOUDBEDS_PROPERTY_ID, Upstash Redis and
  * live Cloudbeds data; without it no VERCEL_ENV (the simulated writer runs locally only). The live base only when
  * every condition for finishing beam-live payments holds (beamLiveBlockers with `fulfilment`, the code switch
- * LIVE_FULFILMENT_READY.beam among them, so never before S7.1). True exactly when getBeamDrainConfig builds a Beam
+ * LIVE_FULFILMENT_READY.beam among them: true since S7.1). True exactly when getBeamDrainConfig builds a Beam
  * config; false: the route keeps today's code path exactly (the abandon route reads no body).
  */
 export function beamFallbackPossible(e: unknown, env: Env): boolean {

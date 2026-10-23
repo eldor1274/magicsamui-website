@@ -35,13 +35,17 @@ const GARBAGE: Env = {
 const KEYS: Env = { BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k" };
 const HMAC: Env = { BEAM_WEBHOOK_HMAC_KEY: Buffer.from("test-only-beam-hmac-key-01234567").toString("base64") };
 const BEAM_PG: Env = { BOOKING_PAYMENT_PROVIDER: "beam", BEAM_API_BASE: BEAM_PLAYGROUND_BASE, ...KEYS, BOOKING_TOKEN_SECRET: TOKEN_SECRET };
-/** beam-live with the writes and every other condition: locked in code (LIVE_FULFILMENT_READY.beam is false). */
+/**
+ * beam-live with the writes and every other condition, emergency-stopped: a locked Beam page (checkout). Since S7.1
+ * (LIVE_FULFILMENT_READY.beam true) the code switch no longer locks it; the stop does, as on production.
+ */
 const BEAM_LIVE_LOCKED: Env = {
   ...STRIPE_LIVE_ENV,
   ...BEAM_PG,
   ...HMAC,
   BEAM_API_BASE: BEAM_LIVE_BASE,
   CLOUDBEDS_SEND_STATUS_EMAIL: "true",
+  BOOKING_ALLOW_LIVE_PAYMENTS: "false",
 };
 
 /** Every config entry point a request, a page render or the layout calls; a locked one throws (caught). */

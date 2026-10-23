@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { isRestrictionMessage } from "./checkoutMessages.ts";
 import { runAbandon } from "./abandon.ts";
-import { BEAM_LIVE_ENV, BEAM_TEST_ENV, beamHeld, makeBeamKit, makeParityKit } from "./beamTestkit.ts";
+import { BEAM_LIVE_ENV, BEAM_LIVE_STOPPED_ENV, BEAM_TEST_ENV, beamHeld, makeBeamKit, makeParityKit } from "./beamTestkit.ts";
 import type { BeamKit } from "./beamTestkit.ts";
 import { MAX_ATTEMPT_PAYABLE_MS, abandonVerdict, attemptMayStillBePaid, attemptOf, attemptPayableMs, cancelledAttemptOf, parseAttempt, tracksAttempts } from "./checkoutAttempt.ts";
 import { getPublicBookingConfig, resolveBookingEngine, toPublicConfig } from "./config.ts";
@@ -304,8 +304,12 @@ test("attempts: every Stripe page tracks its checkout attempt as before (a locke
     assert.equal(tracksAttempts(c), false, JSON.stringify(env));
     assert.equal(attemptPayableMs(c), 33 * MIN);
   }
-  // A locked Beam page keeps the Beam shape (its window) but runs no attempt flow: Pay is off and its paymentMode is the demo's.
-  const locked = config(BEAM_LIVE_ENV);
+  // Since S7.1 the beam-live page itself (no kit override) runs the attempt flow.
+  const livePage = config(BEAM_LIVE_ENV);
+  assert.deepEqual([livePage.paymentStatus, livePage.provider, livePage.paymentMode, livePage.attemptPayableMinutes], ["ok", "beam", "beam-live", 53]);
+  assert.equal(tracksAttempts(livePage), true);
+  // A locked Beam page (the emergency stop) keeps the Beam shape (its window) but runs no attempt flow: Pay is off and its paymentMode is the demo's.
+  const locked = config(BEAM_LIVE_STOPPED_ENV);
   assert.deepEqual([locked.paymentStatus, locked.provider, locked.paymentMode, locked.attemptPayableMinutes], ["locked", "beam", "demo", 53]);
   assert.equal(tracksAttempts(locked), false);
   // Every (provider, mode) pair, hand-made ones included: Stripe as before (the provider alone), Beam only in its hold-first modes.
@@ -507,7 +511,8 @@ test("the Beam cancel landing calls abandon: Beam's Cancel URL gives the page th
   const ref = "MSV-20261005-7F3K";
   const landing = { resume: "payment", ref, t: "signed.token" };
   for (const env of [MOCK_ENV, STRIPE_TEST_ENV, STRIPE_LIVE_ENV, LOCKED_STRIPE_ENV]) assert.deepEqual(cancelledAttemptOf(config(env), landing), { ref, t: "signed.token" });
-  for (const env of [{}, { BOOKING_PAYMENT_PROVIDER: "beam" }, BEAM_LIVE_ENV]) assert.equal(cancelledAttemptOf(config(env), landing), null, JSON.stringify(env));
+  for (const env of [{}, { BOOKING_PAYMENT_PROVIDER: "beam" }, BEAM_LIVE_STOPPED_ENV]) assert.equal(cancelledAttemptOf(config(env), landing), null, JSON.stringify(env));
+  assert.deepEqual(cancelledAttemptOf(config(BEAM_LIVE_ENV), landing), { ref, t: "signed.token" }, "the beam-live page (since S7.1)");
   const stripe = config(STRIPE_LIVE_ENV);
   for (const bad of [{ resume: null }, { resume: "pay" }, { ref: "MSV-1" }, { ref: undefined }, { t: "" }, { t: undefined }, { t: "x".repeat(4097) }]) {
     assert.equal(cancelledAttemptOf(stripe, { ...landing, ...bad }), null, JSON.stringify(bad));
@@ -566,12 +571,14 @@ test("guest step copy (design S5.1): Stripe and the demo word it exactly as befo
   }
   const live = pageConfig(makeBeamKit({ env: BEAM_LIVE_ENV }), BEAM_LIVE_ENV);
   assert.deepEqual(guestStepCopy(live), { emailHint: "Your booking confirmation is sent here.", detailsNote: BEAM_NOTE });
-  const beamPages = [config(BEAM_ENV), config({ ...BEAM_ENV, CLOUDBEDS_SEND_STATUS_EMAIL: "true" }), pageConfig(makeBeamKit()), config(BEAM_LIVE_ENV)];
+  // Since S7.1 the beam-live page itself (no kit override) words it the same.
+  assert.deepEqual(guestStepCopy(config(BEAM_LIVE_ENV)), { emailHint: "Your booking confirmation is sent here.", detailsNote: BEAM_NOTE });
+  const beamPages = [config(BEAM_ENV), config({ ...BEAM_ENV, CLOUDBEDS_SEND_STATUS_EMAIL: "true" }), pageConfig(makeBeamKit()), config(BEAM_LIVE_STOPPED_ENV)];
   for (const c of beamPages) {
     const copy = guestStepCopy(c);
     assert.deepEqual(copy, { emailHint: "In live mode your booking confirmation is sent here.", detailsNote: BEAM_NOTE }, c.paymentMode);
   }
-  for (const c of [live, ...beamPages]) assert.doesNotMatch(Object.values(guestStepCopy(c)).join(" "), /Stripe|receipt/i);
+  for (const c of [live, config(BEAM_LIVE_ENV), ...beamPages]) assert.doesNotMatch(Object.values(guestStepCopy(c)).join(" "), /Stripe|receipt/i);
 });
 
 test("booking page wiring (design S5.2): Pay sends the Beam method only and waits for one; the summary's button goes to the choice; results, room cards and the secure-payment window word the fee by method", () => {
