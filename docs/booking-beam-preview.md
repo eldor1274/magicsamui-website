@@ -2,13 +2,29 @@
 
 This file began as the notes of a **preview**: a direct booking page whose Beam (beamcheckout.com) payment created no reservation and whose webhook only logged. Since the Beam design v2 (steps S2.0-S6.1) Beam is a full **hold-first** provider like Stripe: the Cloudbeds hold first, a Beam payment link for the guest's method group, the webhook and the sweeper confirming the booking in Cloudbeds, refunds by hand.
 
-**The runbook is `docs/booking-engine.md`**: how it works (section 1), every variable (section 2, "Beam variables"), the WI-0 script (section 3), the owner setup (4.H), the tests (section 5, "Beam: Stage A, Stage B and Stage C"), go-live and rollback (section 6), the alerts and log lines (section 7), the refunds (section 8), the limits (section 9) and the owner TODOs (section 10). This file keeps the owner's Stage B checklist, the routes and the Beam facts the code relies on, and the parts of the preview notes that are still true. Sections marked **Superseded** say where the current text is.
+**The runbook is `docs/booking-engine.md`**: how it works (section 1), every variable (section 2, "Beam variables"), the WI-0 script (section 3), the owner setup (4.H), the tests (section 5, "Beam: Stage A, Stage B and Stage C"), go-live and rollback (section 6), the alerts and log lines (section 7), the refunds (section 8), the limits (section 9) and the owner TODOs (section 10). This file keeps the owner's checklist for the controlled live launch, the old Stage B checklist (skipped), the routes and the Beam facts the code relies on, and the parts of the preview notes that are still true. Sections marked **Superseded** say where the current text is.
 
 `beam-live` (real Beam payments) is **unlocked in code** since design S7.1 (`LIVE_FULFILMENT_READY.beam = true`, owner decision of 23 Oct 2026): the environment alone decides. Production keeps taking payments through Stripe until the owner switches `BOOKING_PAYMENT_PROVIDER` to `beam` (runbook section 6, item 7).
 
 ---
 
-## Owner checklist: Beam Stage B (plain English)
+## Owner checklist: the controlled live launch (plain English)
+
+**Owner decision, 23 Oct 2026:** Beam's Lighthouse shows you no test mode, so Stage B (the Playground test below) is **skipped** and you go live directly, in a short window, with Stripe one switch away. The full runbook is `docs/booking-engine.md`, section 6, item 7. Paste keys only into Vercel, Lighthouse, Cloudbeds or your own terminal - never into a chat or an email.
+
+1. **GitHub and the merge.** Push `beam-live` (`git push -u origin beam-live`) and merge it into `main`. Production keeps `BOOKING_PAYMENT_PROVIDER=stripe`: nothing changes for guests. Wait a day and look at the sweeper's answer: no `runs` in it yet.
+2. **Cloudbeds.** Create the payment type **Beam(website)** and copy the exact value the check script prints (step 1 of the old checklist below - the only Stage B step you still need). Make sure the Cloudbeds confirmation email (`CLOUDBEDS_SEND_STATUS_EMAIL=true`) is on and its terms match our booking page: Beam sends guests no receipt, so this email is their written confirmation.
+3. **Lighthouse Production.** Copy the Merchant ID, create an API key, and add a webhook to `https://magicsamui.com/api/beam/webhook` with the six events (`payment_link.paid`, `charge.succeeded`, `charge.failed`, `refund.succeeded`, `refund.failed`, `transaction.created`). Copy its HMAC key.
+4. **Vercel → Production variables**, provider **still `stripe`**: `BEAM_API_BASE` (the live address, `https://api.beamcheckout.com`), `BEAM_MERCHANT_ID`, `BEAM_API_KEY`, `BEAM_WEBHOOK_HMAC_KEY`, `CLOUDBEDS_BEAM_PAYMENT_METHOD` (the Beam(website) value). Leave `BOOKING_CARD_FEE_PCT` unset and every Stripe variable as it is. Redeploy. Then check: the webhook check answers **401 `invalid signature`**, the sweeper's answer has a `beam` run with `"ok":true`, and `/privacy` and `/legal` now mention Beam. Stripe bookings work exactly as before.
+5. **The window** (a quiet hour, you at your desk): set `BOOKING_PAYMENT_PROVIDER` to `beam` and redeploy. `/booking` now offers "Card or e-wallet" (3%) and "Thai PromptPay QR" (no fee).
+6. **Book 2-3 times yourself**, each on a date far in the future, the cheapest room and the shortest stay: once by **card**, once by **PromptPay**, once with an **e-wallet**. After each one check Cloudbeds (Confirmed, the payment under Beam(website), the 3% fee line for card and e-wallet only, balance 0), your inbox (the Cloudbeds confirmation and the "New direct booking" alert), and Lighthouse (the link PAID).
+7. **Anything wrong? Switch back at once:** `BOOKING_PAYMENT_PROVIDER` = `stripe`, redeploy. Keep the Beam variables: payments already started are still finished.
+8. **Clean up:** refund the card and PromptPay bookings in full in Lighthouse (the e-wallet one too if it is Alipay; LINE Pay, TrueMoney and ShopeePay can't be refunded by Beam - it was your own money, so just record it). On each Cloudbeds folio record the refund, then cancel the reservation. Retract the Google Ads conversion of the booking GA4 counted.
+9. **Stay on Beam** if everything was right, and watch the alert emails and Lighthouse for two days.
+
+## Owner checklist: Beam Stage B (plain English) - skipped (owner decision, 23 Oct 2026)
+
+Not run: kept for reference. Only step 0 (push the branch) and step 1 (the Cloudbeds Beam(website) type and its exact value) are still needed, for the controlled live launch above.
 
 Stage B tests Beam on the Vercel **Preview** of the `beam-live` branch, with Beam's **Playground** (test money) and **real** Cloudbeds reservations. Plan about an hour for the setup and a quiet day for the tests: every test booking briefly blocks a real room on Booking.com and Airbnb. Paste keys and passwords only into Vercel, Lighthouse, Cloudbeds, the droplet's crontab or your own terminal and browser - never into this file, a chat or an email.
 
@@ -268,7 +284,7 @@ Not built (runbook section 9): a server-side `purchase` through the GA4 Measurem
 
 ## Go-live checklist (superseded)
 
-Superseded by `docs/booking-engine.md`: the owner setup (4.H), Beam Stage A/B/C (section 5), Beam go-live and rollback (section 6, items 7-11) and the owner TODOs (section 10, item 7). Everything the preview's list asked for is built: the hold-first `postReservation` with the guest's details, the custom Cloudbeds method (`Beam(website)`, `CLOUDBEDS_BEAM_PAYMENT_METHOD`), fulfilment from the verified webhook and the return page, the disable on Cancel, the sweeper (expiry, late payments), a stable idempotent fulfilment on Redis, the fee per method (a Card / PromptPay choice with a method-specific link and the fee on cards and e-wallets only), the updated `/privacy` and `/legal`, and the Beam lines of the GA4 setup. Still open: S7.1 (the code switch, owner-gated) and the owner's questions to Beam (below).
+Superseded by `docs/booking-engine.md`: the owner setup (4.H), Beam Stage A/B/C (section 5), Beam go-live and rollback (section 6, items 7-11) and the owner TODOs (section 10, item 7). Everything the preview's list asked for is built: the hold-first `postReservation` with the guest's details, the custom Cloudbeds method (`Beam(website)`, `CLOUDBEDS_BEAM_PAYMENT_METHOD`), fulfilment from the verified webhook and the return page, the disable on Cancel, the sweeper (expiry, late payments), a stable idempotent fulfilment on Redis, the fee per method (a Card / PromptPay choice with a method-specific link and the fee on cards and e-wallets only), the updated `/privacy` and `/legal`, and the Beam lines of the GA4 setup. S7.1 (the code switch) is done (23 Oct 2026, owner decision; Stage B skipped, the controlled live launch instead). Still open: the owner's questions to Beam (below).
 
 ## Beam API facts the code relies on
 
