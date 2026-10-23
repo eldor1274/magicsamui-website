@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { site } from "@/data/site";
-import { getPublicBookingConfig } from "@/lib/booking/config";
+import { BEAM_LEGAL_NAME, paymentProcessorsOf } from "@/lib/booking/legalText";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/legal" },
@@ -14,8 +14,10 @@ export const metadata: Metadata = {
 export default function LegalPage() {
   // Shown once Stripe is the configured provider (BOOKING_PAYMENT_PROVIDER=stripe). Worded so it is true in
   // every phase: during Stage B and the soft launch the public /booking is still the Cloudbeds engine.
-  // The legal entity is the Stripe account holder (site.legalName).
-  const stripe = getPublicBookingConfig().provider === "stripe";
+  // The legal entity is the Stripe account holder (site.legalName). While a Beam config exists (active or drain:
+  // Beam design S5.4) Beam is added, and the Stripe line stays while Stripe is the provider or still drains
+  // (legalText.ts). The Beam merchant account must be held by the same entity (a go-live gate).
+  const { stripe, beam } = paymentProcessorsOf();
   return (
     <div className="mx-auto max-w-3xl px-5 py-16">
       <p className="text-sm uppercase tracking-[0.3em] text-pool">Legal information</p>
@@ -47,7 +49,21 @@ export default function LegalPage() {
             {site.email} · {site.phones[0].number}
           </dd>
         </div>
-        {stripe && (
+        {beam ? (
+          <div>
+            <dt className="text-sm font-medium text-ink">Online payments</dt>
+            {stripe && (
+              <dd>
+                Online payments on our own direct booking pages may be processed by Stripe. Card details are entered on
+                Stripe&apos;s secure checkout page and never reach our own systems.
+              </dd>
+            )}
+            <dd className={stripe ? "mt-1" : undefined}>
+              Online payments on our own direct booking pages may be processed by Beam ({BEAM_LEGAL_NAME}). Payments are
+              made on Beam&apos;s secure payment page, and card details never reach our own systems.
+            </dd>
+          </div>
+        ) : stripe && (
           <div>
             <dt className="text-sm font-medium text-ink">Online payments</dt>
             <dd>

@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { site } from "@/data/site";
-import { getPublicBookingConfig } from "@/lib/booking/config";
+import { BEAM_LEGAL_NAME, BEAM_SITE_URL, paymentProcessorsOf } from "@/lib/booking/legalText";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/privacy" },
@@ -12,6 +12,8 @@ export const metadata: Metadata = {
 const UPDATED = "15 August 2026";
 /** Date of the Stripe wording below (shown only once Stripe is the configured payment provider). */
 const UPDATED_STRIPE = "5 October 2026";
+/** Date of the Beam wording below (shown only while a Beam config exists: Beam design S5.4). */
+const UPDATED_BEAM = "23 October 2026";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -22,15 +24,69 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+/**
+ * The own booking page's paragraphs while a Beam config exists (Beam design S5.4): the guest's details go to
+ * Cloudbeds, the payment to Beam - and to Stripe for the bookings it takes or still finishes.
+ */
+function OwnBookingPageText({ stripe }: { stripe: boolean }) {
+  return (
+    <>
+      <p>
+        When you book through our own direct booking page on this website
+        (where it is offered), the details you enter (name, email address, phone number, country, postcode, arrival
+        time and requests) pass through our website&apos;s server to
+        Cloudbeds, which creates your reservation. Our server keeps them only
+        briefly, as a one-way code, to prevent abuse of the booking form (for
+        about 40 minutes).
+        {stripe ? " Depending on the booking, the payment is processed by Stripe or by Beam." : ""}
+      </p>
+      {stripe && (
+        <p>
+          Stripe processes card, Apple Pay, Google Pay and PromptPay payments on
+          its own secure checkout page. Stripe receives your email address (for
+          your payment receipt) and the payment details you enter there — we
+          never see or store your full card number. Stripe also uses payment
+          data for its own purposes, such as fraud prevention and legal
+          compliance, under its own{" "}
+          <a
+            href="https://stripe.com/privacy"
+            className="text-pool underline"
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            privacy policy
+          </a>
+          .
+        </p>
+      )}
+      <p>
+        Beam ({BEAM_LEGAL_NAME}) processes card, e-wallet and Thai PromptPay QR
+        payments on its own secure payment page, including the payment details
+        you enter there — we never see or store your full card number. We send
+        Beam no name, email address or phone number: only the booking
+        reference, what was booked (rooms, dates and number of guests) and the
+        amounts. Beam may also use payment data for its own purposes, such as
+        fraud prevention and legal compliance, under its own terms and privacy
+        policy, published at{" "}
+        <a href={BEAM_SITE_URL} className="text-pool underline" rel="noopener noreferrer" target="_blank">
+          beamcheckout.com
+        </a>
+        .
+      </p>
+    </>
+  );
+}
+
 export default function PrivacyPage() {
   // The Stripe wording appears only when Stripe takes the payments on our own booking page
-  // (BOOKING_PAYMENT_PROVIDER=stripe); until then the policy reads exactly as before.
-  const stripe = getPublicBookingConfig().provider === "stripe";
+  // (BOOKING_PAYMENT_PROVIDER=stripe); until then the policy reads exactly as before. While a Beam config exists
+  // (active or drain) Beam is named, Stripe while it is the provider or still drains, and Upstash (legalText.ts).
+  const { stripe, beam, upstash } = paymentProcessorsOf();
   return (
     <div className="mx-auto max-w-3xl px-5 py-16">
       <p className="text-sm uppercase tracking-[0.3em] text-pool">Legal</p>
       <h1 className="mt-3 font-serif text-4xl text-ink">Privacy Policy</h1>
-      <p className="mt-4 text-sm text-ink-soft">Last updated: {stripe ? UPDATED_STRIPE : UPDATED}</p>
+      <p className="mt-4 text-sm text-ink-soft">Last updated: {beam ? UPDATED_BEAM : stripe ? UPDATED_STRIPE : UPDATED}</p>
 
       <p className="mt-8 text-ink-soft">
         This policy explains what personal information {site.name} collects, why
@@ -65,7 +121,9 @@ export default function PrivacyPage() {
           details are handled by Cloudbeds and its payment providers — we never
           see or store your full card number.
         </p>
-        {stripe && (
+        {beam ? (
+          <OwnBookingPageText stripe={stripe} />
+        ) : stripe && (
           <p>
             When you book through our own direct booking page on this website
             (where it is offered), the details you enter (name, email address, phone number, country, postcode, arrival
@@ -147,6 +205,13 @@ export default function PrivacyPage() {
           <p>
             <span className="font-medium text-ink">Stripe</span> sets cookies on
             its own checkout page that are needed to process your payment and
+            prevent fraud.
+          </p>
+        )}
+        {beam && (
+          <p>
+            <span className="font-medium text-ink">Beam</span> may set cookies
+            on its own payment page that are needed to process your payment and
             prevent fraud.
           </p>
         )}
@@ -241,7 +306,8 @@ export default function PrivacyPage() {
         <ul className="ml-5 list-disc space-y-1">
           <li>Cloudbeds — booking system and payment processing</li>
           {stripe && <li>Stripe — online payments on our own direct booking pages</li>}
-          {stripe && <li>Upstash — temporary booking-process data (holds, payment status, abuse limits)</li>}
+          {beam && <li>Beam ({BEAM_LEGAL_NAME}) — online payments on our own direct booking pages</li>}
+          {upstash && <li>Upstash — temporary booking-process data (holds, payment status, abuse limits)</li>}
           <li>Anthropic — drafting replies to guest messages</li>
           <li>Meta — WhatsApp, Messenger and Instagram messaging</li>
           <li>Google — analytics, advertising, and email delivery</li>
@@ -290,7 +356,7 @@ export default function PrivacyPage() {
           This website and our messaging server are served only over encrypted
           HTTPS connections. Messages on WhatsApp, Messenger and Instagram are
           carried over Meta&apos;s own encrypted interfaces. Payment card details
-          are handled by Cloudbeds and its payment providers{stripe ? " or by Stripe" : ""} and never reach our
+          are handled by Cloudbeds and its payment providers{beam ? (stripe ? ", by Stripe or by Beam" : " or by Beam") : stripe ? " or by Stripe" : ""} and never reach our
           own systems.
         </p>
         <p>

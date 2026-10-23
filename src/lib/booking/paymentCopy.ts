@@ -448,6 +448,8 @@ export type DataSourceLabel = "demo" | "cloudbeds" | "demo-fallback";
 /**
  * One honest sentence for the preview banner: provider, mode and where
  * availability comes from (and whether a reservation is really written).
+ * Beam (design S5.4): hold-first like Stripe, so the playground says whether
+ * the Cloudbeds reservation is real or simulated, as Stripe's test mode does.
  */
 export function previewHeadline(input: {
   paymentMode: PaymentMode;
@@ -461,11 +463,17 @@ export function previewHeadline(input: {
         ? "demo mode: live Cloudbeds availability, simulated payment - no real payment is taken."
         : "demo mode: availability and prices are simulated, no real payment is taken.";
     case "beam-playground":
+      if (input.cloudbedsWrites === "live") {
+        return (
+          "Beam test mode: payments go to Beam's playground (Beam test cards and test payments only, no real money moves) - but a REAL " +
+          "Cloudbeds reservation is held and confirmed or cancelled. Test bookings need an arrival 12+ months ahead and the owner's test email."
+        );
+      }
       return live
-        ? "Beam test mode: live Cloudbeds availability, payments go to Beam's playground - use Beam test cards only, no real money moves."
-        : "Beam test mode: simulated availability, payments go to Beam's playground - use Beam test cards only, no real money moves.";
+        ? "Beam test mode: live Cloudbeds availability, payments go to Beam's playground (Beam test cards and test payments only, no real money moves); the reservation is simulated."
+        : "Beam test mode: simulated availability, payments go to Beam's playground (Beam test cards and test payments only, no real money moves); the reservation is simulated.";
     case "beam-live":
-      return "LIVE payments: real cards are charged through Beam.";
+      return "LIVE payments: real card, e-wallet and PromptPay payments are taken through Beam and real reservations are made in Cloudbeds.";
     case "stripe-mock":
       return "MOCK mode: fake Stripe checkout and a simulated Cloudbeds reservation - nothing is charged or reserved.";
     case "stripe-test":

@@ -4,13 +4,14 @@
 // Slim banner above the booking app saying plainly what this page is running
 // on: the payment provider (Stripe / Beam / simulated), the mode (demo / MOCK /
 // test / live / locked), where availability comes from and whether a real
-// Cloudbeds reservation is written - plus links to switch between the two
-// themes. Not shown to guests on a fully live page (nothing to warn about
-// there). Keep PreviewBannerProps stable (new props are optional).
+// Cloudbeds reservation is written (Stripe and, since Beam design S5.4, the
+// Beam modes) - plus links to switch between the two themes. Not shown to
+// guests on a fully live page (nothing to warn about there). Keep
+// PreviewBannerProps stable (new props are optional).
 
 import { CreditCard, Database, FlaskConical, Lock, MessageCircle, Palette, TriangleAlert } from "lucide-react";
 import { modeKind, previewHeadline } from "@/lib/booking/paymentCopy";
-import { isLiveMode } from "@/lib/booking/payments/provider";
+import { isLiveMode, providerOf } from "@/lib/booking/payments/provider";
 import type { DataSource, PaymentMode, PaymentProvider, ThemeName } from "@/lib/booking/types";
 
 export interface PreviewBannerProps {
@@ -68,6 +69,9 @@ export default function PreviewBanner({
   const isLive = !locked && kind === "live";
   const shownProvider: PaymentProvider = provider ?? (paymentMode.startsWith("stripe") ? "stripe" : paymentMode.startsWith("beam") ? "beam" : "demo");
   const writes = locked ? "none" : (cloudbedsWrites ?? "none");
+  // Stripe as before; a Beam mode too (hold-first: design S5.4). Not the demo, also not BOOKING_PAYMENT_PROVIDER=beam
+  // without Beam keys (provider beam, demo mode), which stays exactly the demo.
+  const showsWrites = shownProvider === "stripe" || providerOf(paymentMode) === "beam";
 
   return (
     <section
@@ -140,7 +144,7 @@ export default function PreviewBanner({
             {source.label}
           </li>
         )}
-        {shownProvider === "stripe" && !locked && (
+        {showsWrites && !locked && (
           <li className={`${CHIP} ${writes === "live" ? "bg-(--bk-warning-soft) text-(--bk-warning)" : "bg-(--bk-surface) text-(--bk-text-muted)"}`}>
             <Database size={12} aria-hidden="true" />
             {WRITES_LABEL[writes]}

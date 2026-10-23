@@ -13,12 +13,14 @@ const gaId = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID;
 // which container to fetch; the dataLayer stub in layout.tsx configures both
 // and gtag.js replays that queue when it loads here.
 // previewTracked (from the layout, server side): the booking preview takes REAL
-// payments (stripe-live on production - Stage C and the soft launch), so it is
-// measured like any other page. Otherwise it runs demo / test-mode / MOCK
-// payments (and Stage B tests on production) and must not reach GA4 or Ads.
-// previewReturnTracked: the preview's RETURN page while live Stripe payments are
-// still being finished (emergency stop or provider drain): purchases of bookings
-// already paid are confirmed there and must still be recorded.
+// payments (stripe-live or beam-live on production - Stage C and the soft
+// launch), so it is measured like any other page. Otherwise it runs demo /
+// test-mode / MOCK payments (and Stage B tests on production) and must not
+// reach GA4 or Ads.
+// previewReturnTracked: the preview's RETURN page while live Stripe or Beam
+// payments are still being finished (emergency stop or provider drain: the
+// layout's finishesLivePayments): purchases of bookings already paid are
+// confirmed there and must still be recorded.
 export default function GaScript({ previewTracked = false, previewReturnTracked = false }: { previewTracked?: boolean; previewReturnTracked?: boolean }) {
   const load = useInteractionLoad(4000, 1500);
   const pathname = usePathname();
