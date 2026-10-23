@@ -132,6 +132,8 @@ export function beamGatewayText(beam: Pick<BeamSettings, "pendingGraceMinutes">)
     webhookRetryHint: "Beam webhook retries",
     mockMethod: "mock-beam",
     bookedExtra: (receipt) => `If the guest cancels: ${refundLine(receipt)}.`,
+    // A booking without a fee (PromptPay, owner decision 1) has no fee line on the folio.
+    noFeeNote: (receipt) => (receipt.methodType ? `no fee: ${beamMethodName(receipt.methodType)}` : "no fee"),
     pendingReleasedAlert: (payment: GatewayPayment, reservationId: string): GatewayAlert => {
       const ref = payment.meta?.ref ?? "-";
       return {

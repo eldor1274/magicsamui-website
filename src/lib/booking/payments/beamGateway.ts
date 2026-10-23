@@ -82,6 +82,11 @@
 // needs_attention of owner decision 3), hands refunded ones to fulfil, and releases the expired ones with the
 // guard and the release note ('unconfirmed' ones with the pending-released warning).
 //
+// settleFolio() is fulfil's pause before it reads a folio balance that was not zero a second time (the first live
+// Beam booking, 24 Oct 2026: Cloudbeds had not updated the balance yet a moment after postPayment, and the owner was
+// warned about a folio that showed 0): BEAM_FOLIO_SETTLE_MS through deps.sleep, skipped (false: one reading, the
+// warning as before) with less than BEAM_FOLIO_SETTLE_MIN_LEFT_MS of the caller's deadline left. No Beam call.
+//
 // No card number digits ever pass through here: beam.ts drops them when it parses a charge.
 
 import {
@@ -112,6 +117,11 @@ import { BEAM_PARTIAL_REFUND_METHODS, BEAM_REFUNDABLE_METHODS, beamGatewayText, 
 import type { GatewayPayment, GatewayReceipt, GatewayState, PaymentGateway, PaymentMeta, RecentPayment, SweepLinkCounts } from "./gateway.ts";
 
 const DAY_MS = 86_400_000;
+/** Fulfil's pause before it reads a folio balance that was not zero a second time (settleFolio). */
+export const BEAM_FOLIO_SETTLE_MS = 3_000;
+/** settleFolio waits only with at least this much of the deadline left: the pause, one Cloudbeds read, the done marker and the alert. */
+export const BEAM_FOLIO_SETTLE_MIN_LEFT_MS = BEAM_FOLIO_SETTLE_MS + 5_000;
+const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 /** The 7-day charge scan (BEAM_DEEP_SCAN_DAYS) runs once the last complete one is this old. */
 export const BEAM_DEEP_SCAN_EVERY_MS = 6 * 3_600_000;
 /** A disable or a reading of a link that keeps failing this long is told to the owner (as sweep.ts RELEASE_ALERT_AGE_MS). */
@@ -185,7 +195,7 @@ export type BeamGatewayDeps = CoreDeps & {
   clock?: () => number;
   /** Salt of the disable's idempotency key, one per attempt (default token.ts generateNonce). */
   nonce?: () => string;
-  /** beam.ts's pause before its one retry (tests shorten it). */
+  /** beam.ts's pause before its one retry, and settleFolio's pause before fulfil reads a folio again (tests shorten them). */
   sleep?: (ms: number) => Promise<void>;
 };
 
@@ -1059,6 +1069,11 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
     },
     parseHoldId: parseBeamHoldIdentifier,
     isPaymentId: isBeamLinkId,
+    async settleFolio() {
+      if (deps.deadlineMs !== undefined && deps.deadlineMs - clock() < BEAM_FOLIO_SETTLE_MIN_LEFT_MS) return false;
+      await (deps.sleep ?? realSleep)(BEAM_FOLIO_SETTLE_MS);
+      return true;
+    },
     readLink,
   };
 }

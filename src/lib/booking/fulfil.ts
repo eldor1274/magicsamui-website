@@ -66,7 +66,13 @@
 //   is released (afterPaymentReleased warns the owner) but abandon answers
 //   "pending", so the guest is never invited to pay again;
 // - markPaymentPaid: fulfil's first writes on their own, for a webhook that
-//   must not acknowledge a paid event before they are durable.
+//   must not acknowledge a paid event before they are durable;
+// - gw.settleFolio: a folio balance that is not zero right after the payment
+//   was recorded is read once more after the gateway's pause before the owner
+//   is warned (Beam: Cloudbeds may not have updated it yet);
+// - gw.text.noFeeNote: the "New direct booking" alert of a booking without a
+//   fee says "the payment is on the folio (no fee: PromptPay)", never "the
+//   fee line".
 
 import { CloudbedsWriteError, redactForLog } from "./cloudbedsWrite.ts";
 import type { ReservationInfo } from "./cloudbedsWrite.ts";
@@ -451,7 +457,21 @@ async function fulfilLocked(key: string, deps: CoreDeps, gw: PaymentGateway): Pr
     );
   }
   // The balance is only meaningful once the fee line is there (re-read when it was added late).
-  const final = feeWasMissing && feeOk ? await deps.writer.getReservation(reservationId) : current;
+  let final = feeWasMissing && feeOk ? await deps.writer.getReservation(reservationId) : current;
+  // A balance that is not zero yet may only be Cloudbeds still updating it after postPayment: a gateway with
+  // settleFolio (Beam; never Stripe) waits a moment and reads the folio once more before warning the owner.
+  if (gw.settleFolio && deps.writer.mode === "live" && feeOk && (final.taxesFeesSatang ?? 0) <= 0 && final.balanceSatang !== null && final.balanceSatang !== 0) {
+    const firstBalance = final.balanceSatang;
+    let waited = false;
+    try {
+      waited = await gw.settleFolio();
+      if (waited) final = await deps.writer.getReservation(reservationId);
+    } catch (e) {
+      // The first reading stands (the warning below goes out as before); the booking is confirmed either way.
+      deps.log("fulfil_balance_reread_failed", { ref, reservationId, error: redactForLog(e instanceof Error ? e.message : String(e)) });
+    }
+    if (waited) deps.log("fulfil_balance_reread", { ref, reservationId, firstBalanceSatang: firstBalance, balanceSatang: final.balanceSatang });
+  }
   if (deps.writer.mode === "live" && (final.taxesFeesSatang ?? 0) > 0) {
     // Last resort (checkout refuses holds that carry them): Cloudbeds' own fee on top of ours means a double fee.
     await deps.alert(
@@ -477,11 +497,16 @@ async function fulfilLocked(key: string, deps: CoreDeps, gw: PaymentGateway): Pr
   deps.log("fulfil_confirmed", { ref, reservationId, amount: meta.totalSatang, mode: deps.config.paymentMode });
   // The gateway's extra line (Beam: the method's refund path, owner decision 4); none for Stripe.
   const bookedExtra = text.bookedExtra?.(payment.receipt);
+  // A booking without a fee has no fee line to report (Beam PromptPay); Stripe's words are unchanged.
+  const folioWords =
+    meta.feeSatang <= 0 && text.noFeeNote
+      ? `the payment is on the folio (${text.noFeeNote(payment.receipt)})`
+      : `the payment${feeOk && !feeSkipped ? " and the fee line are" : " is"} on the folio`;
   await deps.alert(
     `New direct booking ${ref} confirmed (${money(meta.totalSatang)})`,
     [
       `Cloudbeds reservation ${reservationId}, ${meta.checkIn} to ${meta.checkOut}.`,
-      `Paid ${money(meta.totalSatang)} via ${brand} (${pi}); the payment${feeOk && !feeSkipped ? " and the fee line are" : " is"} on the folio and the reservation is confirmed.`,
+      `Paid ${money(meta.totalSatang)} via ${brand} (${pi}); ${folioWords} and the reservation is confirmed.`,
       ...(bookedExtra ? [bookedExtra] : []),
     ],
     { key: `booked:${reservationId}`, severity: "info" },

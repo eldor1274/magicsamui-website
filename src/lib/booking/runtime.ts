@@ -252,7 +252,7 @@ class NotABeamKeyError extends Error {
  * The Beam gateway (payments/beamGateway.ts) for deps built here, loading the Beam client only once it calls Beam.
  * This file is loaded by the abandon, sweep and Stripe webhook routes, which must never load beam.ts through a
  * static import (importGraph.test.ts): every member that calls Beam (get, cancel, sweepRecent, releaseGuard,
- * readLink), and isGone (asked only after a Beam call), imports payments/beamGateway.ts on first use and runs the
+ * readLink), and isGone and settleFolio (asked only after a Beam call), imports payments/beamGateway.ts on first use and runs the
  * real gateway's; the members used without a
  * call are the real gateway's own values, taken from modules that do not load beam.ts (keyOf, parseHoldId and
  * doneTtlSeconds from lock.ts, isPaymentId from payments/beamIds.ts, text from payments/beamText.ts). Building it
@@ -296,6 +296,11 @@ function beamGatewayOf(deps: BeamGatewayDeps): BeamGateway {
     },
     parseHoldId: parseBeamHoldIdentifier,
     isPaymentId: isBeamLinkId,
+    // Asked by fulfil only after gw.get has loaded the real gateway.
+    async settleFolio() {
+      const gw = await real();
+      return gw.settleFolio ? gw.settleFolio() : false;
+    },
     readLink: async (key) => (await real()).readLink(key),
   };
 }

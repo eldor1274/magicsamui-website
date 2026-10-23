@@ -159,6 +159,12 @@ export interface GatewayText {
   /** One more line for the "New direct booking" alert (Beam: the method's refund path, owner decision 4). Absent (Stripe): none. */
   bookedExtra?(receipt: GatewayReceipt): string;
   /**
+   * The "New direct booking" alert's words for a booking without a fee (feeSatang 0), in the brackets after "the
+   * payment is on the folio" (Beam: "no fee: PromptPay"; there is no fee line to speak of). Absent (Stripe): the
+   * alert says what it always said.
+   */
+  noFeeNote?(receipt: GatewayReceipt): string;
+  /**
    * The owner's warning once a hold was released while its payment was still unconfirmed (pendingReason
    * "unconfirmed"): it may succeed later (fulfil.ts afterPaymentReleased). Absent (Stripe): no alert.
    */
@@ -208,6 +214,14 @@ export interface PaymentGateway {
    * (refused_open; money review 9). Absent (Stripe): no such look.
    */
   releaseGuard?(key: string): Promise<boolean>;
+  /**
+   * Asked once when the folio balance read right after the payment was recorded and the booking confirmed is not
+   * zero, before fulfil reads the folio again and only then warns the owner: Cloudbeds can take a moment to update
+   * the balance (the first live Beam booking, 24 Oct 2026, warned while its folio showed 0). Resolves true once it has
+   * waited (fulfil then reads the folio a second time), false to skip the second reading (too little time left).
+   * Absent (Stripe): one reading, as before.
+   */
+  settleFolio?(): Promise<boolean>;
   /** Parses the thirdPartyIdentifier of this provider's holds. Absent (Stripe): lock.ts parseHoldIdentifier. */
   parseHoldId?(id: string | null | undefined): { ref: string; live: boolean } | null;
   /**
