@@ -109,6 +109,65 @@ export function pagePayMethodOffered(config: Pick<PublicBookingConfig, "feeByMet
   return isPayMethod(m) && typeof config.feeByMethod?.[m] === "number";
 }
 
+/** The public fields the booking page's method choice reads (design S5.2). */
+export type MethodChoiceConfig = Pick<PublicBookingConfig, "provider" | "feeByMethod">;
+
+/**
+ * Whether the booking page asks the guest how to pay (design S5.2: card or e-wallet, or Thai PromptPay QR): a Beam page
+ * whose public config carries feeByMethod - the hold-first Beam modes, and a locked Beam page. Never a Stripe or demo
+ * page (BOOKING_PAYMENT_PROVIDER=beam without Beam keys included: no feeByMethod), so their pricing, copy and checkout
+ * requests stay exactly as before, whatever a state or a stored booking holds.
+ */
+export function pageOffersMethodChoice(config: MethodChoiceConfig): boolean {
+  return config.provider === "beam" && typeof config.feeByMethod?.card_ewallet === "number";
+}
+
+/**
+ * The guest's payment method group on this page: `m` while the page offers it (pageOffersMethodChoice and
+ * pagePayMethodOffered), else null. A choice the page no longer offers (a stored PromptPay choice after BEAM_PROMPTPAY
+ * was switched off, anything on a Stripe or demo page) is dropped: never priced, never sent.
+ */
+export function pagePayMethod(config: MethodChoiceConfig, m: unknown): PayMethod | null {
+  return pageOffersMethodChoice(config) && pagePayMethodOffered(config, m) ? m : null;
+}
+
+/** The method groups the page offers, in display order (card or e-wallet, then PromptPay), with their fee %; [] off a method-choice page. */
+export function pagePayMethods(config: MethodChoiceConfig): { method: PayMethod; feePct: number }[] {
+  if (!pageOffersMethodChoice(config)) return [];
+  const out: { method: PayMethod; feePct: number }[] = [];
+  for (const method of ["card_ewallet", "promptpay"] as const) {
+    const feePct = config.feeByMethod?.[method];
+    if (typeof feePct === "number") out.push({ method, feePct });
+  }
+  return out;
+}
+
+/**
+ * What the browser prices a quote with (design S5.2): on a method-choice page the fee of the chosen group
+ * (feeByMethod[payMethod]) and, before a group is chosen, the card/e-wallet fee - the higher total, so a total never
+ * rises once the guest chooses; everywhere else config.cardFeePct and config.depositPct exactly as before. It mirrors the
+ * server's feePctFor for every group the page offers.
+ */
+export function pagePricing(config: MethodChoiceConfig & PricingConfig, m: unknown): PricingConfig {
+  const fees = config.feeByMethod;
+  if (!pageOffersMethodChoice(config) || !fees) return { cardFeePct: config.cardFeePct, depositPct: config.depositPct };
+  return { cardFeePct: fees[pagePayMethod(config, m) ?? "card_ewallet"] ?? fees.card_ewallet, depositPct: config.depositPct };
+}
+
+/**
+ * The checkout request's payMethod field (design S3.2 / S5.2): `{ payMethod }` on a method-choice page with an offered
+ * group chosen, else nothing - a Stripe or demo request never gains the key.
+ */
+export function checkoutPayMethod(config: MethodChoiceConfig, m: unknown): { payMethod?: PayMethod } {
+  const payMethod = pagePayMethod(config, m);
+  return payMethod ? { payMethod } : {};
+}
+
+/** A quote's payment processing fee had it been priced at `pct` (quote.ts computeQuote's rounding: `pct` of feeBaseSatang). */
+export function feeSatangAt(quote: Pick<Quote, "feeBaseSatang">, pct: number): number {
+  return percentOf(quote.feeBaseSatang, pct);
+}
+
 /** `pct` percent of an integer satang amount, rounded half-up to a satang. */
 export function percentOf(amountSatang: number, pct: number): number {
   const basisPoints = Math.round(pct * 100);

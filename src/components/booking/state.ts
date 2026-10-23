@@ -10,7 +10,8 @@ import { isRestrictionMessage } from "@/lib/booking/checkoutMessages";
 import { isIsoDate } from "@/lib/booking/dates";
 import { EMPTY_GUEST, isGuestValid } from "@/lib/booking/guest";
 import type { GuestDetails } from "@/lib/booking/guest";
-import { QuoteError, addonEligibleNights, computeQuote } from "@/lib/booking/quote";
+import { QuoteError, addonEligibleNights, computeQuote, isPayMethod, pageOffersMethodChoice, pagePayMethod, pagePricing } from "@/lib/booking/quote";
+import type { MethodChoiceConfig } from "@/lib/booking/quote";
 import type { ResumeReason } from "@/lib/booking/urls";
 import type {
   AddonId,
@@ -20,6 +21,7 @@ import type {
   CartItem,
   CartItemInput,
   IsoDate,
+  PayMethod,
   PublicBookingConfig,
   Quote,
   RatePlanId,
@@ -85,7 +87,7 @@ export interface CheckoutErrorView {
   occupancySlugs?: string[];
   /** For invalid_request: what exactly the server rejected (e.g. "Check-in can't be in the past."). */
   issues?: string[];
-  /** For invalid_request: the step where the guest can fix it ("payment": Beam, choose how to pay - wired in design S5.2). */
+  /** For invalid_request: the step where the guest can fix it ("payment": Beam, choose how to pay - design S5.2). */
   fixStep?: "addons" | "payment";
   /** For rate_limited: roughly how long to wait. */
   retryAfterMinutes?: number;
@@ -120,9 +122,13 @@ export interface Notice {
   message: string;
 }
 
-/** The server's authoritative quote after a price_changed answer, for one exact cart. */
+/** The server's authoritative quote after a price_changed answer, for one exact cart (and, on Beam, one payment method). */
 export interface ServerQuote {
-  /** pricingKey() of the cart it priced; ignored as soon as the cart, dates or promo change. */
+  /**
+   * pricingKey() of the cart it priced; ignored as soon as the cart, dates or promo change - or, on a Beam page, the
+   * payment method (design S5.2: the key carries the chosen group, so switching method re-prices and switching back
+   * shows this quote again).
+   */
   key: string;
   quote: Quote;
 }
@@ -159,6 +165,12 @@ export interface BookingState {
   serverQuote: ServerQuote | null;
   /** Rooms the server just refused at checkout: removed from the cart and not offered again for these dates. */
   refused: RefusedRooms | null;
+  /**
+   * Beam (design S5.2): the payment method group the guest chose on the payment step - never preselected, kept only
+   * while the page offers it (quote.ts pagePayMethod: dropped on hydrate and whenever a new public config arrives),
+   * priced by selectQuote and sent with Pay. Absent (or null) = not chosen; a Stripe or demo state never has one.
+   */
+  payMethod?: PayMethod | null;
   /**
    * Fingerprint of the one-shot landing URL (?checkin.. / ?resume..) that was
    * already applied. Persisted, so a remount with the same (stale) URL - e.g.
@@ -210,6 +222,8 @@ export interface PersistedBooking {
   landingKey: string | null;
   /** The terms version (POLICY_VERSION) this page showed when it saved guest.agreedToPolicy; consent to other terms is dropped. */
   termsVersion?: string;
+  /** Beam: the chosen payment method group (BookingState.payMethod), so a reload keeps it while the page still offers it. */
+  payMethod?: PayMethod;
   savedAt: string;
 }
 
@@ -227,6 +241,8 @@ export type BookingAction =
       holdReleased?: boolean;
       /** Fingerprint of this page load's one-shot URL params (null when there are none). */
       landingKey?: string | null;
+      /** The page's public config: a saved payment method is kept only while it offers it (design S5.2; absent: dropped). */
+      config?: MethodChoiceConfig;
       today: IsoDate;
     }
   | { type: "setSearch"; patch: Partial<SearchDraft> }
@@ -236,6 +252,8 @@ export type BookingAction =
   | { type: "addToCart"; item: CartItem }
   | { type: "removeFromCart"; id: string }
   | { type: "toggleAddon"; itemId: string; addonId: AddonId }
+  /** Beam: the guest chose how to pay (ignored while a checkout runs, or for a group the page does not offer). */
+  | { type: "setPayMethod"; payMethod: PayMethod }
   | { type: "updateGuest"; patch: Partial<GuestDetails> }
   | { type: "guestSubmitted" }
   | { type: "goToStep"; step: Step }
@@ -253,6 +271,11 @@ export type BookingAction =
   | { type: "reset" };
 
 /* ------------------------------ reducer ------------------------------ */
+
+/** `s` with payMethod `m`: the same object when nothing changes (a Stripe or demo state never gains the key). */
+function withPayMethod<T extends Pick<BookingState, "payMethod">>(s: T, m: PayMethod | null): T {
+  return (s.payMethod ?? null) === m ? s : { ...s, payMethod: m };
+}
 
 /** Whether the flow may show `step` for this state (also used to vet browser Back/Forward). */
 export function canEnter(step: Step, state: Pick<BookingState, "search" | "cart" | "guest">): boolean {
@@ -321,6 +344,8 @@ export function bookingReducer(state: BookingState, action: BookingAction): Book
       if (step !== "search" && step !== "results" && cart.length === 0) step = hasDates ? "results" : "search";
       if (step === "payment" && !isGuestValid(guest)) step = "guest";
       if (step === "results" && !hasDates) step = "search";
+      // A reload keeps the guest's payment method while this page still offers it (design S5.2).
+      const payMethod = action.config ? pagePayMethod(action.config, usable?.payMethod) : null;
       return {
         ...base,
         step,
@@ -331,6 +356,7 @@ export function bookingReducer(state: BookingState, action: BookingAction): Book
         notice,
         landingKey: landingKey ?? usable?.landingKey ?? null,
         hydrated: true,
+        ...(payMethod ? { payMethod } : {}),
       };
     }
 
@@ -378,15 +404,19 @@ export function bookingReducer(state: BookingState, action: BookingAction): Book
         notice = { kind: "rooms-removed", message: "An add-on isn't available for your dates and was removed from your reservation." };
       }
       const step = stillOk.length === 0 && state.step !== "search" && state.step !== "results" ? "results" : state.step;
-      return {
-        ...state,
-        step,
-        cart: kept,
-        cartKey: dk,
-        notice,
-        refused: state.refused?.datesKey === dk ? state.refused : null,
-        results: { status: "ready", data, error: null, requestKey: action.key },
-      };
+      // A new public config: the payment method stays only while it is still offered (BEAM_PROMPTPAY switched off).
+      return withPayMethod(
+        {
+          ...state,
+          step,
+          cart: kept,
+          cartKey: dk,
+          notice,
+          refused: state.refused?.datesKey === dk ? state.refused : null,
+          results: { status: "ready", data, error: null, requestKey: action.key },
+        },
+        pagePayMethod(data.config, state.payMethod),
+      );
     }
 
     case "searchFailed":
@@ -419,6 +449,17 @@ export function bookingReducer(state: BookingState, action: BookingAction): Book
               },
         ),
       };
+
+    case "setPayMethod": {
+      if (state.checkout.status === "submitting" || state.checkout.status === "redirecting") return state;
+      const data = state.results.data;
+      const payMethod = data ? pagePayMethod(data.config, action.payMethod) : null;
+      if (payMethod === null || payMethod === state.payMethod) return state;
+      // The choice answers "Please choose how to pay", and a new method makes a "price has changed" panel stale.
+      const error = state.checkout.error;
+      const settled = error !== null && (error.fixStep === "payment" || error.code === "price_changed");
+      return { ...state, payMethod, ...(settled ? { checkout: { status: "idle", error: null } } : {}) };
+    }
 
     case "updateGuest":
       return { ...state, guest: { ...state.guest, ...action.patch } };
@@ -488,6 +529,11 @@ export function bookingReducer(state: BookingState, action: BookingAction): Book
           checkout: { status: "idle", error: null },
         };
       }
+      const data = state.results.data;
+      if (error.code === "invalid_request" && error.fixStep === "payment" && data && pageOffersMethodChoice(data.config)) {
+        // Beam: no (or no longer an offered) payment method - back to the payment step's choice, cleared (design S5.2).
+        return withPayMethod({ ...state, step: "payment", checkout: { status: "error", error } }, null);
+      }
       return { ...state, checkout: { status: "error", error } };
     }
 
@@ -514,13 +560,15 @@ export function cartInputs(cart: CartItem[]): CartItemInput[] {
 
 /**
  * Identifies what a quote prices: dates, valid promo and the cart's room
- * inputs (order matters - quote.lines[i] is cart[i]). Null without data.
+ * inputs (order matters - quote.lines[i] is cart[i]), plus on a Beam page the
+ * chosen payment method (design S5.2). Null without data.
  */
-export function pricingKey(state: Pick<BookingState, "results" | "cart">): string | null {
+export function pricingKey(state: Pick<BookingState, "results" | "cart"> & Partial<Pick<BookingState, "payMethod">>): string | null {
   const data = state.results.data;
   if (!data || state.cart.length === 0) return null;
   const promo = data.promo?.valid ? data.promo.code : "";
-  return JSON.stringify([data.search.checkIn, data.search.checkOut, promo, cartInputs(state.cart)]);
+  const payMethod = pagePayMethod(data.config, state.payMethod);
+  return JSON.stringify([data.search.checkIn, data.search.checkOut, promo, cartInputs(state.cart), ...(payMethod ? [payMethod] : [])]);
 }
 
 function isQuoteForCart(quote: Quote, state: Pick<BookingState, "results" | "cart">): boolean {
@@ -540,10 +588,12 @@ function isQuoteForCart(quote: Quote, state: Pick<BookingState, "results" | "car
  * The quote the guest sees and pays: the server's quote after a
  * price_changed answer for exactly this cart, otherwise the client-side quote
  * mirroring the server. quote.lines[i] corresponds to cart[i]. Null when
- * there is no data or the cart is empty.
+ * there is no data or the cart is empty. A Beam page prices the fee of the
+ * chosen payment method, and the card/e-wallet fee before one is chosen
+ * (quote.ts pagePricing; Stripe and the demo: config.cardFeePct as before).
  */
 export function selectQuote(
-  state: Pick<BookingState, "results" | "cart"> & Partial<Pick<BookingState, "serverQuote">>,
+  state: Pick<BookingState, "results" | "cart"> & Partial<Pick<BookingState, "serverQuote" | "payMethod">>,
 ): Quote | null {
   const data = state.results.data;
   if (!data || state.cart.length === 0) return null;
@@ -556,7 +606,7 @@ export function selectQuote(
         checkOut: data.search.checkOut,
         items: cartInputs(state.cart),
         promo: data.promo && data.promo.valid ? { code: data.promo.code, pct: data.promo.pct, label: data.promo.label } : null,
-        pricing: { cardFeePct: data.config.cardFeePct, depositPct: data.config.depositPct },
+        pricing: pagePricing(data.config, state.payMethod),
       },
       data.offers,
     );
@@ -629,6 +679,7 @@ export function toPersisted(state: BookingState): PersistedBooking {
     cartKey: state.cartKey,
     guest: state.guest,
     landingKey: state.landingKey,
+    ...(state.payMethod ? { payMethod: state.payMethod } : {}),
     termsVersion: POLICY_VERSION,
     savedAt: new Date().toISOString(),
   };
@@ -709,6 +760,7 @@ export function sanitizePersisted(v: unknown): PersistedBooking | null {
     guest: sanitizeGuest(p.guest, p.termsVersion === POLICY_VERSION),
     landingKey,
     ...(p.termsVersion === POLICY_VERSION ? { termsVersion: POLICY_VERSION } : {}),
+    ...(isPayMethod(p.payMethod) ? { payMethod: p.payMethod } : {}),
     savedAt: typeof p.savedAt === "string" ? p.savedAt : "",
   };
 }
@@ -738,9 +790,10 @@ export function clearPersistedCart(): void {
   const p = readPersistedBooking();
   if (!p) return;
   try {
-    // Policy consent is per booking: a new reservation must tick the box again.
+    // Policy consent is per booking: a new reservation must tick the box again. So is the Beam payment method (never
+    // preselected): undefined leaves it out of the JSON.
     const guest = { ...p.guest, agreedToPolicy: false };
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ ...p, guest, cart: [], cartKey: null, step: "search" }));
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ ...p, payMethod: undefined, guest, cart: [], cartKey: null, step: "search" }));
   } catch {
     // ignore
   }
@@ -763,6 +816,8 @@ export interface BookingActions {
   removeRoom(itemId: string): void;
   toggleAddon(itemId: string, addonId: AddonId): void;
   updateGuest(patch: Partial<GuestDetails>): void;
+  /** Beam: the guest chose how to pay (design S5.2). */
+  setPayMethod(payMethod: PayMethod): void;
   goToStep(step: Step): void;
   /** Step back (search <- results <- addons <- guest <- payment). */
   back(): void;

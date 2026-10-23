@@ -14,6 +14,8 @@ import { AlertTriangle, CalendarX2, ChevronDown, Loader2, MessageCircle, RotateC
 import { site } from "@/data/site";
 import { HOUSE_POLICIES, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { formatNights, formatStayRange } from "@/lib/booking/dates";
+import { resultsFeeNotes } from "@/lib/booking/paymentCopy";
+import { pagePricing } from "@/lib/booking/quote";
 import type { AvailabilityResponse, CartItem, RatePlanId, RoomOffer } from "@/lib/booking/types";
 import type { AsyncStatus } from "../state";
 import { BTN_OUTLINE, BTN_PRIMARY, TOUCH_TARGET } from "../ui/styles";
@@ -64,8 +66,10 @@ export default function ResultsList({
   }
 
   const { search, nights, offers } = availability;
-  // Every online payment adds this fee (cards, wallets and PromptPay alike): said with the first prices shown.
-  const feePct = availability.config.cardFeePct;
+  // Stripe and the demo: every online payment adds this fee (cards, wallets and PromptPay alike), said with the first
+  // prices shown. Beam (design S5.2): the card/e-wallet fee, and the notes say PromptPay has none.
+  const feePct = pagePricing(availability.config, null).cardFeePct;
+  const feeNotes = resultsFeeNotes(availability.config);
   const stay = formatStayRange(search.checkIn, search.checkOut);
   const refreshing = status === "loading";
 
@@ -96,6 +100,7 @@ export default function ResultsList({
           promo={availability.promo?.valid && availability.promo.pct > 0 ? { code: availability.promo.code, pct: availability.promo.pct } : null}
           directCode={availability.promo?.valid && availability.promo.pct === 0 ? availability.promo.code : null}
           feePct={feePct}
+          feeNote={feeNotes ? feeNotes.card : undefined}
           enquiryHref={
             offer.unavailableReason === "not-bookable"
               ? whatsappHref(
@@ -120,11 +125,13 @@ export default function ResultsList({
             {" "}
             · {stay} · {formatNights(nights)} · {search.adults} {search.adults === 1 ? "guest" : "guests"}
           </span>
-          {feePct > 0 && (
-            <span className="block text-(--bk-frame-text-muted)">
-              Prices are for the stay; a {feePct}% payment processing fee is added to every online payment.
-            </span>
-          )}
+          {feeNotes
+            ? feeNotes.results && <span className="block text-(--bk-frame-text-muted)">{feeNotes.results}</span>
+            : feePct > 0 && (
+                <span className="block text-(--bk-frame-text-muted)">
+                  Prices are for the stay; a {feePct}% payment processing fee is added to every online payment.
+                </span>
+              )}
         </p>
         <button
           type="button"

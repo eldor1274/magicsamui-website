@@ -51,6 +51,11 @@ export interface RoomOfferCardProps {
    * price, so the first price a guest sees says it applies (0 = none).
    */
   feePct?: number;
+  /**
+   * Beam (design S5.2): the line under each price instead ("+ 3% payment processing fee by card or e-wallet (none with
+   * PromptPay)"; null = no line). Undefined: "+ {feePct}% payment processing fee".
+   */
+  feeNote?: string | null;
 }
 
 export default function RoomOfferCard({
@@ -66,6 +71,7 @@ export default function RoomOfferCard({
   promo = null,
   directCode = null,
   feePct = 0,
+  feeNote,
 }: RoomOfferCardProps) {
   const maxAdults = Math.max(1, maxAdultsProp ?? offer.maxAdults ?? room.maxGuests);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -198,6 +204,7 @@ export default function RoomOfferCard({
                 promo={promo}
                 directCode={directCode}
                 feePct={feePct}
+                feeNote={feeNote}
                 onShowPolicy={() => setPolicyPlan(RATE_PLANS[rate.ratePlanId])}
                 onAdd={(adults) => onAdd(rate.ratePlanId, adults)}
               />
@@ -250,11 +257,12 @@ interface RateRowProps {
   promo: { code: string; pct: number } | null;
   directCode: string | null;
   feePct: number;
+  feeNote: string | null | undefined;
   onShowPolicy: () => void;
   onAdd: (adults: number) => void;
 }
 
-function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason, promo, directCode, feePct, onShowPolicy, onAdd }: RateRowProps) {
+function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason, promo, directCode, feePct, feeNote, onShowPolicy, onAdd }: RateRowProps) {
   const [picking, setPicking] = useState(false);
   const addRef = useRef<HTMLButtonElement>(null);
   const plan = RATE_PLANS[rate.ratePlanId];
@@ -324,7 +332,9 @@ function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason,
                 incl. {promo.code} −{promo.pct}%
               </p>
             )}
-            {feePct > 0 && <p className="text-xs text-(--bk-text-muted)">+ {feePct}% payment processing fee</p>}
+            {feeNote !== undefined
+              ? feeNote && <p className="text-xs text-(--bk-text-muted)">{feeNote}</p>
+              : feePct > 0 && <p className="text-xs text-(--bk-text-muted)">+ {feePct}% payment processing fee</p>}
           </div>
           <button
             ref={addRef}

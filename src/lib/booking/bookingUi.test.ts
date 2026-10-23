@@ -43,10 +43,10 @@ test("badges: Stripe shows Visa, Mastercard, PromptPay, Apple Pay, Google Pay - 
   assert.deepEqual(labels, ["Visa", "Mastercard", "PromptPay", "Apple Pay", "Google Pay"]);
 });
 
-test("badges: the demo keeps its full set (5 card brands + PromptPay); Beam shows Visa, Mastercard, JCB, Amex and PromptPay", () => {
+test("badges: the demo keeps its full set (5 card brands + PromptPay); Beam shows Visa, Mastercard, JCB, Amex, PromptPay and its e-wallets", () => {
   const expected = ["Visa", "Mastercard", "JCB", "Amex", "UnionPay", "PromptPay"];
-  // Beam (design S3.1): BEAM_CARD_BRANDS; its e-wallet badges get their labels in S5.2.
-  assert.deepEqual(paymentMethodLabels(config(BEAM_ENV)), ["Visa", "Mastercard", "JCB", "Amex", "PromptPay"]);
+  // Beam (design S3.1): BEAM_CARD_BRANDS; its e-wallet badges as text chips (design S5.2).
+  assert.deepEqual(paymentMethodLabels(config(BEAM_ENV)), ["Visa", "Mastercard", "JCB", "Amex", "PromptPay", "Alipay", "LINE Pay", "TrueMoney", "ShopeePay"]);
   assert.deepEqual(paymentMethodLabels(config({})), expected);
 });
 
@@ -475,6 +475,35 @@ test("guest step copy (design S5.1): Stripe and the demo word it exactly as befo
     assert.deepEqual(copy, { emailHint: "In live mode your booking confirmation is sent here.", detailsNote: BEAM_NOTE }, c.paymentMode);
   }
   for (const c of [live, ...beamPages]) assert.doesNotMatch(Object.values(guestStepCopy(c)).join(" "), /Stripe|receipt/i);
+});
+
+test("booking page wiring (design S5.2): Pay sends the Beam method only and waits for one; the summary's button goes to the choice; results, room cards and the secure-payment window word the fee by method", () => {
+  const app = repoSrc("components/booking/BookingApp.tsx");
+  assert.match(
+    app,
+    /const payMethod = pagePayMethod\(cfg, s\.payMethod\);\s*if \(pageOffersMethodChoice\(cfg\) && payMethod === null\) \{\s*focusPayMethodChoice\(\);\s*return;\s*\}\s*analytics\.addPaymentInfo\(q, payMethod\);/,
+  );
+  assert.match(app, /postCheckout\(\{[\s\S]*?theme,\s*(\/\/[^\n]*\n\s*)*\.\.\.checkoutPayMethod\(cfg, s\.payMethod\),[\s\S]*?\}\);/, "in the checkout body, Beam only");
+  assert.ok(app.includes('cta = { label: "Choose how to pay", barLabel: "Pay now", onClick: focusPayMethodChoice };'));
+  assert.ok(app.includes("const choosePayMethod = pageOffersMethodChoice(config) && !locked && !paymentPaused && pagePayMethod(config, state.payMethod) === null;"));
+  assert.ok(app.includes("config: configRef.current,\n") || app.includes("config: configRef.current,\r\n"), "the mount hydrate keeps a method only while it is offered");
+  assert.ok(app.includes("resume: null, config: configRef.current, today };"), "so does the back/forward-cache hydrate");
+  assert.ok(app.includes("payMethod={state.payMethod ?? null}") && app.includes("onPayMethodChange={actions.setPayMethod}"));
+  assert.ok(app.includes("pricing: pagePricing(data.config, null) },"), "add_to_cart prices the card/e-wallet fee");
+  assert.ok(app.includes('if (res.error === "unavailable" || res.error === "price_changed" || chooseAgain) runSearch(s.search, { fresh: true });'));
+  const pay = repoSrc("components/booking/checkout/PaymentStep.tsx");
+  assert.ok(pay.includes("disabled={locked || paused || needsMethod}"));
+  assert.ok(pay.includes("const methodOptions = config && !locked ? payMethodOptions(config) : [];"));
+  const summary = repoSrc("components/booking/summary/ReservationSummary.tsx");
+  assert.ok(summary.includes("const hideFee = Boolean(bookingConfig && quote && feeLineHidden(bookingConfig, quote));"));
+  const results = repoSrc("components/booking/results/ResultsList.tsx");
+  assert.ok(results.includes("const feePct = pagePricing(availability.config, null).cardFeePct;"));
+  assert.ok(results.includes("const feeNotes = resultsFeeNotes(availability.config);"));
+  assert.ok(results.includes("feeNote={feeNotes ? feeNotes.card : undefined}"));
+  const card = repoSrc("components/booking/results/RoomOfferCard.tsx");
+  assert.match(card, /\{feeNote !== undefined\s*\? feeNote && <p className="text-xs text-\(--bk-text-muted\)">\{feeNote\}<\/p>\s*: feePct > 0 && <p className="text-xs text-\(--bk-text-muted\)">\+ \{feePct\}% payment processing fee<\/p>\}/);
+  const modal = repoSrc("components/booking/checkout/SecurePaymentModal.tsx");
+  assert.ok(modal.includes("const beam = config ? beamSecurePayment(config) : null;"));
 });
 
 /* ----------------------------- restrictions ------------------------------- */

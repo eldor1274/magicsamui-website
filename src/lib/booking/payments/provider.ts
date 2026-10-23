@@ -5,7 +5,7 @@
 // connected to Cloudbeds), "beam" (kept as a ready second provider - its live
 // mode stays locked because Beam has no fulfilment yet) and "demo" (simulated).
 
-import type { CardBrand, PaymentMethodBadge, PaymentMode, PaymentProvider } from "../types.ts";
+import type { CardBrand, PayMethod, PaymentMethodBadge, PaymentMode, PaymentProvider } from "../types.ts";
 
 export const PAYMENT_PROVIDERS: PaymentProvider[] = ["demo", "beam", "stripe"];
 
@@ -107,7 +107,12 @@ export function paymentRedirectHosts(provider: PaymentProvider): string[] {
 /** All payment-page hosts any provider may use (for a client-side redirect allow-list). */
 export const ALL_PAYMENT_REDIRECT_HOSTS: string[] = ["checkout.stripe.com", "pay.beamcheckout.com", "playground-pay.beamcheckout.com"];
 
-/** analytics `payment_type`. */
-export function analyticsPaymentType(mode: PaymentMode): string {
-  return providerOf(mode);
+/**
+ * analytics `payment_type`: the provider ("stripe", "demo") as before; in a Beam mode the method group the guest chose
+ * (design S5.2): "promptpay", else "card_or_ewallet".
+ */
+export function analyticsPaymentType(mode: PaymentMode, payMethod: PayMethod | null = null): string {
+  const provider = providerOf(mode);
+  if (provider !== "beam") return provider;
+  return payMethod === "promptpay" ? "promptpay" : "card_or_ewallet";
 }

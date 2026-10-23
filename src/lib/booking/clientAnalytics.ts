@@ -22,7 +22,7 @@ import { RATE_PLANS, getCatalogueRoom } from "./catalogue.ts";
 import { averageNightlySatang, satangToBaht } from "./quote.ts";
 import { analyticsPaymentType } from "./payments/provider.ts";
 import { track } from "../track.ts";
-import type { BookingSummary, IsoDate, PaymentMode, PurchaseView, Quote, QuoteLine, RatePlanId } from "./types.ts";
+import type { BookingSummary, IsoDate, PayMethod, PaymentMode, PurchaseView, Quote, QuoteLine, RatePlanId } from "./types.ts";
 
 export const AFFILIATION = "Magic Suites & Villas";
 export const BE_SOURCE = "magicsamui-direct";
@@ -114,7 +114,8 @@ export interface BookingAnalytics {
   addToCart(line: QuoteLine, quote: Pick<Quote, "checkIn" | "checkOut">): void;
   removeFromCart(line: QuoteLine, quote: Pick<Quote, "checkIn" | "checkOut">): void;
   beginCheckout(quote: Quote): void;
-  addPaymentInfo(quote: Quote): void;
+  /** `payMethod`: the Beam method group the guest chose (payment_type "card_or_ewallet" or "promptpay"; design S5.2). */
+  addPaymentInfo(quote: Quote, payMethod?: PayMethod | null): void;
   /**
    * Fires once per booking (sessionStorage guard). Call only after a verified
    * "paid" status. Stripe modes: pass StatusResponse.purchase - without it
@@ -227,10 +228,10 @@ export function createBookingAnalytics(paymentMode: PaymentMode, vercelEnv?: str
         items: quote.lines.map((l) => itemFromQuoteLine(l, quote)),
       });
     },
-    addPaymentInfo(quote) {
+    addPaymentInfo(quote, payMethod = null) {
       emit(enabled, "add_payment_info", {
         value: satangToBaht(quote.totalSatang),
-        payment_type: analyticsPaymentType(paymentMode),
+        payment_type: analyticsPaymentType(paymentMode, payMethod),
         coupon: couponOf(quote),
         items: quote.lines.map((l) => itemFromQuoteLine(l, quote)),
       });

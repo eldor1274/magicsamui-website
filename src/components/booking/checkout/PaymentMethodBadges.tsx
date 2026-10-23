@@ -3,7 +3,9 @@
 // help link shared by the payment step, the secure-payment modal, the
 // simulated Beam page and the return page. Which badges a provider shows
 // comes from paymentMethodLabels(config) (Stripe Thailand: Visa, Mastercard,
-// PromptPay, Apple Pay, Google Pay; Beam: all five card brands + PromptPay).
+// PromptPay, Apple Pay, Google Pay; Beam: Visa, Mastercard, JCB, Amex, PromptPay
+// and its e-wallets as text chips - Alipay, LINE Pay, TrueMoney, ShopeePay,
+// WeChat Pay once enabled (design S5.2); the demo: all five card brands + PromptPay).
 
 import { site } from "@/data/site";
 import type { PaymentMethodLabel } from "@/lib/booking/paymentCopy";

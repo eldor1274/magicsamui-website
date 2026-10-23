@@ -3,11 +3,15 @@
 // OWNER: ui-checkout
 // "Learn more" under the summary CTA: how payment works with the configured
 // provider (Stripe, or Beam / the simulated Beam checkout). Replaces
-// Cloudbeds' "Secure Online Payment" modal. Keep SecurePaymentModalProps stable.
+// Cloudbeds' "Secure Online Payment" modal. A Beam page that asks how to pay
+// (design S5.2) names its cards, e-wallets and PromptPay, the fee by method and
+// the room hold (lib/booking/paymentCopy beamSecurePayment); the demo keeps its
+// own points. Keep SecurePaymentModalProps stable.
 
 import { useContext, useRef } from "react";
 import { CreditCard, Lock, QrCode, ShieldCheck, Smartphone, Wallet } from "lucide-react";
-import { checkoutBrand, paymentMethodLabels } from "@/lib/booking/paymentCopy";
+import { beamSecurePayment, checkoutBrand, paymentMethodLabels } from "@/lib/booking/paymentCopy";
+import type { SecurePaymentPoint } from "@/lib/booking/paymentCopy";
 import type { PublicBookingConfig } from "@/lib/booking/types";
 import Modal from "../ui/Modal";
 import { BookingContext } from "../state";
@@ -77,6 +81,14 @@ function stripePoints(holdMinutes: number): Point[] {
   ];
 }
 
+const POINT_ICON: Record<SecurePaymentPoint["kind"], typeof CreditCard> = {
+  card: CreditCard,
+  wallet: Wallet,
+  promptpay: QrCode,
+  lock: Lock,
+  hold: Smartphone,
+};
+
 /** Provider copy for the modal; falls back to Beam's (the demo's) when rendered outside the booking app. */
 function modalContent(config: PublicBookingConfig | null) {
   if (config && checkoutBrand(config.provider) === "Stripe") {
@@ -92,6 +104,21 @@ function modalContent(config: PublicBookingConfig | null) {
       methods: paymentMethodLabels(config),
       feeNote:
         "The payment processing fee is shown as its own line in your reservation summary before you pay - the same for every payment method, no hidden charges.",
+    };
+  }
+  const beam = config ? beamSecurePayment(config) : null;
+  if (config && beam) {
+    return {
+      title: "Secure payment by Beam",
+      intro: (
+        <>
+          Payments are processed by <strong>Beam</strong>{" "}(beamcheckout.com), a Thai payment gateway. You pay on Beam&apos;s secure hosted page
+          and come straight back here with your booking reference.
+        </>
+      ),
+      points: beam.points.map(({ kind, title, body }): Point => ({ icon: POINT_ICON[kind], title, body })),
+      methods: paymentMethodLabels(config),
+      feeNote: beam.feeNote,
     };
   }
   return {

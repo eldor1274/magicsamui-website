@@ -16,8 +16,8 @@ import { createBookingAnalytics } from "@/lib/booking/clientAnalytics";
 import { formatThbWithCode } from "@/lib/booking/format";
 import { isGuestValid, normalizePostcode, validateGuest } from "@/lib/booking/guest";
 import { providerCopy } from "@/lib/booking/paymentCopy";
-import { computeQuote, promoCodeHint, promoInputOffered } from "@/lib/booking/quote";
-import type { AbandonResponse, AddonId, AvailabilityResponse, CartItem, IsoDate, PublicBookingConfig, ThemeName } from "@/lib/booking/types";
+import { checkoutPayMethod, computeQuote, pageOffersMethodChoice, pagePayMethod, pagePricing, promoCodeHint, promoInputOffered } from "@/lib/booking/quote";
+import type { AbandonResponse, AddonId, AvailabilityResponse, CartItem, IsoDate, PayMethod, PublicBookingConfig, ThemeName } from "@/lib/booking/types";
 import { allowListedSearch, returnPagePath } from "@/lib/booking/urls";
 import type { ResumeReason } from "@/lib/booking/urls";
 import BookingHelp from "./BookingHelp";
@@ -28,7 +28,7 @@ import PreviewBanner from "./PreviewBanner";
 import StepHeader from "./StepHeader";
 import AddonsStep from "./checkout/AddonsStep";
 import GuestDetailsStep from "./checkout/GuestDetailsStep";
-import PaymentStep, { isPaymentPaused } from "./checkout/PaymentStep";
+import PaymentStep, { focusPayMethodChoice, isPaymentPaused } from "./checkout/PaymentStep";
 import SecurePaymentModal from "./checkout/SecurePaymentModal";
 import ResultsList, { AvailabilityErrorCard } from "./results/ResultsList";
 import SearchBar from "./search/SearchBar";
@@ -100,7 +100,7 @@ function scrollBehavior(): ScrollBehavior {
 }
 
 /** Total of a cart for an announcement ("Total THB 13,182.75"), or "" when it can't be priced yet. */
-function totalText(state: Pick<BookingState, "results" | "cart">): string {
+function totalText(state: Pick<BookingState, "results" | "cart" | "payMethod">): string {
   const q = selectQuote(state);
   return q ? ` Total ${formatThbWithCode(q.totalSatang)}.` : "";
 }
@@ -269,6 +269,8 @@ export default function BookingApp({
       // return page ran), so the notice must never say the room is still held - with or without a token in the link.
       holdReleased: cancelledAttempt !== null || tracksAttempts(configRef.current),
       landingKey,
+      // Beam: a saved payment method is kept only while this page offers it (design S5.2).
+      config: configRef.current,
       today,
     });
     // The prefill (?checkin ?checkout ?adults ?promo) and the Beam cancel
@@ -300,7 +302,7 @@ export default function BookingApp({
   useEffect(() => {
     const onPageShow = (e: PageTransitionEvent) => {
       if (!e.persisted) return;
-      const action: BookingAction = { type: "hydrate", persisted: readPersistedBooking(), initialSearch: null, resume: null, today };
+      const action: BookingAction = { type: "hydrate", persisted: readPersistedBooking(), initialSearch: null, resume: null, config: configRef.current, today };
       navRef.current = { mode: "replace", step: bookingReducer(stateRef.current, action).step };
       abortRef.current?.abort();
       dispatch(action);
@@ -490,7 +492,13 @@ export default function BookingApp({
     }
     const cfg = configRef.current;
     if (cfg.paymentStatus !== "ok" || releasing) return;
-    analytics.addPaymentInfo(q);
+    // Beam (design S5.2): Pay needs one of the page's payment method groups (Pay stays disabled until one is chosen).
+    const payMethod = pagePayMethod(cfg, s.payMethod);
+    if (pageOffersMethodChoice(cfg) && payMethod === null) {
+      focusPayMethodChoice();
+      return;
+    }
+    analytics.addPaymentInfo(q, payMethod);
     dispatch({ type: "checkoutStarted" });
     announce(providerCopy(cfg).payAnnouncement);
     if (tracksAttempts(cfg)) {
@@ -532,6 +540,8 @@ export default function BookingApp({
       // The terms version this page showed next to the box the guest ticked (Stripe refuses any other: terms_changed).
       termsVersion: POLICY_VERSION,
       theme,
+      // Beam: the method group the guest chose (the fee and the methods its payment link offers). Never on Stripe or the demo.
+      ...checkoutPayMethod(cfg, s.payMethod),
       // Hold-first (Stripe, Beam): the reservation is created in Cloudbeds before payment, so the server needs the lead
       // guest. Sent only in the request body (never in a URL); the demo keeps the details in the browser.
       ...(cfg.requiresGuestDetails ? { guest: { ...s.guest, postcode: normalizePostcode(s.guest.postcode ?? "") } } : {}),
@@ -552,19 +562,24 @@ export default function BookingApp({
     // price_changed: the server's quote becomes the one shown and paid (state.serverQuote).
     // unavailable: the reducer drops those rooms. Either way refresh the offers, past the search cache.
     dispatch({ type: "checkoutFailed", error: toCheckoutErrorView(res), quote: res.quote });
+    // Beam: no (or no longer an offered) payment method - the choice was cleared; fetch the page's current config
+    // (BEAM_PROMPTPAY may have been switched off) past the search cache.
+    const chooseAgain = pageOffersMethodChoice(cfg) && res.error === "invalid_request" && res.fixStep === "payment";
     // Replace "Reserving your room and taking you to ..." so screen-reader users never read a stale promise.
     announce(
-      res.error === "price_changed" && res.quote
-        ? `The price has changed. New total ${formatThbWithCode(res.quote.totalSatang)}.`
-        : res.error === "live_payments_locked"
-          ? "Online payment is paused. Nothing was charged."
-          : res.error === "terms_changed"
-            ? "Our booking terms were just updated. Nothing was charged. Please refresh the page and review them."
-            : "Payment could not be started. Nothing was charged.",
+      chooseAgain
+        ? "Please choose how to pay. Nothing was charged."
+        : res.error === "price_changed" && res.quote
+          ? `The price has changed. New total ${formatThbWithCode(res.quote.totalSatang)}.`
+          : res.error === "live_payments_locked"
+            ? "Online payment is paused. Nothing was charged."
+            : res.error === "terms_changed"
+              ? "Our booking terms were just updated. Nothing was charged. Please refresh the page and review them."
+              : "Payment could not be started. Nothing was charged.",
     );
     // price_changed WITHOUT a quote (Stripe: Cloudbeds priced the hold differently and it was cancelled):
     // refresh once past the cache; the guest decides whether to pay again (never an automatic retry).
-    if (res.error === "unavailable" || res.error === "price_changed") runSearch(s.search, { fresh: true });
+    if (res.error === "unavailable" || res.error === "price_changed" || chooseAgain) runSearch(s.search, { fresh: true });
   }, [analytics, announce, releaseAttempt, releasing, runSearch, theme]);
 
   const actions: BookingActions = useMemo(() => {
@@ -585,12 +600,13 @@ export default function BookingApp({
         if (selectBlockedReason(s, input.slug, input.adults)) return;
         const item: CartItem = { id: newCartItemId(), slug: input.slug, ratePlanId: input.ratePlanId, adults: input.adults, addonIds: [] };
         dispatch({ type: "addToCart", item });
-        announce(`${getCatalogueRoom(input.slug)?.name ?? "Room"} added.${totalText({ results: s.results, cart: [...s.cart, item] })}`);
+        announce(`${getCatalogueRoom(input.slug)?.name ?? "Room"} added.${totalText({ results: s.results, cart: [...s.cart, item], payMethod: s.payMethod })}`);
         const data = s.results.data;
         if (data) {
           try {
+            // The room's own price with the card/e-wallet fee on Beam (no method chosen); config.cardFeePct elsewhere.
             const q = computeQuote(
-              { checkIn: data.search.checkIn, checkOut: data.search.checkOut, items: cartInputs([item]), promo: null, pricing: data.config },
+              { checkIn: data.search.checkIn, checkOut: data.search.checkOut, items: cartInputs([item]), promo: null, pricing: pagePricing(data.config, null) },
               data.offers,
             );
             analytics.addToCart(q.lines[0], q);
@@ -607,7 +623,7 @@ export default function BookingApp({
         dispatch({ type: "removeFromCart", id: itemId });
         const rest = s.cart.filter((c) => c.id !== itemId);
         const name = idx >= 0 ? (getCatalogueRoom(s.cart[idx].slug)?.name ?? "Room") : "Room";
-        announce(rest.length > 0 ? `${name} removed.${totalText({ results: s.results, cart: rest })}` : `${name} removed. Your reservation is empty.`);
+        announce(rest.length > 0 ? `${name} removed.${totalText({ results: s.results, cart: rest, payMethod: s.payMethod })}` : `${name} removed. Your reservation is empty.`);
         // Removing the last room unmounts the summary (and the sheet) that held focus.
         if (s.cart.length === 1 && idx === 0) window.requestAnimationFrame(() => focusStepHeading("results"));
       },
@@ -621,9 +637,17 @@ export default function BookingApp({
           c.id !== itemId ? c : { ...c, addonIds: adding ? [...c.addonIds, addonId] : c.addonIds.filter((a) => a !== addonId) },
         );
         const label = addonId === "breakfast-pp" ? "Breakfast per person" : "Add-on";
-        announce(`${label} ${adding ? "added" : "removed"}.${totalText({ results: s.results, cart })}`);
+        announce(`${label} ${adding ? "added" : "removed"}.${totalText({ results: s.results, cart, payMethod: s.payMethod })}`);
       },
       updateGuest: (patch) => dispatch({ type: "updateGuest", patch }),
+      setPayMethod: (payMethod: PayMethod) => {
+        const s = stateRef.current;
+        if (s.checkout.status === "submitting" || s.checkout.status === "redirecting") return;
+        const q = selectQuote({ ...s, payMethod });
+        dispatch({ type: "setPayMethod", payMethod });
+        // The radio's own label says which method; the live region says what it now costs.
+        if (q && payMethod !== s.payMethod) announce(`Total ${formatThbWithCode(q.totalSatang)}.`);
+      },
       goToStep,
       back: () => {
         const i = steps.indexOf(stateRef.current.step);
@@ -692,12 +716,17 @@ export default function BookingApp({
   const locked = config.paymentStatus === "locked";
   // The server refused the Pay as locked after this page loaded (e.g. an emergency stop).
   const paymentPaused = isPaymentPaused(checkout.error);
+  // Beam (design S5.2): no payment method chosen yet - the summary's button takes the guest to the choice instead of paying
+  // (the phone bar keeps the short "Pay now", so a six-figure total still fits beside it).
+  const choosePayMethod = pageOffersMethodChoice(config) && !locked && !paymentPaused && pagePayMethod(config, state.payMethod) === null;
 
   let cta: SummaryCta | null = null;
   if (step === "results" || step === "addons") {
     cta = { label: STEP_CTA[step], onClick: actions.continue, disabled: cart.length === 0 || !quote };
   } else if (step === "guest") {
     cta = { label: STEP_CTA.guest, submitForm: GUEST_FORM_ID };
+  } else if (step === "payment" && quote && choosePayMethod) {
+    cta = { label: "Choose how to pay", barLabel: "Pay now", onClick: focusPayMethodChoice };
   } else if (step === "payment" && quote) {
     cta = {
       label: `Pay ${formatThbWithCode(quote.dueNowSatang)}`,
@@ -875,6 +904,8 @@ export default function BookingApp({
                       onChangeDates={() => actions.goToStep("search")}
                       config={config}
                       busyLabel={releasing ? "Checking your earlier payment..." : undefined}
+                      payMethod={state.payMethod ?? null}
+                      onPayMethodChange={actions.setPayMethod}
                     />
                   ) : (
                     !pricesError && <PaymentStepSkeleton />

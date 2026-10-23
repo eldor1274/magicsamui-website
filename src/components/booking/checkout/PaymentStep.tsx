@@ -8,7 +8,9 @@
 // Stripe Checkout (after the room is held in Cloudbeds), Beam's page, or the
 // simulated one in demo/MOCK mode. All wording comes from the public config
 // (lib/booking/paymentCopy), so a Stripe page never mentions Beam. Every
-// checkout error has its own recovery.
+// checkout error has its own recovery. A Beam page asks how to pay first
+// (design S5.2): card or e-wallet, or Thai PromptPay QR - a required choice
+// with no default, its fee on the right; Pay stays disabled until one is chosen.
 // Keep PaymentStepProps stable.
 
 import { useEffect, useRef } from "react";
@@ -18,23 +20,36 @@ import {
   BedDouble,
   CalendarDays,
   CircleAlert,
+  CreditCard,
   FlaskConical,
   LoaderCircle,
   Lock,
   MessageCircle,
   Pencil,
+  QrCode,
   RefreshCw,
   ShieldCheck,
   User,
+  Wallet,
 } from "lucide-react";
 import { HOUSE_POLICIES, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { formatDisplayDateWithWeekday, formatNights } from "@/lib/booking/dates";
 import { formatThb, formatThbWithCode } from "@/lib/booking/format";
 import { normalizePostcode } from "@/lib/booking/guest";
 import type { GuestDetails } from "@/lib/booking/guest";
-import { DEMO_COPY_CONFIG, paymentMethodLabels, providerCopy } from "@/lib/booking/paymentCopy";
-import { lineDiscountLabel } from "@/lib/booking/quote";
-import type { CartItem, IsoDate, PaymentMode, PublicBookingConfig, Quote } from "@/lib/booking/types";
+import {
+  CHOOSE_METHOD_HINT,
+  DEMO_COPY_CONFIG,
+  PROMPTPAY_HINT,
+  noFeeAlternative,
+  payMethodFeeLabel,
+  payMethodOptions,
+  paymentMethodLabels,
+  providerCopy,
+} from "@/lib/booking/paymentCopy";
+import { feeSatangAt, lineDiscountLabel } from "@/lib/booking/quote";
+import type { CartItem, IsoDate, PayMethod, PaymentMode, PublicBookingConfig, Quote } from "@/lib/booking/types";
+import { revealAboveBars } from "../bottomBars";
 import type { CheckoutErrorView } from "../state";
 import { TOUCH_TARGET } from "../ui/styles";
 import PaymentMethodBadges, { whatsappHref } from "./PaymentMethodBadges";
@@ -62,6 +77,25 @@ export interface PaymentStepProps {
   config?: PublicBookingConfig;
   /** Overrides the busy label (e.g. while an earlier Stripe attempt is being released). */
   busyLabel?: string;
+  /** Beam (design S5.2): the payment method group the guest chose (null = none yet). Ignored on Stripe and demo pages. */
+  payMethod?: PayMethod | null;
+  /** Beam: the guest picked a payment method group. */
+  onPayMethodChange?: (payMethod: PayMethod) => void;
+}
+
+/** id of the Beam payment step's "How would you like to pay?" group (the summary's "Choose how to pay" moves focus to it). */
+export const PAY_METHOD_GROUP_ID = "booking-pay-method";
+
+/**
+ * Beam: moves keyboard focus to the payment method choice (the chosen radio, else the first) and scrolls the group
+ * clear of the bottom bars - once a summary sheet the button sat in has closed and released the page scroll.
+ */
+export function focusPayMethodChoice(): void {
+  const group = document.getElementById(PAY_METHOD_GROUP_ID);
+  const radio = group?.querySelector<HTMLInputElement>('input[type="radio"]:checked') ?? group?.querySelector<HTMLInputElement>('input[type="radio"]');
+  if (!group || !radio) return;
+  radio.focus({ preventScroll: true });
+  window.setTimeout(() => revealAboveBars(group), 50);
 }
 
 
@@ -133,6 +167,8 @@ interface ErrorPanelProps {
   guestChecked: boolean;
   /** The Cloudbeds booking engine: the working fallback while online payment here is paused. */
   classicHref: string;
+  /** Beam: the payment method choice is on the page (a "Please choose how to pay" answer points to it). */
+  onChooseMethod?: () => void;
 }
 
 /** " Nothing has been charged." unless the server message already says so (never twice). */
@@ -157,6 +193,7 @@ function ErrorPanel({
   onChangeDates,
   guestChecked,
   classicHref,
+  onChooseMethod,
 }: ErrorPanelProps) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -268,6 +305,18 @@ function ErrorPanel({
       );
       break;
     case "invalid_request":
+      if (error.fixStep === "payment" && onChooseMethod) {
+        // Beam: no payment method (or one the page no longer offers) - the choice was cleared and the page's methods reloaded.
+        title = "Please choose how to pay";
+        body = <>Choose how you&apos;d like to pay below, then press Pay again. Nothing has been charged.</>;
+        actions = (
+          <button type="button" onClick={onChooseMethod} className={SECONDARY_BUTTON}>
+            <Wallet size={15} aria-hidden="true" />
+            Choose how to pay
+          </button>
+        );
+        break;
+      }
       title = "Something in your reservation needs a look";
       if (error.issues && error.issues.length > 0) {
         body = (
@@ -457,6 +506,8 @@ export default function PaymentStep({
   onChangeDates,
   config,
   busyLabel,
+  payMethod = null,
+  onPayMethodChange,
 }: PaymentStepProps) {
   const amountRef = useRef<HTMLDivElement>(null);
   const locked = paymentStatus === "locked";
@@ -466,6 +517,12 @@ export default function PaymentStep({
   const methods = config ? paymentMethodLabels(config) : undefined;
   const country = getCountry(guest.country);
   const dueNow = formatThbWithCode(quote.dueNowSatang);
+  // Beam (design S5.2): the payment method choice - none on Stripe and demo pages, nor while payments are locked.
+  const methodOptions = config && !locked ? payMethodOptions(config) : [];
+  const chosenMethod = methodOptions.find((o) => o.method === payMethod)?.method ?? null;
+  const needsMethod = methodOptions.length > 0 && chosenMethod === null;
+  const methodNote = config && methodOptions.length > 0 ? noFeeAlternative(config, chosenMethod) : null;
+  const methodHintId = `${PAY_METHOD_GROUP_ID}-hint`;
 
   function showAmount() {
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -488,6 +545,7 @@ export default function PaymentStep({
           onChangeDates={onChangeDates}
           guestChecked={config?.requiresGuestDetails === true}
           classicHref={config?.classicBookingPath ?? "/booking"}
+          onChooseMethod={methodOptions.length > 0 ? focusPayMethodChoice : undefined}
         />
       )}
 
@@ -596,7 +654,10 @@ export default function PaymentStep({
             )}
             {quote.cardFeeSatang > 0 && (
               <div className="flex justify-between gap-3 text-(--bk-text-muted)">
-                <dt>Payment processing fee ({quote.cardFeePct}%)</dt>
+                <dt>
+                  Payment processing fee ({quote.cardFeePct}%)
+                  {methodNote && <span className="block text-xs font-medium text-(--bk-success)">{methodNote}</span>}
+                </dt>
                 <dd className="bk-price">{formatThb(quote.cardFeeSatang)}</dd>
               </div>
             )}
@@ -625,6 +686,70 @@ export default function PaymentStep({
           <p className="mt-1 text-sm text-(--bk-text-muted)">{copy.payExplainer}</p>
           <PaymentMethodBadges className="mt-3" methods={methods} />
         </div>
+
+        {methodOptions.length > 0 && (
+          <fieldset id={PAY_METHOD_GROUP_ID} aria-describedby={needsMethod ? methodHintId : undefined} className="space-y-2">
+            <legend className="mb-2 text-sm font-semibold text-(--bk-text)">How would you like to pay?</legend>
+            {methodOptions.map((option) => {
+              const id = `${PAY_METHOD_GROUP_ID}-${option.method}`;
+              const on = chosenMethod === option.method;
+              const Icon = option.method === "promptpay" ? QrCode : CreditCard;
+              return (
+                <label
+                  key={option.method}
+                  htmlFor={id}
+                  className={`flex cursor-pointer items-start gap-3 rounded-(--bk-radius-control) border bg-(--bk-surface) p-3 transition-colors ${
+                    on ? "border-(--bk-accent) ring-1 ring-(--bk-accent)" : "border-(--bk-border-strong) hover:border-(--bk-accent)"
+                  }`}
+                >
+                  <input
+                    id={id}
+                    type="radio"
+                    name="payMethod"
+                    value={option.method}
+                    checked={on}
+                    onChange={() => {
+                      if (!submitting) onPayMethodChange?.(option.method);
+                    }}
+                    aria-disabled={submitting || undefined}
+                    aria-labelledby={`${id}-title ${id}-fee`}
+                    aria-describedby={`${id}-text`}
+                    className="mt-0.5 h-5 w-5 shrink-0 cursor-pointer accent-(--bk-accent)"
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-start justify-between gap-3">
+                      <span id={`${id}-title`} className="flex items-center gap-1.5 font-semibold text-(--bk-text)">
+                        {/* From sm only: on a phone the title and its fee stay on one line. */}
+                        <Icon size={16} aria-hidden="true" className="hidden shrink-0 text-(--bk-text-muted) sm:block" />
+                        {option.title}
+                      </span>
+                      <span id={`${id}-fee`} className="bk-price shrink-0 text-sm font-medium text-(--bk-text)">
+                        {payMethodFeeLabel(feeSatangAt(quote, option.feePct))}
+                      </span>
+                    </span>
+                    <span id={`${id}-text`} className="mt-0.5 block text-xs leading-relaxed text-(--bk-text-muted)">
+                      {option.description}
+                    </span>
+                  </span>
+                </label>
+              );
+            })}
+            {needsMethod && (
+              <p id={methodHintId} className="text-xs text-(--bk-text-muted)">
+                {CHOOSE_METHOD_HINT}
+              </p>
+            )}
+            {/* Read out when it appears: PromptPay's confirmation can take a few minutes, so the guest mustn't pay twice. */}
+            <div aria-live="polite">
+              {chosenMethod === "promptpay" && (
+                <p className="flex items-start gap-2 rounded-(--bk-radius-control) bg-(--bk-surface-muted) p-3 text-xs text-(--bk-text)">
+                  <QrCode size={16} aria-hidden="true" className="mt-px shrink-0 text-(--bk-text-muted)" />
+                  {PROMPTPAY_HINT}
+                </p>
+              )}
+            </div>
+          </fieldset>
+        )}
 
         {locked ? (
           <div className="flex items-start gap-3 rounded-(--bk-radius-control) border border-(--bk-danger) bg-(--bk-danger-soft) p-4 text-sm">
@@ -693,9 +818,10 @@ export default function PaymentStep({
           onClick={() => {
             if (!submitting) onPay();
           }}
-          disabled={locked || paused}
+          disabled={locked || paused || needsMethod}
           aria-disabled={submitting || undefined}
           aria-busy={submitting || undefined}
+          aria-describedby={needsMethod ? methodHintId : undefined}
           className="inline-flex min-h-13 w-full items-center justify-center gap-2 rounded-(--bk-radius-pill) bg-(--bk-accent) px-6 py-3 text-base font-semibold text-(--bk-accent-contrast) transition-colors hover:bg-(--bk-accent-hover) disabled:cursor-not-allowed disabled:opacity-(--bk-disabled-opacity) disabled:hover:bg-(--bk-accent) aria-disabled:cursor-wait aria-disabled:opacity-(--bk-disabled-opacity)"
         >
           {submitting ? (

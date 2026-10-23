@@ -7,6 +7,9 @@
 // explanation (Cloudbeds hides this fee in a tooltip the site suppresses - we
 // show it), Total "THB x", Due now; the step CTA; "Secure payment by <provider>"
 // (Stripe or Beam, from the booking config - see lib/booking/paymentCopy).
+// A Beam page (design S5.2) prices the chosen payment method: before a choice
+// the card/e-wallet total with "No fee with Thai PromptPay QR", and no fee line
+// once the fee is 0 (PromptPay).
 // quote.lines[i] corresponds to cart[i]. "sidebar" is the sticky desktop
 // card; "sheet" is the same content inside the mobile summary sheet.
 // Keep ReservationSummaryProps / SummaryCta stable.
@@ -16,7 +19,7 @@ import { ArrowRight, BedDouble, Car, Info, Moon, ShieldCheck, Trash2, User } fro
 import { FREE_PICKUP_MIN_NIGHTS, HOUSE_POLICIES, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { formatDisplayDate, formatNights, nightsBetween } from "@/lib/booking/dates";
 import { formatThb, formatThbWithCode } from "@/lib/booking/format";
-import { DEMO_COPY_CONFIG, providerCopy } from "@/lib/booking/paymentCopy";
+import { DEMO_COPY_CONFIG, feeLineHidden, noFeeAlternative, providerCopy } from "@/lib/booking/paymentCopy";
 import { lineDiscountLabel } from "@/lib/booking/quote";
 import type { CartItem, IsoDate, Quote } from "@/lib/booking/types";
 import { CHIP, TOUCH_TARGET } from "../ui/styles";
@@ -64,9 +67,13 @@ export default function ReservationSummary({
   variant,
 }: ReservationSummaryProps) {
   const [feeInfoOpen, setFeeInfoOpen] = useState(false);
-  const bookingConfig = useContext(BookingContext)?.config;
+  const booking = useContext(BookingContext);
+  const bookingConfig = booking?.config;
   // Outside the booking app (never in practice) the wording falls back to the demo/Beam copy.
   const copy = providerCopy(bookingConfig ?? DEMO_COPY_CONFIG);
+  // Beam only (design S5.2): "No fee with Thai PromptPay QR" before a method is chosen; no fee line at a 0 fee.
+  const methodNote = bookingConfig ? noFeeAlternative(bookingConfig, booking?.state.payMethod) : null;
+  const hideFee = Boolean(bookingConfig && quote && feeLineHidden(bookingConfig, quote));
   const feeInfoId = useId();
   const headingId = useId();
   const sidebar = variant === "sidebar";
@@ -234,31 +241,34 @@ export default function ReservationSummary({
                   <dd>{amount(formatThb(-quote.promo.discountSatang))}</dd>
                 </div>
               )}
-              <div>
-                <div className="flex items-center justify-between gap-3">
-                  <dt className="flex items-center gap-1">
-                    Payment processing fee ({quote.cardFeePct}%)
-                    <button
-                      type="button"
-                      onClick={() => setFeeInfoOpen((v) => !v)}
-                      aria-expanded={feeInfoOpen}
-                      aria-controls={feeInfoId}
-                      aria-label="What is the payment processing fee?"
-                      className={`${TOUCH_TARGET} inline-flex h-6 w-6 items-center justify-center rounded-full text-(--bk-text-muted) hover:bg-(--bk-surface-sunken) hover:text-(--bk-text)`}
-                    >
-                      <Info size={15} aria-hidden="true" />
-                    </button>
-                  </dt>
-                  <dd>{amount(formatThb(quote.cardFeeSatang))}</dd>
+              {!hideFee && (
+                <div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="flex items-center gap-1">
+                      Payment processing fee ({quote.cardFeePct}%)
+                      <button
+                        type="button"
+                        onClick={() => setFeeInfoOpen((v) => !v)}
+                        aria-expanded={feeInfoOpen}
+                        aria-controls={feeInfoId}
+                        aria-label="What is the payment processing fee?"
+                        className={`${TOUCH_TARGET} inline-flex h-6 w-6 items-center justify-center rounded-full text-(--bk-text-muted) hover:bg-(--bk-surface-sunken) hover:text-(--bk-text)`}
+                      >
+                        <Info size={15} aria-hidden="true" />
+                      </button>
+                    </dt>
+                    <dd>{amount(formatThb(quote.cardFeeSatang))}</dd>
+                  </div>
+                  {methodNote && <p className="mt-0.5 text-xs font-medium text-(--bk-success)">{methodNote}</p>}
+                  <p
+                    id={feeInfoId}
+                    hidden={!feeInfoOpen}
+                    className="mt-1.5 rounded-(--bk-radius-control) bg-(--bk-surface-sunken) px-3 py-2 text-xs leading-relaxed text-(--bk-text-muted)"
+                  >
+                    {copy.feeExplainer(quote.cardFeePct)}
+                  </p>
                 </div>
-                <p
-                  id={feeInfoId}
-                  hidden={!feeInfoOpen}
-                  className="mt-1.5 rounded-(--bk-radius-control) bg-(--bk-surface-sunken) px-3 py-2 text-xs leading-relaxed text-(--bk-text-muted)"
-                >
-                  {copy.feeExplainer(quote.cardFeePct)}
-                </p>
-              </div>
+              )}
               {!sidebar && totalRows}
             </dl>
           ) : (
