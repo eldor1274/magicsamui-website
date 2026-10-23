@@ -177,6 +177,9 @@ const BEAM_PRIVACY = `Beam (${BEAM_LEGAL_NAME}) processes card, e-wallet and Tha
 const BEAM_NO_PII = "We send Beam no name, email address or phone number: only the booking reference, what was booked (rooms, dates and number of guests) and the amounts.";
 const BEAM_LEGAL = `Online payments on our own direct booking pages may be processed by Beam (${BEAM_LEGAL_NAME}). Payments are made on Beam's secure payment page, and card details never reach our own systems.`;
 const BOTH = "Depending on the booking, the payment is processed by Stripe or by Beam.";
+/** The support index of Beam attempts (payments/beamSupport.ts): what the bot's payment lookup reads. */
+const BEAM_SUPPORT_CODE =
+  "For a payment through Beam, our server also keeps a one-way code of the email address and phone number you entered (not the address or number itself), together with the booking reference, for about 30 days, so that our messaging assistant can tell you what happened to your payment if you ask it.";
 
 /* ---------------------------------- tests ---------------------------------- */
 
@@ -252,7 +255,8 @@ test("privacy and legal, Beam only: Beam's processing in plain words, no Stripe 
   for (const label of ["Beam only (beam-playground)", "Beam only (legacy rule: no provider variable, BEAM_API_BASE set)", "the demo with a Beam drain", "beam-live", "beam-live, emergency-stopped (fulfilment still runs)"]) {
     const html = render(Privacy, WITH_BEAM[label].env);
     const privacy = textOf(html);
-    assert.ok(privacy.includes("Last updated: 23 October 2026"), label);
+    assert.ok(privacy.includes("Last updated: 24 October 2026"), label);
+    assert.ok(privacy.includes(BEAM_SUPPORT_CODE), label);
     assert.ok(privacy.includes(DETAILS_TO_CLOUDBEDS), label);
     assert.ok(privacy.includes(BEAM_PRIVACY), label);
     assert.ok(privacy.includes(BEAM_NO_PII), label);
@@ -283,7 +287,8 @@ test("privacy and legal with both providers (a Stripe drain on Beam, or a Beam d
   ]) {
     const html = render(Privacy, WITH_BEAM[label].env);
     const privacy = textOf(html);
-    assert.ok(privacy.includes("Last updated: 23 October 2026"), label);
+    assert.ok(privacy.includes("Last updated: 24 October 2026"), label);
+    assert.ok(privacy.includes(BEAM_SUPPORT_CODE), label);
     assert.ok(privacy.includes(`${DETAILS_TO_CLOUDBEDS} ${BOTH}`), label);
     assert.ok(privacy.includes("Stripe processes card, Apple Pay, Google Pay and PromptPay payments on its own secure checkout page."), label);
     assert.ok(html.includes('href="https://stripe.com/privacy"'), label);

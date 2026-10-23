@@ -13,7 +13,7 @@ const UPDATED = "15 August 2026";
 /** Date of the Stripe wording below (shown only once Stripe is the configured payment provider). */
 const UPDATED_STRIPE = "5 October 2026";
 /** Date of the Beam wording below (shown only while a Beam config exists: Beam design S5.4). */
-const UPDATED_BEAM = "23 October 2026";
+const UPDATED_BEAM = "24 October 2026";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -72,6 +72,13 @@ function OwnBookingPageText({ stripe }: { stripe: boolean }) {
           beamcheckout.com
         </a>
         .
+      </p>
+      <p>
+        For a payment through Beam, our server also keeps a one-way code of the
+        email address and phone number you entered (not the address or number
+        itself), together with the booking reference, for about 30 days, so that
+        our messaging assistant can tell you what happened to your payment if
+        you ask it.
       </p>
     </>
   );
