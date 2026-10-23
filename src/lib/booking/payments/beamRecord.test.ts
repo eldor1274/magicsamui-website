@@ -161,7 +161,7 @@ test("every Stripe key name, TTL and hold suffix is byte-identical; the Beam key
     [
       "beamPayment", "beamCharge", "beamPrimary", "beamLinksOpen", "beamLinksWatch", "beamReported", "beamTxn", "beamBadSignatures",
       "beamRateLimited", "beamDisableFail", "beamReadFailures", "beamPageFail", "beamPaused", "beamDeepScan", "beamSweepFailures",
-      "beamLinksPending",
+      "beamLinksPending", "beamLinksWatchRead",
     ],
   );
   assert.equal(LOCK_TTL_SECONDS, 120);
@@ -177,6 +177,7 @@ test("every Beam key carries 'beam:' right after 'msv:' or the mode scope, and n
   assert.equal(keys.beamReadFailures("beam-live"), "msv:beam-live:beam:readfail");
   assert.equal(keys.beamSweepFailures("beam-live"), "msv:beam-live:beam:sweepfail");
   assert.equal(keys.beamLinksPending("beam-live"), "msv:beam-live:beam:links:pending");
+  assert.equal(keys.beamLinksWatchRead("beam-live"), "msv:beam-live:beam:links:watchread");
   const stripeKeys = new Set(
     [SESSION_ID, LINK_ID, CHARGE_ID, beamKeyOf(LINK_ID)].flatMap((id) => [
       keys.fulfilLock(id), keys.fulfilDone(id), keys.paidPending(id), keys.abandoned(id), keys.hold(id), keys.releaseDone(id),
@@ -200,6 +201,7 @@ test("every Beam key carries 'beam:' right after 'msv:' or the mode scope, and n
       keys.beamDeepScan(scope),
       keys.beamSweepFailures(scope),
       keys.beamLinksPending(scope),
+      keys.beamLinksWatchRead(scope),
     ];
     assert.equal(new Set(beamKeys).size, beamKeys.length, `${scope}: every Beam key is distinct`);
     for (const key of beamKeys) {

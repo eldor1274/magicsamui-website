@@ -1091,11 +1091,29 @@ test("a PromptPay link paid by card: confirmed as usual, one warning naming the 
     `The guest paid no card fee while Beam charges its card or e-wallet rate on this payment: collect the ${money(cardFee)} difference from the guest, or waive it.`,
   ]);
   assert.equal(await kit.deps.kv.get(keys.beamReported(keyScope("beam-playground"), "method-group", h.linkId)), "1");
+  // Round 7: the alerter's 6-hour repeat claim is the link's own (alert key beam-method-group:{linkId}).
+  assert.notEqual(await kit.deps.kv.get(keys.alerted(keyScope("beam-playground"), `beam-method-group:${h.linkId}`)), null);
   assert.equal(critical(kit).length, 0, "no needs_attention: the amount is the link's");
   // Every later reading says nothing more.
   await kit.gw.get(h.key);
   await kit.gw.get(h.key);
   assert.equal(withSubject(kit, /payment page$/).length, 1, "once per link");
+});
+
+test("two bookings paid in the other method group within 6 hours: two warnings, one per link (the repeat claim is per link, round 7)", async () => {
+  const kit = makeBeamKit();
+  const first = await beamHeld(kit, "promptpay");
+  const second = await beamHeld(kit, "promptpay", [{ slug: "garden-suite", ratePlanId: "standard", adults: 2, addonIds: [] }]);
+  for (const h of [first, second]) {
+    allowEverything(kit, h.linkId);
+    kit.fakeBeam.pay(h.linkId, "CARD");
+    assert.equal((await fulfilPayment(h.key, kit.deps, kit.gw)).state, "confirmed");
+    kit.now.ms += 10 * 60_000;
+  }
+  assert.deepEqual(
+    withSubject(kit, /payment page$/).map((a) => a.subject),
+    [first, second].map((h) => `Booking ${h.ref}: paid by card on a PromptPay payment page`),
+  );
 });
 
 test("a card link paid by PromptPay: one warning naming the fee to refund by bank transfer; Alipay on a PromptPay link and a matching group raise nothing (round 6)", async () => {

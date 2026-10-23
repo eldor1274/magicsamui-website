@@ -1396,7 +1396,7 @@ test("the Beam run reports what its tracking read (links) in runs[], and at the 
     const a = await scenario();
     const answer = await sweepBoth(a.w, primary);
     assert.equal(answer.status, 200, JSON.stringify(answer.body));
-    assert.deepEqual(runOf(answer, "beam").links, { open: 2, scanned: 1, watched: 0, pendingWatched: 0, watchedRead: 0, watchCovered: 0 }, primary);
+    assert.deepEqual(runOf(answer, "beam").links, { open: 2, scanned: 1, watched: 0, pendingWatched: 0, watchedRead: 0, watchCovered: 0, watchDeferred: 0 }, primary);
     assert.equal("links" in runOf(answer, "stripe"), false, primary);
     assert.equal("links" in answer.body, primary === "beam", `${primary}: the top level is the primary run's summary`);
   }

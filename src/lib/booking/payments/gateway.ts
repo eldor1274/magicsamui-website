@@ -92,7 +92,8 @@ export interface RecentPayment {
  * The payment pages a provider's step 1 tracked in one sweeper run (Beam, round 6: its links), reported in the sweep
  * route's runs[]. open: links-open entries; scanned: links the charge scan named; watched / pendingWatched: the late
  * watch and the pending watch (released links); watchedRead: released links read this run; watchCovered: late-watch
- * links not read because a completed charge scan covers them.
+ * links not read because a completed charge scan covers them (round 7: the scan's window covers the link's whole life);
+ * watchDeferred: older late-watch links not read because a good reading of them is under BEAM_WATCH_REREAD_MS old.
  */
 export interface SweepLinkCounts {
   open: number;
@@ -101,6 +102,7 @@ export interface SweepLinkCounts {
   pendingWatched: number;
   watchedRead: number;
   watchCovered: number;
+  watchDeferred: number;
 }
 
 /** The fee line's Cloudbeds item (see fulfil.ts feeItemFor: Cloudbeds keeps the first name/note an appItemID gets). */

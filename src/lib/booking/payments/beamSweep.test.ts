@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { ALERT_WINDOW_SECONDS } from "../alerts.ts";
 import { BeamApiError, createPaymentLink } from "../beam.ts";
 import type { BeamCreatePaymentLinkRequest } from "../beam.ts";
-import { BEAM_MERCHANT_ID, beamHeld, cardDigitsShown, makeBeamKit } from "../beamTestkit.ts";
+import { BEAM_MERCHANT_ID, BEAM_TEST_ENV, beamHeld, cardDigitsShown, makeBeamKit } from "../beamTestkit.ts";
 import type { BeamHeld, BeamKit } from "../beamTestkit.ts";
 import { fulfilPayment } from "../fulfil.ts";
 import { createMemoryKv } from "../kv.ts";
@@ -35,6 +35,7 @@ import {
   BEAM_PENDING_WATCH_DAYS,
   BEAM_SCAN_MAX_PAGES,
   BEAM_SWEEP_FAILURE_ALERT_RUNS,
+  BEAM_WATCH_REREAD_MS,
   beamGateway,
   trackOpenLink,
 } from "./beamGateway.ts";
@@ -1090,25 +1091,41 @@ test("housekeeping: done links leave links-open, released ones are watched for B
   assert.equal(await inWatch(kit, released.linkId), true);
   assert.equal(await inOpen(kit, refused.linkId), true, "neither done nor released: still tracked");
   const watchedReads = () => linkGets(kit, released.linkId);
-  // Inside the window the released link is watched. Round 6: a completed charge scan covers it (a late payment is a
-  // new charge, which the scan lists), so it is not read; while Beam refuses the scan it is read on every run. Past the
-  // window it is dropped and no longer read.
-  kit.now.ms = releasedAt + 7 * DAY - 2 * MIN;
+  const lastCounts = () => logged(kit, "beam_sweep_links").at(-1)?.data;
+  // Inside the window the released link is watched. A late success is an existing charge settling late, and the charge
+  // scan lists a charge only while it is younger than the scan's window (round 7). So a completed scan covers the link
+  // (not read) only while its window covers the link's whole life; an older link is read at most once an hour
+  // (BEAM_WATCH_REREAD_MS); while Beam refuses the scan it is read on every run. Past the window it is dropped and no
+  // longer read.
+  kit.now.ms = releasedAt + 2 * DAY;
   let before = watchedReads();
   await sweep(kit);
-  assert.equal(watchedReads() - before, 0, "covered by the completed charge scan");
-  assert.ok(logged(kit, "beam_sweep_links").some((l) => l.data?.watched === 1 && l.data?.watchCovered === 1 && l.data?.watchedRead === 0 && l.data?.scanRefused === false));
+  assert.equal(watchedReads() - before, 0, "covered: the scan's window covers the 2-day-old link's whole life");
+  assert.deepEqual(lastCounts(), { open: 1, scanned: 1, watched: 1, pendingWatched: 0, watchedRead: 0, watchCovered: 1, watchDeferred: 0, scanRefused: false });
+  // Day 7: older than the 7-day deep pass that runs now (its last one was 5 days ago).
+  kit.now.ms = releasedAt + 7 * DAY - 3 * MIN;
+  before = watchedReads();
+  await sweep(kit);
+  assert.equal(watchedReads() - before, 1, "older than the scan (the deep pass included): read");
+  assert.deepEqual(lastCounts(), { open: 1, scanned: 0, watched: 1, pendingWatched: 0, watchedRead: 1, watchCovered: 0, watchDeferred: 0, scanRefused: false });
+  assert.deepEqual(await members(kit, keys.beamLinksWatchRead(SCOPE)), [released.linkId], "its good reading is noted");
+  kit.now.ms = releasedAt + 7 * DAY - 2 * MIN;
+  before = watchedReads();
+  await sweep(kit);
+  assert.equal(watchedReads() - before, 0, "read a minute ago: not read again within BEAM_WATCH_REREAD_MS");
+  assert.deepEqual(lastCounts(), { open: 0, scanned: 0, watched: 1, pendingWatched: 0, watchedRead: 0, watchCovered: 0, watchDeferred: 1, scanRefused: false }, "the refused one left links-open on the run before");
   kit.fakeBeam.unfilteredListUnsupported();
   kit.now.ms = releasedAt + 7 * DAY - MIN;
   before = watchedReads();
   await sweep(kit);
   assert.equal(watchedReads() - before, 1, "the scan refused: read on every run");
-  assert.ok(logged(kit, "beam_sweep_links").some((l) => l.data?.watched === 1 && l.data?.watchCovered === 0 && l.data?.watchedRead === 1 && l.data?.scanRefused === true));
+  assert.ok(logged(kit, "beam_sweep_links").some((l) => l.data?.watched === 1 && l.data?.watchCovered === 0 && l.data?.watchDeferred === 0 && l.data?.watchedRead === 1 && l.data?.scanRefused === true));
   kit.now.ms = releasedAt + 7 * DAY + MIN;
   before = watchedReads();
   await sweep(kit);
   assert.equal(watchedReads() - before, 0);
   assert.equal(await inWatch(kit, released.linkId), false);
+  assert.deepEqual(await members(kit, keys.beamLinksWatchRead(SCOPE)), [], "its last-reading entry leaves with it");
   // The refused one: dropped once its link closed more than 7 days ago.
   assert.equal(await inOpen(kit, refused.linkId), false);
   assert.ok(logged(kit, "beam_link_untracked").some((l) => l.data?.linkId === refused.linkId));
@@ -1306,7 +1323,7 @@ test("watched links are read newest first while the scan is refused, and each ru
     .map((c) => c.path.split("/").pop());
   assert.deepEqual(reads, [newer.h.linkId, older.h.linkId], "the most recently released first");
   const counts = logged(kit, "beam_sweep_links").at(-1)?.data;
-  assert.deepEqual(counts, { open: 0, scanned: 0, watched: 2, pendingWatched: 0, watchedRead: 2, watchCovered: 0, scanRefused: true });
+  assert.deepEqual(counts, { open: 0, scanned: 0, watched: 2, pendingWatched: 0, watchedRead: 2, watchCovered: 0, watchDeferred: 0, scanRefused: true });
 });
 
 test("a late-watch link whose PENDING charge is watched is read on every run though a completed scan no longer lists that charge: its success on day 4 (webhook lost) -> CRITICAL (round 6)", async () => {
@@ -1332,4 +1349,204 @@ test("a late-watch link whose PENDING charge is watched is read on every run tho
   assert.equal(urgent.length, 1);
   assert.equal(urgent[0].subject, `URGENT: paid booking ${h.ref} needs attention`);
   assert.equal(urgent[0].lines[0], lateReason(LIGHTHOUSE(qr.chargeId)));
+});
+
+/* ------------- round 7: a late success on a released link older than the charge scan (webhook lost) ------------- */
+
+/** The CRITICAL of owner decision 3 for `h`, paid late by `chargeId`: exactly one, worded as always. */
+function assertLateCritical(kit: BeamKit, h: BeamHeld, chargeId: string, label: string): void {
+  const urgent = critical(kit);
+  assert.equal(urgent.length, 1, label);
+  assert.equal(urgent[0].subject, `URGENT: paid booking ${h.ref} needs attention`, label);
+  assert.equal(urgent[0].lines[0], lateReason(LIGHTHOUSE(chargeId)), label);
+}
+
+for (const days of [4, 6]) {
+  test(`W1: a late success on day ${days} of the late watch (a charge begun before the link closed), a deep pass 5 minutes earlier: the next run reads the link (older than the 72-hour scan) -> CRITICAL (round 7)`, async () => {
+    const kit = makeBeamKit();
+    const { h } = await releasedAndWatched(kit);
+    kit.now.ms += days * DAY;
+    await kit.deps.kv.set(keys.beamDeepScan(SCOPE), String(kit.now.ms - 5 * MIN), 7 * 24 * 3600);
+    const late = kit.fakeBeam.payAfterClose(h.linkId, "CARD");
+    assert.ok(late.createdMs < kit.now.ms - 72 * HOUR, "the charge is older than the 72-hour scan");
+    kit.now.ms += 5 * MIN;
+    const before = linkGets(kit, h.linkId);
+    await sweep(kit);
+    assert.equal(linkGets(kit, h.linkId) - before, 2, "read (the scan can't list the charge), then once more by fulfil");
+    assert.deepEqual(logged(kit, "beam_sweep_links").at(-1)?.data, { open: 0, scanned: 0, watched: 1, pendingWatched: 0, watchedRead: 1, watchCovered: 0, watchDeferred: 0, scanRefused: false });
+    assertLateCritical(kit, h, late.chargeId, `day ${days}`);
+    assert.equal(res(kit, h.reservationId).status, "canceled", "never re-booked automatically");
+  });
+}
+
+test("W1 on a deep-pass run: a late success on day 4 is in the 7-day scan, which names the link -> read, CRITICAL in that run (round 7)", async () => {
+  const kit = makeBeamKit();
+  const { h } = await releasedAndWatched(kit);
+  kit.now.ms += 4 * DAY;
+  const late = kit.fakeBeam.payAfterClose(h.linkId, "CARD");
+  kit.now.ms += 5 * MIN;
+  await sweep(kit);
+  assert.ok(logged(kit, "beam_sweep_scan").at(-1)?.data?.deep === true, "the deep pass ran");
+  assert.deepEqual(logged(kit, "beam_sweep_links").at(-1)?.data, { open: 0, scanned: 1, watched: 1, pendingWatched: 0, watchedRead: 1, watchCovered: 0, watchDeferred: 0, scanRefused: false });
+  assertLateCritical(kit, h, late.chargeId, "deep pass");
+});
+
+test("W2: BEAM_LATE_WATCH_DAYS=30, a late success on day 10 (older than the 7-day deep pass too): the next run reads the link -> CRITICAL (round 7)", async () => {
+  const kit = makeBeamKit({ env: { ...BEAM_TEST_ENV, BEAM_LATE_WATCH_DAYS: "30" } });
+  const { h } = await releasedAndWatched(kit);
+  kit.now.ms += 10 * DAY;
+  const late = kit.fakeBeam.payAfterClose(h.linkId, "CARD");
+  kit.now.ms += 10 * MIN;
+  const before = linkGets(kit, h.linkId);
+  await sweep(kit);
+  assert.ok(logged(kit, "beam_sweep_scan").at(-1)?.data?.deep === true, "the deep pass ran and could not list it");
+  assert.equal(linkGets(kit, h.linkId) - before, 2, "read, then once more by fulfil");
+  assertLateCritical(kit, h, late.chargeId, "day 10");
+  assert.equal(await inWatch(kit, h.linkId), true, "still watched until day 30");
+});
+
+test("W3: list lag - the release-time reading missed a PENDING charge (not listed yet), which settles on day 4 once listed: the next run reads the link -> CRITICAL (round 7)", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit, "promptpay");
+  kit.now.ms += 5 * MIN;
+  const qr = kit.fakeBeam.payPending(h.linkId, "QR_PROMPT_PAY");
+  qr.listed = false; // the charge list lags behind the link (markPaidWithoutCharge's mechanism)
+  kit.now.ms = expiryOf(kit, h.linkId) + GRACE_MS + MIN;
+  assert.equal((await sweep(kit)).released, 1, "no PENDING charge in sight: released");
+  kit.now.ms += 10 * MIN;
+  await sweep(kit);
+  assert.equal(await inWatch(kit, h.linkId), true);
+  assert.equal(await inPending(kit, h.linkId), false, "the readings never saw the PENDING charge");
+  kit.now.ms += 4 * DAY;
+  await kit.deps.kv.set(keys.beamDeepScan(SCOPE), String(kit.now.ms - 5 * MIN), 7 * 24 * 3600);
+  kit.fakeBeam.succeed(qr.chargeId);
+  assert.equal(kit.fakeBeam.revealCharges(h.linkId), 1);
+  kit.now.ms += 5 * MIN;
+  await sweep(kit);
+  assertLateCritical(kit, h, qr.chargeId, "list lag");
+});
+
+test("a late-watch link older than the scan is read once an hour (BEAM_WATCH_REREAD_MS) on a 10-minute cadence: a late success between two readings raises its CRITICAL at the next reading (round 7)", async () => {
+  assert.equal(BEAM_WATCH_REREAD_MS, HOUR);
+  const kit = makeBeamKit();
+  const { h } = await releasedAndWatched(kit);
+  kit.now.ms += 4 * DAY;
+  await kit.deps.kv.set(keys.beamDeepScan(SCOPE), String(kit.now.ms - 5 * MIN), 7 * 24 * 3600);
+  const firstRead = kit.now.ms;
+  const reads: number[] = [];
+  const deferred: unknown[] = [];
+  let lateId: string | null = null;
+  for (let run = 0; run <= 7; run++) {
+    kit.now.ms = firstRead + run * 10 * MIN;
+    if (run === 2) lateId = kit.fakeBeam.payAfterClose(h.linkId, "CARD").chargeId;
+    const before = linkGets(kit, h.linkId);
+    await sweep(kit);
+    reads.push(linkGets(kit, h.linkId) - before);
+    deferred.push(logged(kit, "beam_sweep_links").at(-1)?.data?.watchDeferred);
+    if (run < 6) assert.equal(critical(kit).length, 0, `run ${run}: no reading saw the late success yet`);
+  }
+  // Read at 0 minutes, then not before its reading is an hour old (the 60-minute run: read, then once more by fulfil),
+  // then deferred again.
+  assert.deepEqual(reads, [1, 0, 0, 0, 0, 0, 2, 0]);
+  assert.deepEqual(deferred, [0, 1, 1, 1, 1, 1, 0, 1]);
+  assert.ok(lateId !== null);
+  assertLateCritical(kit, h, lateId, "the 60-minute reading");
+});
+
+test("a late-watch link older than the scan whose reading failed is read on every run, though a good reading of it is under an hour old (round 7)", async () => {
+  const kit = makeBeamKit();
+  const { h } = await releasedAndWatched(kit);
+  kit.now.ms += 4 * DAY;
+  await kit.deps.kv.set(keys.beamDeepScan(SCOPE), String(kit.now.ms - 5 * MIN), 7 * 24 * 3600);
+  let before = linkGets(kit, h.linkId);
+  await sweep(kit);
+  assert.equal(linkGets(kit, h.linkId) - before, 1, "a good reading, noted");
+  // Ten minutes later Beam refuses the scan (every watched link is read) and the link's reading fails.
+  const { gw } = flakyLinkReads(kit, h.linkId, 503);
+  kit.fakeBeam.unfilteredListUnsupported();
+  kit.now.ms += 10 * MIN;
+  await sweep(kit, gw);
+  assert.ok((await members(kit, keys.beamReadFailures(SCOPE))).includes(h.linkId), "its failed reading is recorded");
+  // The scan answers again: the link is read though its good reading is 20 minutes old.
+  kit.fakeBeam.unfilteredListUnsupported(false);
+  kit.now.ms += 10 * MIN;
+  before = linkGets(kit, h.linkId);
+  await sweep(kit);
+  assert.equal(linkGets(kit, h.linkId) - before, 1, "read again: its readings fail");
+  assert.equal(logged(kit, "beam_sweep_links").at(-1)?.data?.watchDeferred, 0);
+  assert.equal((await members(kit, keys.beamReadFailures(SCOPE))).includes(h.linkId), false, "the good reading ends the failure record");
+});
+
+test("the scan covers a late-watch link only when its window starts BEAM_EXPIRY_SKEW_MS or more before the link was created: covered 3 and 2 minutes inside the 72-hour window, read 1 minute inside (round 7)", async () => {
+  const kit = makeBeamKit();
+  const { h } = await releasedAndWatched(kit);
+  const record = await readRecord(kit.deps.kv, h.linkId);
+  assert.ok(record);
+  const window = 72 * HOUR;
+  const at = (inside: number) => record.createdAt + window - inside;
+  // A deep pass ran just before: these runs are 72-hour passes.
+  await kit.deps.kv.set(keys.beamDeepScan(SCOPE), String(at(3 * MIN) - 5 * MIN), 7 * 24 * 3600);
+  const seen: unknown[] = [];
+  for (const inside of [3 * MIN, BEAM_EXPIRY_SKEW_MS, MIN]) {
+    kit.now.ms = at(inside);
+    const before = linkGets(kit, h.linkId);
+    await sweep(kit);
+    const counts = logged(kit, "beam_sweep_links").at(-1)?.data;
+    seen.push([linkGets(kit, h.linkId) - before, counts?.watchCovered, counts?.watchedRead]);
+  }
+  assert.deepEqual(seen, [
+    [0, 1, 0],
+    [0, 1, 0],
+    [1, 0, 1],
+  ]);
+});
+
+test("on a deep-pass run a 4-day-old late-watch link without charges is covered by the 7-day scan (not read); the next 72-hour pass reads it (round 7)", async () => {
+  const kit = makeBeamKit();
+  const { h } = await releasedAndWatched(kit);
+  kit.now.ms += 4 * DAY;
+  let before = linkGets(kit, h.linkId);
+  await sweep(kit);
+  assert.ok(logged(kit, "beam_sweep_scan").at(-1)?.data?.deep === true);
+  assert.equal(linkGets(kit, h.linkId) - before, 0);
+  assert.deepEqual(logged(kit, "beam_sweep_links").at(-1)?.data, { open: 0, scanned: 0, watched: 1, pendingWatched: 0, watchedRead: 0, watchCovered: 1, watchDeferred: 0, scanRefused: false });
+  kit.now.ms += 10 * MIN;
+  before = linkGets(kit, h.linkId);
+  await sweep(kit);
+  assert.ok(logged(kit, "beam_sweep_scan").at(-1)?.data?.deep === false);
+  assert.equal(linkGets(kit, h.linkId) - before, 1);
+  assert.deepEqual(logged(kit, "beam_sweep_links").at(-1)?.data, { open: 0, scanned: 0, watched: 1, pendingWatched: 0, watchedRead: 1, watchCovered: 0, watchDeferred: 0, scanRefused: false });
+});
+
+test("a last-reading entry (keys.beamLinksWatchRead) older than the late watch is dropped, whatever the late watch holds (round 7)", async () => {
+  const kit = makeBeamKit();
+  const watchRead = keys.beamLinksWatchRead(SCOPE);
+  await kit.deps.kv.zadd(watchRead, kit.now.ms - 7 * DAY - MIN, "ZzOldLink01");
+  await kit.deps.kv.zadd(watchRead, kit.now.ms - 7 * DAY + MIN, "ZzNewLink01");
+  await sweep(kit);
+  assert.deepEqual(await members(kit, watchRead), ["ZzNewLink01"]);
+});
+
+test("a pending-watched late-watch link older than the scan is read on every run, never deferred: its PENDING charge settling 10 minutes after a reading raises the CRITICAL at the next run (round 7)", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit, "promptpay");
+  kit.now.ms += 5 * MIN;
+  const qr = kit.fakeBeam.payPending(h.linkId, "QR_PROMPT_PAY");
+  kit.now.ms = expiryOf(kit, h.linkId) + GRACE_MS + MIN;
+  assert.equal((await sweep(kit)).released, 1);
+  kit.now.ms += 10 * MIN;
+  await sweep(kit);
+  assert.equal(await inPending(kit, h.linkId), true);
+  kit.now.ms += 4 * DAY;
+  await kit.deps.kv.set(keys.beamDeepScan(SCOPE), String(kit.now.ms - 5 * MIN), 7 * 24 * 3600);
+  let before = linkGets(kit, h.linkId);
+  await sweep(kit);
+  assert.equal(linkGets(kit, h.linkId) - before, 1, "day 4: read (still PENDING)");
+  kit.fakeBeam.succeed(qr.chargeId);
+  kit.now.ms += 10 * MIN;
+  before = linkGets(kit, h.linkId);
+  await sweep(kit);
+  assert.ok(linkGets(kit, h.linkId) - before >= 1, "read again 10 minutes later: a PENDING charge is watched on every run");
+  assert.equal(logged(kit, "beam_sweep_links").at(-1)?.data?.watchDeferred, 0);
+  assertLateCritical(kit, h, qr.chargeId, "pending watch");
 });

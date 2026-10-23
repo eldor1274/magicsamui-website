@@ -139,6 +139,11 @@ export const keys = {
    * watched past BEAM_LATE_WATCH_DAYS until that charge settles, for BEAM_PENDING_WATCH_DAYS at most (round 5).
    */
   beamLinksPending: (scope: string) => `msv:${scope}:beam:links:pending`,
+  /**
+   * Sorted set of late-watch links older than the sweeper's charge scan, by their last good reading (ms): read again
+   * once it is BEAM_WATCH_REREAD_MS old (round 7). Dropped with the link's late-watch entry.
+   */
+  beamLinksWatchRead: (scope: string) => `msv:${scope}:beam:links:watchread`,
 };
 
 /**
