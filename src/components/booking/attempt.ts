@@ -9,7 +9,7 @@
 // and its hold released first. The rules (which pages track attempts, how long one may still be paid) are in
 // lib/booking/checkoutAttempt.ts (Beam design S5.1).
 
-import { isBookingRef } from "@/lib/booking/ref";
+import { parseAttempt } from "@/lib/booking/checkoutAttempt";
 import type { CheckoutAttempt } from "@/lib/booking/checkoutAttempt";
 
 export type { CheckoutAttempt } from "@/lib/booking/checkoutAttempt";
@@ -29,10 +29,8 @@ export function readAttempt(): CheckoutAttempt | null {
   try {
     const raw = sessionStorage.getItem(KEY);
     if (!raw) return null;
-    const v = JSON.parse(raw) as Partial<CheckoutAttempt>;
-    if (!isBookingRef(v.ref) || typeof v.token !== "string" || v.token.length === 0 || v.token.length > 4096) return null;
-    const startedAt = typeof v.startedAt === "number" && Number.isFinite(v.startedAt) && v.startedAt > 0 ? v.startedAt : 0;
-    return { ref: v.ref, token: v.token, startedAt };
+    // lib/booking/checkoutAttempt.ts parseAttempt: the same checks as always, plus a Beam attempt's own window (round 7).
+    return parseAttempt(JSON.parse(raw));
   } catch {
     return null;
   }

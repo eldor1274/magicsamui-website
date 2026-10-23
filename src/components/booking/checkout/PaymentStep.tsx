@@ -708,6 +708,7 @@ export default function PaymentStep({
                     name="payMethod"
                     value={option.method}
                     checked={on}
+                    required
                     onChange={() => {
                       if (!submitting) onPayMethodChange?.(option.method);
                     }}

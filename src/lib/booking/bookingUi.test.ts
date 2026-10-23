@@ -12,11 +12,12 @@ import { isRestrictionMessage } from "./checkoutMessages.ts";
 import { runAbandon } from "./abandon.ts";
 import { BEAM_LIVE_ENV, BEAM_TEST_ENV, beamHeld, makeBeamKit, makeParityKit } from "./beamTestkit.ts";
 import type { BeamKit } from "./beamTestkit.ts";
-import { abandonVerdict, attemptMayStillBePaid, attemptOf, attemptPayableMs, cancelledAttemptOf, tracksAttempts } from "./checkoutAttempt.ts";
+import { MAX_ATTEMPT_PAYABLE_MS, abandonVerdict, attemptMayStillBePaid, attemptOf, attemptPayableMs, cancelledAttemptOf, parseAttempt, tracksAttempts } from "./checkoutAttempt.ts";
 import { getPublicBookingConfig, resolveBookingEngine, toPublicConfig } from "./config.ts";
 import type { Env } from "./config.ts";
 import { DEMO_COPY_CONFIG, guestStepCopy, joinList, modeKind, paymentMethodLabels, payWithText, previewHeadline, providerCopy } from "./paymentCopy.ts";
 import { canRetryPayment, isPollingView, pollPlan, returnViewKind } from "./returnView.ts";
+import { isBookingRef } from "./ref.ts";
 import { RESTRICTION_MESSAGES } from "./stripeCheckout.ts";
 import type { ProviderDepsFn } from "./stripeDeps.ts";
 import { NOW, STRIPE_LIVE_ENV, STRIPE_TEST_ENV, checkout, makeKit, sessionIdOf } from "./testkit.ts";
@@ -400,6 +401,88 @@ test("no second Beam link while the first may still be paid: 53 minutes (30 + th
   assert.equal(kit.fakeBeam.link(a.linkId).status, "DISABLED");
 });
 
+test("a Beam attempt keeps its page's payable window (round 7): after an abandon 502 the Stripe fallback page (owner decision 5) waits the Beam attempt's 53 minutes before a new checkout; a Stripe attempt is stored and timed exactly as before", async () => {
+  const kit = makeBeamKit();
+  const cfg = pageConfig(kit);
+  const a = await beamHeld(kit);
+  const t0 = kit.now.ms;
+  // BookingApp: attemptOf(res, Date.now(), attemptPayableMs(cfg)), stored as JSON and read back by parseAttempt.
+  const made = attemptOf(a.body, t0, attemptPayableMs(cfg));
+  assert.deepEqual(made, { ref: a.ref, token: a.body.linkToken, startedAt: t0, payableMs: 53 * MIN });
+  const prior = parseAttempt(JSON.parse(JSON.stringify(made)));
+  assert.deepEqual(prior, made);
+  assert.ok(prior);
+  // Beam can't be read: abandon answers 502 and the attempt is kept.
+  let down = true;
+  unreadableLinks(kit, () => down);
+  const failed = await abandonOn(kit, { t: prior.token, l: prior.token });
+  assert.equal(failed.status, 502, JSON.stringify(failed.body));
+  assert.equal(abandonVerdict(failed.body), "error");
+  // The deployment fell back to Stripe: the page's own window is Stripe's 33 minutes, but the Beam attempt's own 53 count.
+  const stripe = config(STRIPE_LIVE_ENV);
+  assert.equal(attemptPayableMs(stripe), 33 * MIN);
+  const onStripe = (ms: number) => attemptMayStillBePaid(prior, t0 + ms, attemptPayableMs(stripe));
+  assert.deepEqual([0, 33 * MIN, 53 * MIN - 1, 53 * MIN].map(onStripe), [true, true, true, false]);
+  // On the Beam page: 53 minutes, as before; the longer of the two windows counts.
+  assert.deepEqual([53 * MIN - 1, 53 * MIN].map((ms) => attemptMayStillBePaid(prior, t0 + ms, attemptPayableMs(cfg))), [true, false]);
+  assert.equal(attemptMayStillBePaid({ ...prior, payableMs: 10 * MIN }, t0 + 20 * MIN, attemptPayableMs(cfg)), true, "a shorter own window never shortens the page's");
+  assert.equal(attemptMayStillBePaid({ startedAt: 0, payableMs: 53 * MIN }, t0, attemptPayableMs(stripe)), false, "an unknown start never blocks");
+  // Beam answers again: released, so the new checkout may start.
+  down = false;
+  assert.deepEqual((await abandonOn(kit, { t: prior.token, l: prior.token })).body, { ok: true, state: "released" });
+  // The window follows BEAM_PENDING_GRACE_MINUTES (at most 60: 93 minutes, under MAX_ATTEMPT_PAYABLE_MS).
+  const longest = attemptPayableMs(config({ ...BEAM_ENV, BEAM_PENDING_GRACE_MINUTES: "60" }));
+  assert.equal(longest, 93 * MIN);
+  assert.ok(longest <= MAX_ATTEMPT_PAYABLE_MS);
+  assert.equal(attemptOf(a.body, t0, longest)?.payableMs, 93 * MIN);
+  // A window that is not a whole number of ms in (0, MAX_ATTEMPT_PAYABLE_MS] is never kept.
+  for (const bad of [0, -1, 1.5, MAX_ATTEMPT_PAYABLE_MS + 1, Number.NaN, Number.POSITIVE_INFINITY, undefined]) {
+    assert.equal("payableMs" in (attemptOf(a.body, t0, bad) ?? {}), false, String(bad));
+  }
+  assert.equal(attemptOf(a.body, t0, MAX_ATTEMPT_PAYABLE_MS)?.payableMs, MAX_ATTEMPT_PAYABLE_MS);
+  // Stripe: byte for byte the attempt BookingApp stored before, whatever window the page passes.
+  const s = await makeParityKit("stripe").held();
+  const before = JSON.stringify({ ref: s.body.ref, token: s.body.linkToken, startedAt: NOW });
+  for (const w of [undefined, 33 * MIN, 53 * MIN]) assert.equal(JSON.stringify(attemptOf(s.body, NOW, w)), before, String(w));
+  const stripePrior = parseAttempt(JSON.parse(before));
+  assert.equal(JSON.stringify(stripePrior), before);
+  assert.ok(stripePrior);
+  assert.deepEqual([33 * MIN - 1, 33 * MIN].map((ms) => attemptMayStillBePaid(stripePrior, NOW + ms, attemptPayableMs(stripe))), [true, false]);
+});
+
+test("parseAttempt reads every stored value without a Beam window exactly as readAttempt did before round 7; a valid window is kept, any other dropped", () => {
+  // readAttempt's checks before round 7 (components/booking/attempt.ts at 0bcc14b), after JSON.parse.
+  const before = (v: unknown) => {
+    try {
+      const a = v as Record<string, unknown>;
+      if (!isBookingRef(a.ref) || typeof a.token !== "string" || a.token.length === 0 || a.token.length > 4096) return null;
+      const startedAt = typeof a.startedAt === "number" && Number.isFinite(a.startedAt) && a.startedAt > 0 ? a.startedAt : 0;
+      return { ref: a.ref, token: a.token, startedAt };
+    } catch {
+      return null;
+    }
+  };
+  const ref = "MSV-20261023-7F3K";
+  const values: unknown[] = [null, 5, "x", [], {}, true];
+  for (const r of [ref, "MSV-1", "", 7, undefined]) {
+    for (const token of ["signed.token", "", "x".repeat(4096), "x".repeat(4097), 42, null, undefined]) {
+      for (const startedAt of [NOW, 0, -1, 1.5, "5", null, undefined, 1e20]) values.push({ ref: r, token, startedAt, extra: "kept out" });
+    }
+  }
+  for (const v of values) {
+    const json = JSON.parse(JSON.stringify(v ?? null));
+    assert.equal(JSON.stringify(parseAttempt(json)), JSON.stringify(before(json)), JSON.stringify(v));
+    // A window that is not a valid one changes nothing.
+    if (json && typeof json === "object" && !Array.isArray(json)) {
+      for (const payableMs of [0, -5, 1.5, MAX_ATTEMPT_PAYABLE_MS + 1, "3180000", null]) {
+        assert.equal(JSON.stringify(parseAttempt({ ...json, payableMs })), JSON.stringify(before(json)), `${JSON.stringify(v)} ${String(payableMs)}`);
+      }
+    }
+  }
+  assert.deepEqual(parseAttempt({ ref, token: "signed.token", startedAt: NOW, payableMs: 53 * MIN }), { ref, token: "signed.token", startedAt: NOW, payableMs: 53 * MIN });
+  assert.equal(parseAttempt({ ref, token: "", startedAt: NOW, payableMs: 53 * MIN }), null, "an invalid attempt stays invalid");
+});
+
 test("the Beam cancel landing calls abandon: Beam's Cancel URL gives the page the attempt to release, and abandon disables the link and cancels the hold", async () => {
   for (const storage of ["link token remembered", "storage blocked"] as const) {
     const kit = makeBeamKit();
@@ -438,8 +521,22 @@ test("booking page wiring (design S5.1): the attempt flow, its window and the ca
   assert.match(app, /if \(tracksAttempts\(cfg\)\) \{\s*(\/\/[^\n]*\n\s*)*const prior = readAttempt\(\);/);
   assert.ok(app.includes("const released = await releaseAttempt({ ref: prior.ref, t: prior.token, l: prior.token });"));
   assert.ok(app.includes("if (attemptMayStillBePaid(prior, Date.now(), attemptPayableMs(cfg))) {"));
-  assert.match(app, /const attempt = attemptOf\(res, Date\.now\(\)\);\s*if \(attempt\) rememberAttempt\(attempt\);/);
+  // Round 7: a Beam attempt keeps the page's payable window (a Stripe attempt is the same as before).
+  assert.match(app, /const attempt = attemptOf\(res, Date\.now\(\), attemptPayableMs\(cfg\)\);\s*if \(attempt\) rememberAttempt\(attempt\);/);
   assert.ok(app.includes("const verdict = abandonVerdict(res);"));
+  // Round 7 (round-6 triage): finishRelease acts on the verdict - paid or pending: the return page; error: keep the attempt; else forget it.
+  assert.match(
+    app,
+    /const verdict = abandonVerdict\(res\);\s*if \(verdict === "return-page"\) \{\s*window\.location\.assign\(returnPagePath\(configRef\.current\.bookingPath, attempt\.ref, attempt\.t, theme\)\);\s*return "left";\s*\}\s*setReleasing\(false\);\s*if \(verdict === "error"\) return "error";\s*(\/\/[^\n]*\n\s*)*clearAttempt\(attempt\.ref\);\s*return "continue";/,
+  );
+  // pay(): "left" stops; "error" while the earlier attempt may still be paid stops before any checkout; once it can't, carry on.
+  assert.match(
+    app,
+    /if \(released === "left"\) return;\s*if \(released === "error"\) \{[\s\S]*?if \(attemptMayStillBePaid\(prior, Date\.now\(\), attemptPayableMs\(cfg\)\)\) \{[\s\S]*?type: "checkoutFailed",[\s\S]*?\}\);\s*return;\s*\}\s*clearAttempt\(prior\.ref\);\s*\}/,
+  );
+  assert.ok(app.indexOf("const released = await releaseAttempt(") < app.indexOf("const res = await postCheckout({"), "the release comes before the checkout");
+  const store = repoSrc("components/booking/attempt.ts");
+  assert.ok(store.includes("return parseAttempt(JSON.parse(raw));"), "readAttempt reads through parseAttempt");
   assert.ok(app.includes("void postAbandon({ t: cancelledAttempt.t, l: recallLinkToken(cancelledAttempt.ref) }).then((res) => finishRelease(cancelledAttempt, res));"));
   assert.doesNotMatch(app, /provider === "stripe"/, "no Stripe-only attempt rule is left in the booking page");
   const own = repoSrc("components/booking/OwnBookingPage.tsx");
@@ -491,9 +588,16 @@ test("booking page wiring (design S5.2): Pay sends the Beam method only and wait
   assert.ok(app.includes("payMethod={state.payMethod ?? null}") && app.includes("onPayMethodChange={actions.setPayMethod}"));
   assert.ok(app.includes("pricing: pagePricing(data.config, null) },"), "add_to_cart prices the card/e-wallet fee");
   assert.ok(app.includes('if (res.error === "unavailable" || res.error === "price_changed" || chooseAgain) runSearch(s.search, { fresh: true });'));
+  // Round 7 (round-6 triage): the follow-up after a 'Please choose how to pay' answer, and the summary's choice button.
+  assert.ok(app.includes('const chooseAgain = pageOffersMethodChoice(cfg) && res.error === "invalid_request" && res.fixStep === "payment";'));
+  assert.match(app, /announce\(\s*chooseAgain\s*\? "Please choose how to pay\. Nothing was charged\."/);
+  assert.ok(app.includes('} else if (step === "payment" && quote && choosePayMethod) {'));
+  assert.ok(app.indexOf('} else if (step === "payment" && quote && choosePayMethod) {') < app.indexOf('} else if (step === "payment" && quote) {'), "before the Pay button");
+  assert.ok(app.includes("if (q && payMethod !== s.payMethod) announce(`Total ${formatThbWithCode(q.totalSatang)}.`);"), "a method change announces the new total");
   const pay = repoSrc("components/booking/checkout/PaymentStep.tsx");
   assert.ok(pay.includes("disabled={locked || paused || needsMethod}"));
   assert.ok(pay.includes("const methodOptions = config && !locked ? payMethodOptions(config) : [];"));
+  assert.ok(pay.includes("radio.focus({ preventScroll: true });"), "focusPayMethodChoice moves focus to the choice");
   const summary = repoSrc("components/booking/summary/ReservationSummary.tsx");
   assert.ok(summary.includes("const hideFee = Boolean(bookingConfig && quote && feeLineHidden(bookingConfig, quote));"));
   const results = repoSrc("components/booking/results/ResultsList.tsx");

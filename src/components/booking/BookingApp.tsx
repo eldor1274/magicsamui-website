@@ -553,7 +553,8 @@ export default function BookingApp({
         return;
       }
       rememberLinkToken(res.ref, res.linkToken);
-      const attempt = attemptOf(res, Date.now());
+      // Beam: the attempt keeps this page's payable window, so a page of another provider (the Stripe fallback) waits for it too.
+      const attempt = attemptOf(res, Date.now(), attemptPayableMs(cfg));
       if (attempt) rememberAttempt(attempt);
       dispatch({ type: "checkoutRedirecting" });
       window.location.assign(res.redirectUrl);

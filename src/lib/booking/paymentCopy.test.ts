@@ -93,6 +93,18 @@ function hookBookingPage(): void {
   };
   registerHooks({
     resolve(specifier, context, nextResolve) {
+      // Round 7: the results list's room cards import next/image, a CommonJS module whose component is its default's
+      // default when Node imports it: a module that hands on that component (as Next's bundler does).
+      if (specifier === "next/image") {
+        const real = import.meta.resolve("next/image.js");
+        const image = `import m from ${JSON.stringify(real)}; export default m.default ?? m;`;
+        return { url: `data:text/javascript,${encodeURIComponent(image)}`, shortCircuit: true };
+      }
+      // ...and their modals' theme root imports next/font/google, which only Next can load: a stand-in font.
+      if (specifier === "next/font/google") {
+        const font = "export function Poppins() { return { className: 'stub-poppins', variable: 'stub-poppins-var', style: { fontFamily: 'stub' } }; }";
+        return { url: `data:text/javascript,${encodeURIComponent(font)}`, shortCircuit: true };
+      }
       if (specifier.startsWith("@/")) return probe(new URL(`../../${specifier.slice(2)}`, import.meta.url)) ?? nextResolve(specifier, context);
       const parent = context.parentURL;
       if (specifier.startsWith(".") && parent?.startsWith("file:") && fileURLToPath(parent).startsWith(src)) {
@@ -101,6 +113,8 @@ function hookBookingPage(): void {
       return nextResolve(specifier, context);
     },
     load(url, context, nextLoad) {
+      // Round 7: the theme root's stylesheet (booking.css) is Next's to bundle; here it is an empty module.
+      if (url.startsWith("file:") && url.endsWith(".css") && fileURLToPath(url).startsWith(src)) return { format: "module", source: "export default {};", shortCircuit: true };
       if (!url.startsWith("file:") || !url.endsWith(".tsx") || !fileURLToPath(url).startsWith(src)) return nextLoad(url, context);
       const out = ts.transpileModule(readFileSync(fileURLToPath(url), "utf8"), {
         fileName: fileURLToPath(url),
@@ -124,6 +138,35 @@ async function loadComponents() {
     ReservationSummary: (await import("../../components/booking/summary/ReservationSummary.tsx")).default,
   };
 }
+
+/**
+ * Runs `fn` with no global window, as on the server (round 7): next/image reads window when it loads, and another test
+ * file of this process (`node --test src/lib/booking` imports them all) may have left a stand-in window behind.
+ */
+async function withoutWindow<T>(fn: () => Promise<T> | T): Promise<T> {
+  const g = globalThis as { window?: unknown };
+  const had = Object.prototype.hasOwnProperty.call(g, "window");
+  const before = g.window;
+  delete g.window;
+  try {
+    return await fn();
+  } finally {
+    if (had) g.window = before;
+  }
+}
+
+/** The results list and the secure-payment window's content builder (round 7). */
+async function loadResultsAndModal() {
+  hookBookingPage();
+  return withoutWindow(async () => ({
+    ResultsList: (await import("../../components/booking/results/ResultsList.tsx")).default,
+    modal: await import("../../components/booking/checkout/SecurePaymentModal.tsx"),
+    badges: await import("../../components/booking/checkout/PaymentMethodBadges.tsx"),
+  }));
+}
+
+/** Text as renderToStaticMarkup escapes it. */
+const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#x27;");
 
 /* ------------------------------- fixtures ------------------------------- */
 
@@ -395,7 +438,8 @@ test("the summary before a choice (design S5.2): the card/e-wallet total with 'N
       assert.equal(promptpay.cardFeeSatang, 0);
       assert.equal(promptpay.totalSatang, promptpay.feeBaseSatang);
       assert.equal(feeLineHidden(c, promptpay), true, `${page}: a 0 fee hides the line`);
-      assert.equal(noFeeAlternative(c, null), "No fee with Thai PromptPay QR", page);
+      // Round 7: not on a locked Beam page, which offers no choice.
+      assert.equal(noFeeAlternative(c, null), c.paymentStatus === "locked" ? null : "No fee with Thai PromptPay QR", page);
     } else {
       assert.equal(feeLineHidden(c, promptpay), false, page);
       assert.equal(noFeeAlternative(c, null), null, `${page}: PromptPay has a fee`);
@@ -625,6 +669,16 @@ test("the payment step on Beam (design S5.2): a required choice with no default,
   const none = render(c, null);
   assert.equal((none.match(/name="payMethod"/g) ?? []).length, 2);
   assert.doesNotMatch(none, /checked=""/, "no default");
+  // Round 7 (round-6 triage): a required radio group, its hint while nothing is chosen, PromptPay's hint in a live region.
+  const radios = none.match(/<input[^>]*type="radio"[^>]*>/g) ?? [];
+  assert.equal(radios.length, 2);
+  for (const r of radios) assert.match(r, /required=""/, r);
+  for (const m of ["card_ewallet", "promptpay"]) {
+    assert.ok(radios.some((r) => r.includes(`aria-labelledby="booking-pay-method-${m}-title booking-pay-method-${m}-fee"`) && r.includes(`aria-describedby="booking-pay-method-${m}-text"`)), m);
+  }
+  assert.match(none, /<fieldset id="booking-pay-method" aria-describedby="booking-pay-method-hint"/);
+  assert.match(none, /<p id="booking-pay-method-hint"[^>]*>/);
+  assert.match(none, /<div aria-live="polite"><\/div><\/fieldset>/, "the live region is there, empty, before PromptPay is chosen");
   assert.match(none, /How would you like to pay\?/);
   assert.match(none, /Card or e-wallet/);
   assert.match(none, /Thai PromptPay QR/);
@@ -637,6 +691,8 @@ test("the payment step on Beam (design S5.2): a required choice with no default,
   assert.doesNotMatch(none, /Stripe|receipt/i);
   const promptpay = render(c, "promptpay");
   assert.match(promptpay, /id="booking-pay-method-promptpay"[^>]*checked=""|checked=""[^>]*id="booking-pay-method-promptpay"/);
+  assert.match(promptpay, /<fieldset id="booking-pay-method" class=/, "no hint reference once a method is chosen");
+  assert.ok(promptpay.includes(`<div aria-live="polite"><p class="flex items-start gap-2 rounded-(--bk-radius-control) bg-(--bk-surface-muted) p-3 text-xs text-(--bk-text)">`) && /<div aria-live="polite"><p[^>]*>(?:(?!<\/p>).)*Scan the QR in your banking app/.test(promptpay), "PromptPay's hint is read out");
   assert.doesNotMatch(payButton(promptpay), /disabled=""/);
   assert.doesNotMatch(promptpay, /Payment processing fee/, "a 0 fee hides the line");
   assert.ok(promptpay.includes(PROMPTPAY_HINT.replace(/'/g, "&#x27;")));
@@ -650,8 +706,10 @@ test("the payment step on Beam (design S5.2): a required choice with no default,
   assert.equal((off.match(/name="payMethod"/g) ?? []).length, 1);
   assert.doesNotMatch(off, /PromptPay/);
   assert.match(payButton(off), /disabled=""/);
-  // A locked Beam page: payments are locked, so no choice is offered.
-  assert.doesNotMatch(render(config(BEAM_LIVE_ENV), null), /name="payMethod"/);
+  // A locked Beam page: payments are locked, so no choice is offered - and no "No fee with Thai PromptPay QR" either (round 7).
+  const lockedStep = render(config(BEAM_LIVE_ENV), null);
+  assert.doesNotMatch(lockedStep, /name="payMethod"/);
+  assert.doesNotMatch(lockedStep, /No fee with Thai PromptPay QR/);
   // The server's 'Please choose how to pay' answer points to the choice.
   const refusal = { code: "invalid_request", message: "Please choose how to pay", fixStep: "payment" };
   const refused = render(c, null, { error: refusal });
@@ -663,6 +721,7 @@ test("the payment step on Beam (design S5.2): a required choice with no default,
     for (const m of [null, "promptpay"] as const) {
       const html = render(cfg, m);
       assert.doesNotMatch(html, /name="payMethod"|How would you like to pay|No fee with Thai PromptPay QR/, name);
+      assert.doesNotMatch(html, /type="radio"|required=""|aria-live="polite"><\/div><\/fieldset>/, `${name}: no Beam radio markup`);
       if (cfg.paymentStatus === "ok") assert.doesNotMatch(payButton(html), /disabled=""/, name);
     }
     const html = render(cfg, null, { error: refusal });
@@ -690,10 +749,156 @@ test("the reservation summary on Beam (design S5.2): the fee line with 'No fee w
   const card = render(c, "card_ewallet");
   assert.match(card, /Payment processing fee \(3%\)/);
   assert.doesNotMatch(card, /No fee with Thai PromptPay QR/);
+  // Round 7 (round-6 triage): a locked Beam page shows no choice, so its summary has no "No fee with Thai PromptPay QR" either.
+  const locked = config(BEAM_LIVE_ENV);
+  assert.equal(locked.paymentStatus, "locked");
+  assert.equal(pageOffersMethodChoice(locked), true);
+  const lockedHtml = render(locked, null);
+  assert.match(lockedHtml, /Payment processing fee \(3%\)/);
+  assert.doesNotMatch(lockedHtml, /No fee with Thai PromptPay QR/);
   for (const [name, env] of Object.entries(STRIPE_DEMO_ENVS)) {
     const cfg = config(env);
     const html = render(cfg, "promptpay");
     assert.match(html, new RegExp(`Payment processing fee \\(${cfg.cardFeePct}%\\)`), `${name}: the line stays, at 0% too`);
     assert.doesNotMatch(html, /No fee with Thai PromptPay QR/, name);
+  }
+});
+
+/* ------------------- round 7: the round-6 triage's copy and wiring gaps ------------------- */
+
+test("noFeeAlternative on a locked Beam page is null (round 7: it offers no choice, as its payment step shows none); every other Beam page as before", () => {
+  const locked = config(BEAM_LIVE_ENV);
+  assert.equal(locked.paymentStatus, "locked");
+  for (const m of [null, undefined, "card_ewallet", "promptpay"]) assert.equal(noFeeAlternative(locked, m), null, String(m));
+  assert.equal(noFeeAlternative({ ...locked, paymentStatus: "ok" }, null), "No fee with Thai PromptPay QR", "the same page unlocked");
+  assert.equal(noFeeAlternative(beamPage(), null), "No fee with Thai PromptPay QR");
+  assert.equal(noFeeAlternative(beamLivePage(), null), "No fee with Thai PromptPay QR");
+  assert.equal(noFeeAlternative(beamPage(), "promptpay"), null);
+  assert.equal(noFeeAlternative(beamPage({ BEAM_PROMPTPAY: "off" }), null), null);
+  // Stripe and the demo: null, also when locked.
+  for (const [name, env] of Object.entries(STRIPE_DEMO_ENVS)) assert.equal(noFeeAlternative(config(env), null), null, name);
+});
+
+/** The Stripe and demo secure-payment window as it is (0bcc14b, SecurePaymentModal.tsx). */
+const STRIPE_POINTS = (holdMinutes: number) => [
+  {
+    title: "Visa and Mastercard, from any country",
+    body: "Cards issued in Thailand or abroad. Your bank may convert the Thai baht amount to your currency. American Express, JCB and UnionPay aren't accepted online - message us and we'll help.",
+  },
+  { title: "Apple Pay and Google Pay", body: "Offered on Stripe's page when your device and browser support them." },
+  { title: "Thai PromptPay QR", body: "Scan the QR code with any Thai banking app and the payment is confirmed in seconds." },
+  { title: "Card details never touch our site", body: "You enter them on Stripe's PCI DSS compliant hosted checkout. We never see or store your card number." },
+  {
+    title: "Your room is held while you pay",
+    body: `We reserve your room before you pay and hold it for ${holdMinutes} minutes. If you cancel or the time runs out, nothing is charged and the room is released. 3-D Secure checks by your bank happen on Stripe's page.`,
+  },
+];
+const DEMO_POINTS = [
+  {
+    title: "Cards, including overseas cards",
+    body: "Visa, Mastercard, JCB, American Express and UnionPay issued in Thailand or abroad. Your bank may convert the Thai baht amount to your currency.",
+  },
+  { title: "Thai PromptPay QR", body: "Scan the QR code with any Thai banking app and the payment is confirmed in seconds." },
+  { title: "Card details never touch our site", body: "You enter them on Beam's PCI DSS compliant hosted payment page. We never see or store your card number." },
+  { title: "3-D Secure by your bank", body: "If your bank asks you to confirm the payment (OTP or app approval), Beam handles it on the same page." },
+];
+const STRIPE_MODAL_FEE =
+  "The payment processing fee is shown as its own line in your reservation summary before you pay - the same for every payment method, no hidden charges.";
+const DEMO_MODAL_FEE = "The payment processing fee (card or PromptPay) is shown as its own line in your reservation summary before you pay - no hidden charges.";
+const STRIPE_INTRO =
+  "<p>Payments are processed by <strong>Stripe</strong> (stripe.com), a global payment provider. You pay on Stripe&#x27;s secure hosted checkout and come straight back here with your booking reference.</p>";
+const BEAM_INTRO =
+  "Payments are processed by <strong>Beam</strong> (beamcheckout.com), a Thai payment gateway. You pay on Beam&#x27;s secure hosted page";
+
+test("the secure-payment window ('Learn more', round 7): every Beam page shows beamSecurePayment's points and fee note and paymentMethodLabels' badges; Stripe and the demo keep their content exactly", async () => {
+  const { modal, badges } = await loadResultsAndModal();
+  const icons = await import("lucide-react");
+  const ICON = { card: icons.CreditCard, wallet: icons.Wallet, promptpay: icons.QrCode, lock: icons.Lock, hold: icons.Smartphone };
+  type Content = ReturnType<typeof modal.securePaymentContent>;
+  const intro = (c: Content) => strip(renderToStaticMarkup(createElement("p", null, c.intro)));
+  const text = (c: Content) => c.points.map(({ title, body }) => ({ title, body }));
+  for (const [name, make] of Object.entries(BEAM_PAGES)) {
+    const c = make();
+    const beam = beamSecurePayment(c);
+    assert.ok(beam, name);
+    const content = modal.securePaymentContent(c);
+    assert.equal(content.title, "Secure payment by Beam", name);
+    assert.deepEqual(
+      content.points.map(({ icon, title, body }) => ({ icon, title, body })),
+      beam.points.map(({ kind, title, body }) => ({ icon: ICON[kind], title, body })),
+      name,
+    );
+    assert.equal(content.feeNote, beam.feeNote, name);
+    assert.deepEqual(content.methods, paymentMethodLabels(c), name);
+    assert.ok(intro(content).includes(BEAM_INTRO), name);
+    const all = [content.title, intro(content), ...text(content).flatMap((p) => [p.title, p.body]), content.feeNote].join(" ");
+    assert.doesNotMatch(all, /Stripe|receipt|UnionPay|confirmed in seconds|card or PromptPay\)/i, `${name}: never the demo's points or Stripe's words`);
+  }
+  for (const [name, env] of Object.entries(STRIPE_DEMO_ENVS)) {
+    const c = config(env);
+    const content = modal.securePaymentContent(c);
+    if (c.provider === "stripe") {
+      assert.equal(content.title, "Secure payment by Stripe", name);
+      assert.equal(intro(content), STRIPE_INTRO, name);
+      assert.deepEqual(text(content), STRIPE_POINTS(c.holdMinutes), name);
+      assert.deepEqual(content.points.map((p) => p.icon), [icons.CreditCard, icons.Wallet, icons.QrCode, icons.Lock, icons.Smartphone], name);
+      assert.equal(content.feeNote, STRIPE_MODAL_FEE, name);
+    } else {
+      assert.equal(content.title, "Secure payment by Beam", name);
+      assert.ok(intro(content).includes(BEAM_INTRO), name);
+      assert.deepEqual(text(content), DEMO_POINTS, name);
+      assert.deepEqual(content.points.map((p) => p.icon), [icons.CreditCard, icons.QrCode, icons.Lock, icons.Smartphone], name);
+      assert.equal(content.feeNote, DEMO_MODAL_FEE, name);
+    }
+    assert.deepEqual(content.methods, paymentMethodLabels(c), name);
+  }
+  // Outside the booking app (no config): the demo's content with every badge.
+  const outside = modal.securePaymentContent(null);
+  assert.deepEqual(text(outside), DEMO_POINTS);
+  assert.deepEqual(outside.methods, badges.ALL_METHODS);
+  assert.equal(outside.feeNote, DEMO_MODAL_FEE);
+  // The modal renders the builder's content (wiring).
+  const src = readFileSync(new URL("../../components/booking/checkout/SecurePaymentModal.tsx", import.meta.url), "utf8");
+  assert.ok(src.includes("  const content = securePaymentContent(config);"));
+  assert.ok(src.includes("  if (config && beam) {") && src.includes("      feeNote: beam.feeNote,"));
+});
+
+/** The results list for a page with this config (its rooms and its fee notes). */
+async function renderResults(cfg: PublicBookingConfig): Promise<string> {
+  const { ResultsList } = await loadResultsAndModal();
+  const noop = () => undefined;
+  return withoutWindow(() =>
+    strip(
+      renderToStaticMarkup(
+        createElement(ResultsList, {
+          availability: availabilityFor(cfg),
+          status: "ready",
+          error: null,
+          cart: [],
+          searchAdults: 2,
+          blockedReason: () => null,
+          onAdd: noop,
+          onRetry: noop,
+          onChangeDates: noop,
+        }),
+      ),
+    ),
+  );
+}
+
+test("the results header (round 7): every Beam page says resultsFeeNotes(config).results; Stripe and the demo keep '... added to every online payment.'", async () => {
+  const header = (html: string) => /<span class="block text-\(--bk-frame-text-muted\)">([^<]*)<\/span>/.exec(html)?.[1] ?? null;
+  for (const [name, make] of Object.entries(BEAM_PAGES)) {
+    const c = make();
+    const notes = resultsFeeNotes(c);
+    assert.ok(notes, name);
+    assert.equal(header(await renderResults(c)), notes.results === null ? null : esc(notes.results), name);
+  }
+  // Fee 0 on both groups: no header line.
+  assert.equal(header(await renderResults(beamPage({ BOOKING_CARD_FEE_PCT: "0" }))), null);
+  for (const [name, env] of Object.entries(STRIPE_DEMO_ENVS)) {
+    const c = config(env);
+    const expected = c.cardFeePct > 0 ? `Prices are for the stay; a ${c.cardFeePct}% payment processing fee is added to every online payment.` : null;
+    assert.equal(header(await renderResults(c)), expected, name);
   }
 });

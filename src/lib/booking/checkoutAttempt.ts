@@ -19,7 +19,18 @@ export interface CheckoutAttempt {
   token: string;
   /** When the checkout was started (ms since epoch; 0 when unknown). */
   startedAt: number;
+  /**
+   * A hold-first Beam attempt's own payable window (ms): its page's attemptPayableMs when it started (round 7). A page
+   * of another provider - the Stripe fallback (owner decision 5) - still waits for it. Never on a Stripe attempt.
+   */
+  payableMs?: number;
 }
+
+/**
+ * The longest payable window a stored attempt may claim: Beam's 30-minute link + the longest
+ * BEAM_PENDING_GRACE_MINUTES (60) + the 3-minute margin is 93 minutes; a stored value above this one is ignored.
+ */
+export const MAX_ATTEMPT_PAYABLE_MS = 120 * 60_000;
 
 /**
  * Stripe's payable window: its 30-minute Checkout Session plus a margin (the server adds a minute for clock skew).
@@ -56,22 +67,52 @@ export function attemptPayableMs(cfg: Pick<PublicBookingConfig, "attemptPayableM
 /**
  * True while the attempt's payment might still succeed, so a second payable page must not be opened (a guest paying
  * both would be charged twice). An attempt whose start is unknown (0) never blocks. `payableMs`: attemptPayableMs
- * of the page's config (Stripe's 33 minutes when left out).
+ * of the page's config (Stripe's 33 minutes when left out); a Beam attempt's own window counts when it is longer
+ * (round 7: a Beam attempt on the Stripe fallback page). A Stripe attempt carries none, so its rule is as before.
  */
-export function attemptMayStillBePaid(attempt: Pick<CheckoutAttempt, "startedAt">, nowMs: number, payableMs: number = DEFAULT_ATTEMPT_PAYABLE_MINUTES * 60_000): boolean {
-  return attempt.startedAt > 0 && nowMs - attempt.startedAt < payableMs;
+export function attemptMayStillBePaid(
+  attempt: Pick<CheckoutAttempt, "startedAt"> & Partial<Pick<CheckoutAttempt, "payableMs">>,
+  nowMs: number,
+  payableMs: number = DEFAULT_ATTEMPT_PAYABLE_MINUTES * 60_000,
+): boolean {
+  const own = attempt.payableMs;
+  const window = typeof own === "number" && own > payableMs ? own : payableMs;
+  return attempt.startedAt > 0 && nowMs - attempt.startedAt < window;
 }
 
 /**
  * The attempt a successful checkout starts, remembered before the redirect: a Stripe checkout's as before, and a
- * hold-first Beam checkout's (its link token carries the Beam link id). null without a link token (the demo).
+ * hold-first Beam checkout's (its link token carries the Beam link id) with `payableMs` - the page's attemptPayableMs
+ * - as its own window (round 7), so a page of another provider still waits for it. null without a link token (the
+ * demo). A Stripe attempt never carries a window: it is exactly as before.
  */
-export function attemptOf(res: Pick<CheckoutSuccess, "ref" | "linkToken" | "provider" | "paymentMode">, nowMs: number): CheckoutAttempt | null {
+export function attemptOf(res: Pick<CheckoutSuccess, "ref" | "linkToken" | "provider" | "paymentMode">, nowMs: number, payableMs?: number): CheckoutAttempt | null {
   if (!res.linkToken) return null;
-  if (res.provider === "stripe" || beamHoldFirst(res.provider, res.paymentMode)) {
-    return { ref: res.ref, token: res.linkToken, startedAt: nowMs };
+  if (res.provider === "stripe") return { ref: res.ref, token: res.linkToken, startedAt: nowMs };
+  if (beamHoldFirst(res.provider, res.paymentMode)) {
+    const own = payableWindow(payableMs);
+    return { ref: res.ref, token: res.linkToken, startedAt: nowMs, ...(own !== null ? { payableMs: own } : {}) };
   }
   return null;
+}
+
+/** A payable window an attempt may carry: a whole number of ms above 0, at most MAX_ATTEMPT_PAYABLE_MS; else null. */
+function payableWindow(v: unknown): number | null {
+  return typeof v === "number" && Number.isSafeInteger(v) && v > 0 && v <= MAX_ATTEMPT_PAYABLE_MS ? v : null;
+}
+
+/**
+ * The attempt sessionStorage holds (components/booking/attempt.ts readAttempt), or null: a booking ref, a token of 1 to
+ * 4096 characters, the start (0 when it is not a positive finite number) and - round 7 - a Beam attempt's own payable
+ * window when it is a valid one. Every value without that window reads exactly as before.
+ */
+export function parseAttempt(v: unknown): CheckoutAttempt | null {
+  if (typeof v !== "object" || v === null) return null;
+  const a = v as Partial<Record<keyof CheckoutAttempt, unknown>>;
+  if (!isBookingRef(a.ref) || typeof a.token !== "string" || a.token.length === 0 || a.token.length > 4096) return null;
+  const startedAt = typeof a.startedAt === "number" && Number.isFinite(a.startedAt) && a.startedAt > 0 ? a.startedAt : 0;
+  const own = payableWindow(a.payableMs);
+  return { ref: a.ref, token: a.token, startedAt, ...(own !== null ? { payableMs: own } : {}) };
 }
 
 /**

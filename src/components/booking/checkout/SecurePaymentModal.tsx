@@ -89,8 +89,11 @@ const POINT_ICON: Record<SecurePaymentPoint["kind"], typeof CreditCard> = {
   hold: Smartphone,
 };
 
-/** Provider copy for the modal; falls back to Beam's (the demo's) when rendered outside the booking app. */
-function modalContent(config: PublicBookingConfig | null) {
+/**
+ * Provider copy for the modal; falls back to Beam's (the demo's) when rendered outside the booking app. Exported for the
+ * node tests (round 7): a Beam page's points and fee note, and the Stripe and demo content as they are.
+ */
+export function securePaymentContent(config: PublicBookingConfig | null) {
   if (config && checkoutBrand(config.provider) === "Stripe") {
     return {
       title: "Secure payment by Stripe",
@@ -139,7 +142,7 @@ function modalContent(config: PublicBookingConfig | null) {
 export default function SecurePaymentModal({ open, onClose }: SecurePaymentModalProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const config = useContext(BookingContext)?.config ?? null;
-  const content = modalContent(config);
+  const content = securePaymentContent(config);
   return (
     <Modal
       open={open}

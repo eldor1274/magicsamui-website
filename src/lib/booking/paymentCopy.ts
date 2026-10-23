@@ -170,9 +170,9 @@ export function providerCopy(config: CopyConfig): ProviderCopy {
 
 /* ------------------- Beam: how the guest pays (design S5.2) ------------------- */
 
-/** The public fields the Beam method-choice copy reads. */
+/** The public fields the Beam method-choice copy reads (paymentStatus: noFeeAlternative, round 7). */
 export type MethodCopyConfig = Pick<PublicBookingConfig, "provider" | "acceptedCardBrands" | "paymentMethods"> &
-  Partial<Pick<PublicBookingConfig, "feeByMethod">>;
+  Partial<Pick<PublicBookingConfig, "feeByMethod" | "paymentStatus">>;
 
 /** What a Beam method-choice page offers, as its copy names it. */
 interface BeamPayFacts {
@@ -299,10 +299,11 @@ export const CHOOSE_METHOD_HINT = "Choose how you'd like to pay to continue.";
 /**
  * Next to the fee line before a method is chosen (design S5.2): the summary shows the card/e-wallet total, so "No fee
  * with Thai PromptPay QR" says how it can be lower - a total never rises after the choice. null once a method is
- * chosen, while PromptPay is off or has a fee, and on every Stripe and demo page.
+ * chosen, while PromptPay is off or has a fee, on a locked Beam page (round 7: it offers no choice, and its payment
+ * step shows none) and on every Stripe and demo page.
  */
 export function noFeeAlternative(config: MethodCopyConfig, payMethod: unknown): string | null {
-  if (!pageOffersMethodChoice(config) || pagePayMethod(config, payMethod) !== null) return null;
+  if (!pageOffersMethodChoice(config) || config.paymentStatus === "locked" || pagePayMethod(config, payMethod) !== null) return null;
   const f = beamPayFacts(config);
   return f.cardFeePct > 0 && f.promptPayFeePct === 0 ? "No fee with Thai PromptPay QR" : null;
 }
