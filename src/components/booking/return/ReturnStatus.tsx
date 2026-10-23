@@ -7,20 +7,27 @@
 // confirmed in Cloudbeds during that render); this component then shows the
 // view returnViewKind() picks (lib/booking/returnView.ts):
 //  - paid (confirmed): booking reference (+ the Cloudbeds reservation number
-//    on Stripe), stay summary, what happens next, WhatsApp, "Add to
-//    calendar" (.ics built in the browser); fires the GA4 purchase ONCE
-//    (guarded per ref inside clientAnalytics; Stripe: only with the server's
-//    purchase answer, i.e. live production + confirmed in Cloudbeds) and
-//    clears the saved cart so it can't be paid twice.
-//  - confirming (Stripe, paid): "Payment received - confirming your booking"
-//    and keeps checking until Cloudbeds confirms.
-//  - attention (Stripe, paid but needs a human): "Payment received - we'll
-//    contact you" + WhatsApp. Never "Try again".
-//  - pending: polls /api/booking/status (Stripe: every ~3 s for 3 minutes;
-//    Beam: 1s, 2s, 4s ... 30s, about 2 minutes), then advises contacting us.
+//    in the hold-first modes: Stripe and Beam), stay summary, what happens
+//    next, WhatsApp, "Add to calendar" (.ics built in the browser); fires the
+//    GA4 purchase ONCE (guarded per ref inside clientAnalytics; only with the
+//    server's purchase answer, i.e. live production + confirmed in Cloudbeds)
+//    and clears the saved cart so it can't be paid twice. Without a Cloudbeds
+//    confirmation email the page is the booking confirmation (Save or print,
+//    the agreed terms). Beam (design S5.3, BeamPaidView): the Cloudbeds email
+//    is the guest's written confirmation; no Beam copy mentions a receipt.
+//  - confirming (hold-first, paid): "Payment received - confirming your
+//    booking" and keeps checking until Cloudbeds confirms.
+//  - attention (paid but needs a human): "Payment received - we'll contact
+//    you" + WhatsApp. Never "Try again".
+//  - pending: polls /api/booking/status (pollPlan: Stripe every ~3 s for 3
+//    minutes; Beam 2 s, then x1.5 up to 15 s, for 15 minutes; the demo 1 s,
+//    2 s, 4 s ... 30 s, about 2 minutes), then advises contacting us. Beam's
+//    words follow its pendingReason (being confirmed / unconfirmed: never
+//    "Try again", money review 8), also when it changes while polling.
 //  - mismatch: the payment doesn't match the booking - contact us only.
 //  - failed / expired / cancelled / refunded: explains and offers
-//    "Try again" back to the payment step (the cart is still saved).
+//    "Try again" back to the payment step (the cart is still saved), except
+//    refunded. The words per provider: returnView.ts unpaidCopy.
 // The guest's first name comes from this tab's sessionStorage, for display only (the email address is never shown).
 // The signed token/proof are bearer credentials for the status API: on mount
 // they move from the address bar into this tab's sessionStorage (so Reload
@@ -55,14 +62,14 @@ import {
 } from "lucide-react";
 import { ADDONS, FREE_PICKUP_MIN_NIGHTS, HOUSE_POLICIES, RATE_PLANS, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { fetchStatus, recallLinkToken } from "@/lib/booking/apiClient";
-import { isLiveMode, providerOf } from "@/lib/booking/payments/provider";
-import { canRetryPayment, isPollingView, pollPlan, returnViewKind } from "@/lib/booking/returnView";
-import type { ReturnViewKind } from "@/lib/booking/returnView";
+import { isHoldFirstMode, isLiveMode, providerOf } from "@/lib/booking/payments/provider";
+import { beamPaidCopy, beamPendingCopy, beamPolledReason, canRetryPayment, isPollingView, pollPlan, returnViewKind, unpaidCopy } from "@/lib/booking/returnView";
+import type { BeamPaidCopy, PollPlan, ReturnViewKind, UnpaidStatus } from "@/lib/booking/returnView";
 import { createBookingAnalytics } from "@/lib/booking/clientAnalytics";
 import { formatDisplayDateWithWeekday, formatNights } from "@/lib/booking/dates";
 import { formatThbWithCode } from "@/lib/booking/format";
 import { isBookingRef } from "@/lib/booking/ref";
-import type { ApiError, BookingSummary, PaymentMode, PaymentStatus, StatusResponse, ThemeName } from "@/lib/booking/types";
+import type { ApiError, BookingSummary, PaymentMode, StatusResponse, ThemeName } from "@/lib/booking/types";
 import { allowListedSearch, resumePaymentPath } from "@/lib/booking/urls";
 import type { ResumeReason } from "@/lib/booking/urls";
 import { useHydrated } from "../hooks";
@@ -88,9 +95,15 @@ export interface ReturnStatusProps {
   sessionId?: string | null;
   /** The own booking page this return page belongs to ("/booking" or "/booking-preview"); "Try again" goes there. */
   bookingPath?: string;
-  /** Whether a real Cloudbeds reservation is written in this mode (for the preview note). */
+  /**
+   * Whether a real Cloudbeds reservation is written in this mode (for the preview note). For a Beam answer
+   * OwnReturnPage passes the flags of the config that verified it (design S5.3).
+   */
   cloudbedsWrites?: "live" | "mock" | "none";
-  /** Stripe: whether Cloudbeds emails a booking confirmation (else Stripe's receipt is the only email). */
+  /**
+   * Hold-first (Stripe, Beam): whether Cloudbeds emails a booking confirmation; without it this page is the
+   * confirmation (Stripe: else Stripe's receipt is the only email; Beam sends no receipt at all).
+   */
   sendsConfirmationEmail?: boolean;
   /**
    * Whether the error / unverified views may show the preview-mode note from
@@ -176,12 +189,16 @@ function statusAnnouncement(result: Result, exhausted = false): string {
         : "Payment received. Confirming your booking.";
     case "attention":
       return `Payment received. We'll contact you about booking ${result.ref}.`;
-    case "pending":
+    case "pending": {
+      // Beam: its own words (design S5.3); Stripe and the demo as before.
+      const beam = beamPendingCopy(result, exhausted);
+      if (beam) return beam.announcement;
       return exhausted
         ? "This is taking longer than usual. Automatic checking has stopped - use Check again, or message us on WhatsApp."
         : brandOf(result) === "Stripe"
           ? "Waiting for your payment."
           : "Confirming your payment.";
+    }
     case "mismatch":
       return "We need to check this payment. Please message us.";
     case "unpaid": {
@@ -269,11 +286,21 @@ function PreviewModeNote({ paymentMode, cloudbedsWrites = "none" }: { paymentMod
           : "The Cloudbeds reservation was simulated."}
       </>
     );
+  } else if (paymentMode === "beam-playground") {
+    // Beam is hold-first (design S5.3): the reservation is made in Cloudbeds (or simulated), as in Stripe's test mode.
+    note = (
+      <>
+        <strong>Beam test mode - no real money moved.</strong>{" "}
+        {cloudbedsWrites === "live"
+          ? "A REAL Cloudbeds reservation was created for this test - check it, then cancel it in Cloudbeds."
+          : "The Cloudbeds reservation was simulated."}
+      </>
+    );
   } else {
     note = (
       <>
-        <strong>{paymentMode === "demo" ? "Demo mode - no real payment was taken." : "Beam test mode - no real money moved."}</strong> In
-        live mode this is where the reservation would be created in Cloudbeds and confirmation emails sent.
+        <strong>Demo mode - no real payment was taken.</strong> In live mode this is where the reservation would be created in Cloudbeds
+        and confirmation emails sent.
       </>
     );
   }
@@ -504,6 +531,7 @@ function BookingTerms({ booking }: { booking: BookingSummary }) {
   );
 }
 
+/** Paid, on Stripe and in the demo (Beam: BeamPaidView). */
 function PaidView({
   result,
   guestName,
@@ -521,13 +549,6 @@ function PaidView({
   // Stripe without a Cloudbeds confirmation email: this page is the guest's booking confirmation.
   const pageIsConfirmation = stripe && !sendsConfirmationEmail;
   const reservationId = stripe ? result.fulfilment.reservationId : null;
-  const pickup = booking.nights >= FREE_PICKUP_MIN_NIGHTS;
-  const roomNames = booking.items.map((i) => getCatalogueRoom(i.slug)?.name ?? i.slug);
-
-  function addToCalendar() {
-    const ics = buildStayIcs({ ref: booking.ref, checkIn: booking.checkIn, checkOut: booking.checkOut, rooms: roomNames });
-    downloadIcs(`${booking.ref}.ics`, ics);
-  }
 
   return (
     <div className="space-y-5">
@@ -542,13 +563,11 @@ function PaidView({
         <p>
           {live && stripe
             ? "Your stay is booked and paid. Stripe is emailing your payment receipt to the email address you entered."
-            : live
-              ? "Your stay is booked and paid. A confirmation email is on its way to the email address you entered."
-              : stripe
-                ? result.paymentMode === "stripe-mock"
-                  ? "The MOCK payment went through and the simulated reservation is confirmed."
-                  : `Your test payment went through and the reservation is confirmed${cloudbedsWrites === "live" ? " in Cloudbeds" : " (simulated)"}.`
-                : "Your test payment went through - in live mode your stay would now be reserved."}
+            : stripe
+              ? result.paymentMode === "stripe-mock"
+                ? "The MOCK payment went through and the simulated reservation is confirmed."
+                : `Your test payment went through and the reservation is confirmed${cloudbedsWrites === "live" ? " in Cloudbeds" : " (simulated)"}.`
+              : "Your test payment went through - in live mode your stay would now be reserved."}
         </p>
         <div className="mt-5">
           <ReferenceBox bookingRef={booking.ref} />
@@ -563,70 +582,138 @@ function PaidView({
 
       {pageIsConfirmation && <BookingTerms booking={booking} />}
 
-      <section
-        aria-labelledby="return-next-title"
-        className="rounded-(--bk-radius-card) bg-(--bk-surface) p-5 shadow-(--bk-shadow-card) sm:p-6"
-      >
-        <h2 id="return-next-title" className="bk-heading text-xl text-(--bk-text)">
-          What happens next
-        </h2>
-        <ul className="mt-4 space-y-4 text-sm">
-          <li className="flex gap-3">
-            <Mail size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
-            <p className="text-(--bk-text-muted)">
-              <span className="font-medium text-(--bk-text)">{pageIsConfirmation ? "Payment receipt." : "Confirmation email."}</span>{" "}
-              {live && stripe
-                ? sendsConfirmationEmail
-                  ? "Your booking confirmation and Stripe's payment receipt are sent to the email address you entered. Check your spam folder if they haven't arrived in a few minutes."
-                  : "Stripe sends your payment receipt to the email address you entered; keep it with your booking reference and this page. Check your spam folder if the receipt hasn't arrived in a few minutes."
-                : live
-                  ? "Your confirmation and receipt are sent to the email address you entered. Check your spam folder if it hasn't arrived in a few minutes."
-                  : stripe
-                    ? "In live mode the guest receives Stripe's payment receipt by email and the reservation is confirmed in Cloudbeds."
-                    : "In live mode the guest receives the Cloudbeds confirmation and Beam's receipt by email."}
-            </p>
-          </li>
-          {pickup && (
-            <li className="flex gap-3">
-              <Plane size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
-              <p className="text-(--bk-text-muted)">
-                <span className="font-medium text-(--bk-text)">{HOUSE_POLICIES.transferTitle}.</span> {HOUSE_POLICIES.transferHowTo}
-              </p>
-            </li>
-          )}
-          <li className="flex gap-3">
-            <Clock size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
-            <p className="text-(--bk-text-muted)">
-              <span className="font-medium text-(--bk-text)">Arrival.</span> {HOUSE_POLICIES.arrivalHint} {HOUSE_POLICIES.checkOut}.
-            </p>
-          </li>
-          <li className="flex gap-3">
-            <MessageCircle size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
-            <p className="text-(--bk-text-muted)">
-              <span className="font-medium text-(--bk-text)">Questions or special requests?</span> Message Eldor on WhatsApp with your
-              booking reference.
-            </p>
-          </li>
-        </ul>
-        <div className="mt-5 flex flex-wrap gap-2">
-          <a href={helpHref(booking.ref)} target="_blank" rel="noopener noreferrer" className={PRIMARY}>
-            <MessageCircle size={16} aria-hidden="true" />
-            WhatsApp us
-          </a>
-          <button type="button" onClick={() => window.print()} className={SECONDARY}>
-            <Printer size={16} aria-hidden="true" />
-            Print or save this confirmation
-          </button>
-          <button type="button" onClick={addToCalendar} className={SECONDARY}>
-            <CalendarPlus size={16} aria-hidden="true" />
-            Add to calendar
-          </button>
-          <Link href="/" className={SECONDARY}>
-            Back to the website
-          </Link>
-        </div>
-      </section>
+      <PaidNextSteps
+        booking={booking}
+        emailTitle={pageIsConfirmation ? "Payment receipt." : "Confirmation email."}
+        emailText={
+          live && stripe
+            ? sendsConfirmationEmail
+              ? "Your booking confirmation and Stripe's payment receipt are sent to the email address you entered. Check your spam folder if they haven't arrived in a few minutes."
+              : "Stripe sends your payment receipt to the email address you entered; keep it with your booking reference and this page. Check your spam folder if the receipt hasn't arrived in a few minutes."
+            : stripe
+              ? "In live mode the guest receives Stripe's payment receipt by email and the reservation is confirmed in Cloudbeds."
+              : "In live mode the guest receives the Cloudbeds confirmation and Beam's receipt by email."
+        }
+      />
     </div>
+  );
+}
+
+/**
+ * Beam, paid (design S5.3, owner decision 6). Hold-first from the mode, as Stripe: the Cloudbeds reservation number,
+ * and - while Cloudbeds sends no confirmation email - the "Save or print" callout and the agreed terms. The Cloudbeds
+ * confirmation email is the guest's written confirmation (Beam sends no receipt): no line here mentions a receipt.
+ * The words: returnView.ts beamPaidCopy.
+ */
+function BeamPaidView({
+  result,
+  guestName,
+  copy,
+  cloudbedsWrites,
+}: {
+  result: StatusResponse;
+  guestName: string | null;
+  copy: BeamPaidCopy;
+  cloudbedsWrites: "live" | "mock" | "none";
+}) {
+  const { booking } = result;
+  // Hold-first (from the mode): the reservation is confirmed in Cloudbeds, under this number.
+  const reservationId = isHoldFirstMode(result.paymentMode) ? result.fulfilment.reservationId : null;
+  return (
+    <div className="space-y-5">
+      <StatusCard
+        tone="success"
+        icon={<CircleCheck size={34} aria-hidden="true" />}
+        eyebrow={copy.eyebrow}
+        title={guestName ? `Thank you, ${guestName}!` : "Thank you!"}
+        maskTitle={Boolean(guestName)}
+      >
+        {/* The guest's email address is never printed here (this is the page the purchase event fires on). */}
+        <p>{copy.lead}</p>
+        <div className="mt-5">
+          <ReferenceBox bookingRef={booking.ref} />
+          <ReservationNumber reservationId={reservationId} />
+          {copy.pageIsConfirmation && <SaveConfirmationCallout />}
+        </div>
+      </StatusCard>
+
+      <PreviewModeNote paymentMode={result.paymentMode} cloudbedsWrites={cloudbedsWrites} />
+
+      <StaySummary booking={booking} />
+
+      {copy.pageIsConfirmation && <BookingTerms booking={booking} />}
+
+      <PaidNextSteps booking={booking} emailTitle={copy.emailTitle} emailText={copy.emailText} />
+    </div>
+  );
+}
+
+/** "What happens next" on a paid booking: the email item (its words per provider), the free transfer, arrival, questions, and the actions. */
+function PaidNextSteps({ booking, emailTitle, emailText }: { booking: BookingSummary; emailTitle: string; emailText: string }) {
+  const pickup = booking.nights >= FREE_PICKUP_MIN_NIGHTS;
+  const roomNames = booking.items.map((i) => getCatalogueRoom(i.slug)?.name ?? i.slug);
+
+  function addToCalendar() {
+    const ics = buildStayIcs({ ref: booking.ref, checkIn: booking.checkIn, checkOut: booking.checkOut, rooms: roomNames });
+    downloadIcs(`${booking.ref}.ics`, ics);
+  }
+
+  return (
+    <section
+      aria-labelledby="return-next-title"
+      className="rounded-(--bk-radius-card) bg-(--bk-surface) p-5 shadow-(--bk-shadow-card) sm:p-6"
+    >
+      <h2 id="return-next-title" className="bk-heading text-xl text-(--bk-text)">
+        What happens next
+      </h2>
+      <ul className="mt-4 space-y-4 text-sm">
+        <li className="flex gap-3">
+          <Mail size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
+          <p className="text-(--bk-text-muted)">
+            <span className="font-medium text-(--bk-text)">{emailTitle}</span>{" "}
+            {emailText}
+          </p>
+        </li>
+        {pickup && (
+          <li className="flex gap-3">
+            <Plane size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
+            <p className="text-(--bk-text-muted)">
+              <span className="font-medium text-(--bk-text)">{HOUSE_POLICIES.transferTitle}.</span> {HOUSE_POLICIES.transferHowTo}
+            </p>
+          </li>
+        )}
+        <li className="flex gap-3">
+          <Clock size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
+          <p className="text-(--bk-text-muted)">
+            <span className="font-medium text-(--bk-text)">Arrival.</span> {HOUSE_POLICIES.arrivalHint} {HOUSE_POLICIES.checkOut}.
+          </p>
+        </li>
+        <li className="flex gap-3">
+          <MessageCircle size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-(--bk-accent)" />
+          <p className="text-(--bk-text-muted)">
+            <span className="font-medium text-(--bk-text)">Questions or special requests?</span> Message Eldor on WhatsApp with your
+            booking reference.
+          </p>
+        </li>
+      </ul>
+      <div className="mt-5 flex flex-wrap gap-2">
+        <a href={helpHref(booking.ref)} target="_blank" rel="noopener noreferrer" className={PRIMARY}>
+          <MessageCircle size={16} aria-hidden="true" />
+          WhatsApp us
+        </a>
+        <button type="button" onClick={() => window.print()} className={SECONDARY}>
+          <Printer size={16} aria-hidden="true" />
+          Print or save this confirmation
+        </button>
+        <button type="button" onClick={addToCalendar} className={SECONDARY}>
+          <CalendarPlus size={16} aria-hidden="true" />
+          Add to calendar
+        </button>
+        <Link href="/" className={SECONDARY}>
+          Back to the website
+        </Link>
+      </div>
+    </section>
   );
 }
 
@@ -648,15 +735,21 @@ function PendingView({
   cloudbedsWrites: "live" | "mock" | "none";
 }) {
   const brand = brandOf(result);
+  // Beam (design S5.3): its own words per pendingReason (returnView.ts beamPendingCopy); Stripe and the demo as before.
+  const beam = beamPendingCopy(result, exhausted);
   return (
     <div className="space-y-5">
       <StatusCard
         tone="pending"
         icon={exhausted ? <Clock size={30} aria-hidden="true" /> : <LoaderCircle size={30} aria-hidden="true" className="animate-spin" />}
         eyebrow="Payment pending"
-        title={exhausted ? "This is taking longer than usual" : brand === "Stripe" ? "Waiting for your payment..." : "Confirming your payment..."}
+        title={
+          beam ? beam.title : exhausted ? "This is taking longer than usual" : brand === "Stripe" ? "Waiting for your payment..." : "Confirming your payment..."
+        }
       >
-        {exhausted ? (
+        {beam ? (
+          <p>{beam.body}</p>
+        ) : exhausted ? (
           <p>
             {`We haven't had the confirmation from ${brand} yet. If money has left your account, please don't pay again - message us with your reference and we'll confirm your booking.`}
           </p>
@@ -704,8 +797,8 @@ function PendingView({
 }
 
 /**
- * Stripe, paid: the payment is in, the Cloudbeds reservation is being
- * confirmed (webhook, this page or the sweeper). Never offers a new payment.
+ * Hold-first (Stripe, Beam), paid: the payment is in, the Cloudbeds reservation
+ * is being confirmed (webhook, this page or the sweeper). Never offers a new payment.
  */
 function ConfirmingView({
   result,
@@ -824,39 +917,9 @@ function MismatchView({ result, cloudbedsWrites }: { result: StatusResponse; clo
   );
 }
 
-const UNPAID_COPY: Record<Exclude<PaymentStatus, "paid" | "pending">, { title: string; body: string }> = {
-  failed: { title: "Payment didn't go through", body: "Nothing has been charged. You can try again with another card or PromptPay." },
-  expired: {
-    title: "Payment link expired",
-    body: "Payment links last 30 minutes. Nothing has been charged - start the payment again when you're ready.",
-  },
-  cancelled: { title: "Payment cancelled", body: "Nothing has been charged. Your reservation details are still saved in this browser." },
-  refunded: { title: "Payment refunded", body: "This payment has been refunded. Message us if you weren't expecting this." },
-};
+// The unpaid views' words per provider (Stripe, Beam, the demo): returnView.ts unpaidCopy.
 
-/** Stripe wording: the room was held while the guest paid, and is released when the payment doesn't happen. */
-const STRIPE_UNPAID_COPY: Record<Exclude<PaymentStatus, "paid" | "pending">, { title: string; body: string }> = {
-  failed: {
-    title: "Payment didn't go through",
-    body: "Nothing has been charged and the room hold was released. You can try again with another card, a wallet or PromptPay.",
-  },
-  expired: {
-    title: "Payment time ran out",
-    body: "Your room was held for 30 minutes while you paid and has now been released. Nothing has been charged - start again when you're ready.",
-  },
-  cancelled: {
-    title: "Payment cancelled",
-    body: "Nothing has been charged and the room hold was released. Your reservation details are still saved in this browser.",
-  },
-  refunded: UNPAID_COPY.refunded,
-};
-
-function unpaidCopy(result: Pick<StatusResponse, "status" | "paymentMode">): { title: string; body: string } {
-  const status = result.status === "paid" || result.status === "pending" ? "failed" : result.status;
-  return (providerOf(result.paymentMode) === "stripe" ? STRIPE_UNPAID_COPY : UNPAID_COPY)[status];
-}
-
-const RESUME_REASON: Record<Exclude<PaymentStatus, "paid" | "pending">, ResumeReason> = {
+const RESUME_REASON: Record<UnpaidStatus, ResumeReason> = {
   failed: "failed",
   expired: "expired",
   cancelled: "cancelled",
@@ -869,7 +932,7 @@ function UnpaidView({
   bookingPath,
   cloudbedsWrites,
 }: {
-  result: StatusResponse & { status: Exclude<PaymentStatus, "paid" | "pending"> };
+  result: StatusResponse & { status: UnpaidStatus };
   theme: ThemeName | undefined;
   bookingPath: string;
   cloudbedsWrites: "live" | "mock" | "none";
@@ -981,6 +1044,8 @@ export default function ReturnStatus({
   const [result, setResult] = useState<Result>(initial);
   const [exhausted, setExhausted] = useState(false);
   const [checking, setChecking] = useState(false);
+  // Beam (design S5.3): the pendingReason the poll last read for the result on screen (its plan): set by the poll only.
+  const [polledReason, setPolledReason] = useState<{ plan: PollPlan; reason: StatusResponse["pendingReason"] } | null>(null);
   const hydrated = useHydrated();
 
   // Credentials from the URL, or - after a reload once they left the address
@@ -1056,6 +1121,9 @@ export default function ReturnStatus({
   const polling = kind !== null && isPollingView(kind);
   const plan = useMemo(() => (result?.ok ? pollPlan(result) : null), [result]);
   const paid = result?.ok === true && result.status === "paid" ? result : null;
+  // A Beam pending answer is shown with the reason the poll last read for it (never set for Stripe or the demo).
+  const shown: Result =
+    result?.ok && result.status === "pending" && polledReason !== null && polledReason.plan === plan ? { ...result, pendingReason: polledReason.reason } : result;
 
   // Display-only guest details saved by the booking flow in this tab (never sent anywhere).
   const guest = useMemo(() => (hydrated ? (readPersistedBooking()?.guest ?? null) : null), [hydrated]);
@@ -1084,6 +1152,10 @@ export default function ReturnStatus({
         setResult(res);
         return;
       }
+      // Beam (design S5.3): still pending, but the reason may have changed (processing -> unconfirmed once the window
+      // is over and the hold released): the words follow it, and this round of checks carries on (no new budget).
+      const polled = res.ok ? beamPolledReason(res) : null;
+      if (polled) setPolledReason((prev) => (prev !== null && prev.plan === plan && prev.reason === polled.reason ? prev : { plan, reason: polled.reason }));
       if (Date.now() - startedAt >= plan.maxMs) {
         setExhausted(true);
         return;
@@ -1151,7 +1223,11 @@ export default function ReturnStatus({
       </div>
     );
   } else if (kind === "paid") {
-    view = (
+    // Beam: its own paid view (design S5.3); Stripe and the demo as before.
+    const beamCopy = beamPaidCopy(result.paymentMode, { sendsConfirmationEmail, cloudbedsWrites });
+    view = beamCopy ? (
+      <BeamPaidView result={result} guestName={guestName} copy={beamCopy} cloudbedsWrites={cloudbedsWrites} />
+    ) : (
       <PaidView result={result} guestName={guestName} cloudbedsWrites={cloudbedsWrites} sendsConfirmationEmail={sendsConfirmationEmail} />
     );
   } else if (kind === "confirming") {
@@ -1163,7 +1239,7 @@ export default function ReturnStatus({
   } else if (result.status === "pending") {
     view = (
       <PendingView
-        result={result}
+        result={shown?.ok ? shown : result}
         exhausted={exhausted}
         checking={checking}
         onCheckAgain={checkAgain}
@@ -1184,7 +1260,7 @@ export default function ReturnStatus({
       {/* One persistent live region: a region that mounts already filled (each view's own card) is often not read. */}
       {/* "Checking..." while a manual check runs, then the status again, so the result is read out. */}
       <p role="status" className="bk-sr-only">
-        {recovering || awaitingLinkCheck ? "Checking your payment." : checking ? "Checking..." : statusAnnouncement(result, exhausted)}
+        {recovering || awaitingLinkCheck ? "Checking your payment." : checking ? "Checking..." : statusAnnouncement(shown, exhausted)}
       </p>
       {view}
     </>
