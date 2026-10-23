@@ -178,10 +178,14 @@ test("the route reads BOT_LOOKUP_SECRET from process.env: unset 503, wrong 401, 
     assert.ok(w.lines.some((l) => l.message === "support_lookup_unconfigured"));
     w.useEnv({ ...BEAM_ENV, BOT_LOOKUP_SECRET: "too-short-secret" });
     assert.equal((await w.lookup({ email: TEST_EMAIL }, "Bearer too-short-secret")).status, 503);
+    // The route keeps one state per server instance: "unconfigured" was logged once.
+    assert.equal(w.lines.filter((l) => l.message === "support_lookup_unconfigured").length, 1);
     w.useEnv(BEAM_ENV);
     const wrong = await w.lookup({ email: TEST_EMAIL }, `Bearer ${SECRET.slice(1)}`);
     assert.equal(wrong.status, 401);
     assert.equal(wrong.cacheControl, "no-store");
+    assert.ok(w.lines.some((l) => l.message === "support_lookup_unauthorized" && (l.data ?? "").includes('"header":"present"')));
+    assert.ok(!JSON.stringify(w.lines).includes(SECRET.slice(1)), "the rejected token is never logged");
     // A Stripe deployment without any Beam variable: the lookup has nothing to read.
     w.useEnv({ ...STRIPE_TEST_ENV, BOT_LOOKUP_SECRET: SECRET });
     const stripeOnly = await w.lookup({ email: TEST_EMAIL });
@@ -191,11 +195,14 @@ test("the route reads BOT_LOOKUP_SECRET from process.env: unset 503, wrong 401, 
   });
 });
 
-test("a Beam booking made through the checkout route is found through the lookup route by email and phone, nothing personal in it", async (t) => {
+test("a Beam booking made through the checkout route is found through the lookup route by phone, ref and email + ref (an email alone: a count only), nothing personal in it", async (t) => {
   await withWorld(t, BEAM_ENV, async (w) => {
     assert.deepEqual((await w.lookup({ email: TEST_EMAIL })).body.found, 0);
     const b = await w.book(GARDEN);
-    for (const q of [{ email: TEST_EMAIL }, { phone: "+66 95 246 6011" }, { ref: b.ref }]) {
+    const emailOnly = await w.lookup({ email: TEST_EMAIL });
+    assert.deepEqual([emailOnly.status, emailOnly.body.found, emailOnly.body.matches, emailOnly.body.detailsWithheld, emailOnly.body.payAgainSafe], [200, 1, [], true, false]);
+    assert.ok(!emailOnly.text.includes(b.ref));
+    for (const q of [{ email: TEST_EMAIL, ref: b.ref }, { phone: "+66 95 246 6011" }, { ref: b.ref }]) {
       const res = await w.lookup(q);
       assert.equal(res.status, 200, res.text);
       assert.equal(res.cacheControl, "no-store");
@@ -204,6 +211,7 @@ test("a Beam booking made through the checkout route is found through the lookup
       assert.equal(matches[0].ref, b.ref);
       assert.equal(matches[0].state, "open");
       assert.equal(matches[0].retrySafe, true);
+      assert.equal(res.body.payAgainSafe, true);
       for (const pii of [TEST_EMAIL, "952466011", GUEST.lastName, GUEST.specialRequests]) assert.ok(!res.text.includes(pii), pii);
     }
     w.fakeBeam.decline(b.linkId, "CARD", "CH_CARD_DECLINED");

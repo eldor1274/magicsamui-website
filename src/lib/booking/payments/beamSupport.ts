@@ -14,8 +14,10 @@
 //   `code` is supportCode: HMAC-SHA256 under BOOKING_TOKEN_SECRET of the normalised value, so Redis never holds an email
 //   address or phone number, and a copy of the database can't be reversed by trying every phone number without the
 //   secret. Rotating BOOKING_TOKEN_SECRET only makes the older entries unfindable by email or phone.
-// - Every key lives SUPPORT_INDEX_TTL_SECONDS (30 days) from its last write; the scope is keyScope(mode), so Stage B
-//   (beam-playground) entries are never answered on production (beam-live) and the reverse.
+// - Every key lives SUPPORT_INDEX_TTL_SECONDS (30 days) from its last write, and an entry older than that (by its own
+//   `at`) is dropped whenever a contact list is written or read (a repeat guest's renewed key never keeps an attempt
+//   past 30 days); the scope is keyScope(mode), so Stage B (beam-playground) entries are never answered on production
+//   (beam-live) and the reverse.
 // Entries carry booking facts only (ref, Beam link id, time, room slugs): no name, email address, phone number or card
 // detail. Two checkouts by one guest in the same instant may keep only one of the two entries (read, then write): the
 // index is a support aid, never part of the money path.
@@ -167,8 +169,16 @@ export function supportIndexWrite(
   };
 }
 
-/** A contact key's entries (newest first); [] when it is missing or unreadable. Throws when Redis fails. */
-export async function readSupportList(kv: Pick<KvStore, "get">, key: string): Promise<BeamSupportEntry[]> {
+/** Whether an entry is still inside the index's retention (SUPPORT_INDEX_TTL_SECONDS before nowMs, by its own `at`). */
+export function isRetained(entry: Pick<BeamSupportEntry, "at">, nowMs: number): boolean {
+  return entry.at >= nowMs - SUPPORT_INDEX_TTL_SECONDS * 1000;
+}
+
+/**
+ * A contact key's entries still inside the retention at nowMs (newest first); [] when it is missing or unreadable.
+ * Throws when Redis fails.
+ */
+export async function readSupportList(kv: Pick<KvStore, "get">, key: string, nowMs: number): Promise<BeamSupportEntry[]> {
   const raw = await kv.get(key);
   if (raw === null) return [];
   let parsed: unknown;
@@ -177,34 +187,38 @@ export async function readSupportList(kv: Pick<KvStore, "get">, key: string): Pr
   } catch {
     return [];
   }
-  return Array.isArray(parsed) ? parsed.filter(isSupportEntry).map(entryOf) : [];
+  return Array.isArray(parsed) ? parsed.filter(isSupportEntry).filter((e) => isRetained(e, nowMs)).map(entryOf) : [];
 }
 
-/** A ref's entry; null when it is missing, unreadable or another ref's. Throws when Redis fails. */
-export async function readSupportRef(kv: Pick<KvStore, "get">, scope: string, ref: string): Promise<BeamSupportEntry | null> {
+/** A ref's entry; null when it is missing, unreadable, another ref's or older than the retention at nowMs. Throws when Redis fails. */
+export async function readSupportRef(kv: Pick<KvStore, "get">, scope: string, ref: string, nowMs: number): Promise<BeamSupportEntry | null> {
   if (!isBookingRef(ref)) return null;
   const raw = await kv.get(keys.beamSupportRef(scope, ref));
   if (raw === null) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
-    return isSupportEntry(parsed) && parsed.ref === ref ? entryOf(parsed) : null;
+    return isSupportEntry(parsed) && parsed.ref === ref && isRetained(parsed, nowMs) ? entryOf(parsed) : null;
   } catch {
     return null;
   }
 }
 
-/** Adds the entry at the front of a contact key's list (the same ref once), capped, with a fresh TTL. */
-async function prepend(kv: Pick<KvStore, "get" | "set">, key: string, entry: BeamSupportEntry): Promise<void> {
-  const list = (await readSupportList(kv, key)).filter((e) => e.ref !== entry.ref);
+/**
+ * Adds the entry at the front of a contact key's list (the same ref once), drops the entries older than the
+ * retention at nowMs, caps it, and writes it with a fresh TTL.
+ */
+async function prepend(kv: Pick<KvStore, "get" | "set">, key: string, entry: BeamSupportEntry, nowMs: number): Promise<void> {
+  const list = (await readSupportList(kv, key, nowMs)).filter((e) => e.ref !== entry.ref);
   const next = [entryOf(entry), ...list].sort((a, b) => b.at - a.at).slice(0, SUPPORT_INDEX_MAX_ENTRIES);
   await kv.set(key, JSON.stringify(next), SUPPORT_INDEX_TTL_SECONDS);
 }
 
 /**
- * Writes the ref entry and the contact lists (in parallel). Throws whatever Redis throws, after every write was
- * tried (the first failure): the checkout adapter catches it, logs it without personal data and goes on.
+ * Writes the ref entry and the contact lists (in parallel). nowMs (default: the entry's own time, the checkout's
+ * clock) sets which older entries are dropped. Throws whatever Redis throws, after every write was tried (the first
+ * failure): the checkout adapter catches it, logs it without personal data and goes on.
  */
-export async function writeSupportIndex(kv: Pick<KvStore, "get" | "set">, write: SupportIndexWrite): Promise<void> {
+export async function writeSupportIndex(kv: Pick<KvStore, "get" | "set">, write: SupportIndexWrite, nowMs: number = write.entry.at): Promise<void> {
   const scope = keyScope(write.mode);
   const { entry } = write;
   if (!isSupportEntry(entry)) throw new RangeError("support index: malformed entry");
@@ -214,7 +228,7 @@ export async function writeSupportIndex(kv: Pick<KvStore, "get" | "set">, write:
   ];
   const results = await Promise.allSettled([
     kv.set(keys.beamSupportRef(scope, entry.ref), JSON.stringify(entryOf(entry)), SUPPORT_INDEX_TTL_SECONDS),
-    ...contactKeys.map((key) => prepend(kv, key, entry)),
+    ...contactKeys.map((key) => prepend(kv, key, entry, nowMs)),
   ]);
   const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
   if (failed) throw failed.reason;
