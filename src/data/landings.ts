@@ -117,7 +117,7 @@ export const landings: Record<string, Landing> = {
     label: "עברית",
     title: "וילות יוקרה עם בריכה פרטית בקוסמוי | Magic Suites",
     description:
-      "וילות וסוויטות על צלע הר בקוסמוי, לכל אחת בריכה פרטית ונוף לים. ציון 9.8 בבוקינג. 5 דקות מהחוף — הזמינו ישירות וקבלו את המחיר הטוב ביותר.",
+      "וילות וסוויטות על צלע הר בקוסמוי עם נוף לים, רובן עם בריכה משלה. ציון 9.8 בבוקינג. 5 דקות מהחוף — הזמינו ישירות וקבלו את המחיר הטוב ביותר.",
     eyebrow: "קוסמוי, תאילנד",
     h1: "וילות עם בריכה פרטית בקוסמוי",
     sub: "2 וילות ו־5 סוויטות פרטיות — רובן עם בריכה משלה, על צלע הר מעל מפרץ תאילנד, 5 דקות מהחוף.",
@@ -151,7 +151,7 @@ export const landings: Record<string, Landing> = {
     label: "Русский",
     title: "Виллы с частным бассейном на Самуи | Magic Suites",
     description:
-      "Виллы и люксы на холме с видом на море на Ко Самуи — у каждой собственный бассейн. 9,8 на Booking.com. 5 минут до пляжа. Бронируйте напрямую по лучшей цене.",
+      "Виллы и люксы на холме с видом на море на Ко Самуи — большинство со своим бассейном. 9,8 на Booking.com. 5 минут до пляжа. Бронируйте напрямую по лучшей цене.",
     eyebrow: "Ко Самуи, Таиланд",
     h1: "Виллы с частным бассейном на Самуи",
     sub: "2 виллы и 5 люксов — большинство со своим бассейном, на холме над Сиамским заливом, всего в 5 минутах от пляжа.",
@@ -185,7 +185,7 @@ export const landings: Record<string, Landing> = {
     label: "Français",
     title: "Villas avec piscine privée à Koh Samui | Magic Suites",
     description:
-      "Villas et suites à flanc de colline avec vue mer à Koh Samui, chacune avec piscine privée. Note 9,8 sur Booking.com. Plage à 5 minutes — réservez en direct au meilleur tarif.",
+      "Villas et suites à flanc de colline avec vue mer à Koh Samui, la plupart avec piscine privée. Note 9,8 sur Booking.com. Plage à 5 minutes — réservez en direct au meilleur tarif.",
     eyebrow: "Koh Samui, Thaïlande",
     h1: "Villas avec piscine privée à Koh Samui",
     sub: "2 villas et 5 suites privées — la plupart avec piscine privée, à flanc de colline au-dessus du golfe de Thaïlande, à 5 minutes de la plage.",
@@ -219,7 +219,7 @@ export const landings: Record<string, Landing> = {
     label: "Deutsch",
     title: "Villen mit privatem Pool auf Koh Samui | Magic Suites",
     description:
-      "Villen und Suiten am Hang mit Meerblick auf Koh Samui, fast alle mit eigenem Pool. 9,8 auf Booking.com. Strand in 5 Minuten – direkt buchen zum besten Preis.",
+      "Villen und Suiten am Hang mit Meerblick auf Koh Samui, die meisten mit eigenem Pool. 9,8 auf Booking.com. Strand in 5 Minuten – direkt buchen zum besten Preis.",
     eyebrow: "Koh Samui, Thailand",
     h1: "Villen mit privatem Pool auf Koh Samui",
     sub: "2 Villen und 5 private Suiten – die meisten mit eigenem Pool – am Hang über dem Golf von Thailand, nur 5 Minuten vom Strand.",
@@ -253,7 +253,7 @@ export const landings: Record<string, Landing> = {
     label: "中文",
     title: "苏梅岛私人泳池别墅 | Magic Suites",
     description:
-      "苏梅岛山坡海景别墅与套房，每间均配私人泳池。Booking.com 评分 9.8。距海滩仅 5 分钟——直接预订享最优价格。",
+      "苏梅岛山坡海景别墅与套房，大多配有专属泳池。Booking.com 评分 9.8。距海滩仅 5 分钟——直接预订享最优价格。",
     eyebrow: "泰国 · 苏梅岛",
     h1: "苏梅岛私人泳池别墅",
     sub: "2 栋别墅与 5 间私享套房——大多配有专属泳池，坐落于俯瞰泰国湾的山坡上，距海滩仅 5 分钟。",
@@ -286,7 +286,7 @@ export const landings: Record<string, Landing> = {
     label: "Español",
     title: "Villas con piscina privada en Koh Samui | Magic Suites",
     description:
-      "Villas y suites en la ladera con vistas al mar en Koh Samui, cada una con piscina privada. 9,8 en Booking.com. Playa a 5 minutos: reserva directa al mejor precio.",
+      "Villas y suites en la ladera con vistas al mar en Koh Samui, la mayoría con piscina propia. 9,8 en Booking.com. Playa a 5 minutos: reserva directa al mejor precio.",
     eyebrow: "Koh Samui, Tailandia",
     h1: "Villas con piscina privada en Koh Samui",
     sub: "2 villas y 5 suites privadas, la mayoría con piscina propia, en una ladera sobre el golfo de Tailandia, a solo 5 minutos de la playa.",
@@ -320,7 +320,7 @@ export const landings: Record<string, Landing> = {
     label: "ไทย",
     title: "พูลวิลล่าส่วนตัว เกาะสมุย | Magic Suites",
     description:
-      "วิลล่าและห้องสวีทวิวทะเลบนเนินเขาเกาะสมุย ทุกหลังมีสระว่ายน้ำส่วนตัว คะแนน 9.8 บน Booking.com ห่างหาด 5 นาที จองตรงราคาดีที่สุด",
+      "วิลล่าและห้องสวีทวิวทะเลบนเนินเขาเกาะสมุย ส่วนใหญ่มีสระส่วนตัว คะแนน 9.8 บน Booking.com ห่างหาด 5 นาที จองตรงราคาดีที่สุด",
     eyebrow: "เกาะสมุย ประเทศไทย",
     h1: "พูลวิลล่าส่วนตัวบนเกาะสมุย",
     sub: "วิลล่า 2 หลังและสวีทส่วนตัว 5 ห้อง ส่วนใหญ่มีสระส่วนตัว ตั้งอยู่บนเนินเขามองเห็นอ่าวไทย ห่างจากหาดเพียง 5 นาที",

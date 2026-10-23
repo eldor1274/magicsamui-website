@@ -27,8 +27,8 @@ export const metadata: Metadata = {
   // No best-rate promise while our own engine (fee shown openly) serves /booking without the DIRECT code (BOOKING_DIRECT_PROMO=off).
   description:
     directCopySwapped()
-      ? "Hillside villas and suites in Koh Samui, each with its own private pool and sea view. Rated 9.8 on Booking.com. 5 min to the beach — book direct with live availability."
-      : "Hillside villas and suites in Koh Samui, each with its own private pool and sea view. Rated 9.8 on Booking.com. 5 min to the beach — book direct for our best rate.",
+      ? "Koh Samui villas and suites, most with a private pool: 3-bedroom stays for 6 and the whole villa, 5 bedrooms, sleeps 10. Book direct with live availability."
+      : "Koh Samui villas and suites, most with a private pool: 3-bedroom stays for 6 and the whole villa, 5 bedrooms, sleeps 10. Book direct for our best rate.",
   metadataBase: new URL(`https://${site.domain}`),
   openGraph: {
     type: "website",

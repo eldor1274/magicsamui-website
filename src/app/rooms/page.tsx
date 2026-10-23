@@ -2,14 +2,16 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import EldorWaitlist from "@/components/EldorWaitlist";
 import RoomCard from "@/components/RoomCard";
-import { getRoomBySlug } from "@/data/rooms";
+import { getRoomBySlug, rooms } from "@/data/rooms";
 import { villas } from "@/data/villas";
+
+/** The lowest reference rate on the site (the Garden Suite today), so the description can't go stale. */
+const fromThb = Math.min(...rooms.map((r) => r.priceThb));
 
 export const metadata: Metadata = {
   alternates: { canonical: "/rooms" },
   title: "Suites & Villas | Magic Suites & Villas",
-  description:
-    "Luxury private pool suites and villas in Koh Samui from ฿4,000 a night — Magic Villa's 4 private suites and the standalone Tuxedo Villa, every one with its own pool.",
+  description: `Suites and villas in Koh Samui from ฿${fromThb.toLocaleString("en-US")} a night, most with a private pool: 3-bedroom stays for 6 and the whole villa, 5 bedrooms, sleeps 10.`,
 };
 
 const magicVilla = villas.find((v) => v.slug === "magic-villa")!;
@@ -25,11 +27,12 @@ export default function RoomsPage() {
   return (
     <div className="mx-auto max-w-6xl px-5 py-16">
       <p className="text-sm uppercase tracking-[0.3em] text-pool">Magic Suites &amp; Villas</p>
-      <h1 className="mt-3 font-serif text-4xl text-ink">2 Villas, 4 Suites</h1>
+      <h1 className="mt-3 font-serif text-4xl text-ink">2 Villas, 5 Private Suites</h1>
       <p className="mt-4 max-w-2xl text-ink-soft">
-        Magic Villa is split into 4 individually bookable suites, each with
-        its own pool. Tuxedo is a standalone villa with 1, 2 and 3 bedroom
-        options. Every space is just minutes from Choeng Mon Beach — and two
+        Magic Villa is split into 4 individually bookable suites; all but the
+        Garden Suite have their own pool. Tuxedo is a standalone villa with 1,
+        2 and 3 bedroom options, plus the Seaview Unit, a private suite on its
+        lower level. Every space is just minutes from Choeng Mon Beach — and two
         brand-new villas, EL and DOR, are opening soon.
       </p>
 
