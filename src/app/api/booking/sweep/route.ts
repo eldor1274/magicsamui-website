@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { bearerMatches } from "@/lib/bearerAuth";
 import { getFulfilmentConfig, sweepSecretsOf } from "@/lib/booking/config";
 import { logEvent } from "@/lib/booking/routeUtils";
 import { getStripeFulfilmentDeps } from "@/lib/booking/runtime";
@@ -16,24 +16,12 @@ import { runSweep } from "@/lib/booking/sweep";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-function authorized(request: Request, secrets: string[]): boolean {
-  const header = request.headers.get("authorization") ?? "";
-  const given = Buffer.from(header.startsWith("Bearer ") ? header.slice(7).trim() : "", "utf8");
-  let ok = false;
-  for (const secret of secrets) {
-    const expected = Buffer.from(secret, "utf8");
-    // Every secret is compared (no early exit), each in constant time.
-    if (given.length === expected.length && timingSafeEqual(given, expected)) ok = true;
-  }
-  return ok;
-}
-
 const NO_STORE = { "Cache-Control": "no-store" };
 
 async function handle(request: Request): Promise<Response> {
   const secrets = sweepSecretsOf(process.env);
   if (secrets.length === 0) return Response.json({ ok: false, error: "sweeper_disabled" }, { status: 404, headers: NO_STORE });
-  if (!authorized(request, secrets)) return Response.json({ ok: false, error: "unauthorized" }, { status: 401, headers: NO_STORE });
+  if (!bearerMatches(request, secrets)) return Response.json({ ok: false, error: "unauthorized" }, { status: 401, headers: NO_STORE });
   const deps = getStripeFulfilmentDeps();
   if (!deps) {
     try {
