@@ -391,19 +391,28 @@ test("Beam copy (design S5.2): explainer, PromptPay hint, busy label, announceme
   }
 });
 
-test("results and room cards on Beam (design S5.2): '+ 3% payment processing fee by card or e-wallet (none with PromptPay)'", () => {
+test("results and room cards on Beam (design S5.2; round 7: short room-card lines): '+ 3% fee by card or e-wallet' and 'No fee with PromptPay'", () => {
+  // Round 7: the room cards' note is short lines (one long line squeezed the rate's description on a narrow card).
   assert.deepEqual(resultsFeeNotes(beamPage()), {
-    card: "+ 3% payment processing fee by card or e-wallet (none with PromptPay)",
+    card: ["+ 3% fee by card or e-wallet", "No fee with PromptPay"],
     results: "Prices are for the stay; a 3% payment processing fee is added when you pay by card or e-wallet (none with PromptPay).",
   });
-  assert.deepEqual(resultsFeeNotes(beamPage({ BEAM_EWALLETS: "off" }))?.card, "+ 3% payment processing fee by card (none with PromptPay)");
+  assert.deepEqual(resultsFeeNotes(beamPage({ BEAM_EWALLETS: "off" }))?.card, ["+ 3% fee by card", "No fee with PromptPay"]);
   assert.deepEqual(resultsFeeNotes(beamPage({ BEAM_PROMPTPAY: "off" })), {
-    card: "+ 3% payment processing fee",
+    card: ["+ 3% payment processing fee"],
     results: "Prices are for the stay; a 3% payment processing fee is added to every online payment.",
   });
-  assert.equal(resultsFeeNotes(beamPage({ BEAM_PROMPTPAY_FEE_PCT: "1" }))?.card, "+ 3% payment processing fee by card or e-wallet (1% with PromptPay)");
-  assert.equal(resultsFeeNotes(beamPage({ BOOKING_CARD_FEE_PCT: "0", BEAM_PROMPTPAY_FEE_PCT: "1" }))?.card, "+ 1% payment processing fee with PromptPay (none by card or e-wallet)");
+  assert.deepEqual(resultsFeeNotes(beamPage({ BEAM_PROMPTPAY_FEE_PCT: "1" }))?.card, ["+ 3% fee by card or e-wallet", "+ 1% fee with PromptPay"]);
+  assert.deepEqual(resultsFeeNotes(beamPage({ BEAM_PROMPTPAY_FEE_PCT: "3" }))?.card, ["+ 3% payment processing fee"], "the same fee for both: one line");
+  assert.deepEqual(resultsFeeNotes(beamPage({ BOOKING_CARD_FEE_PCT: "0", BEAM_PROMPTPAY_FEE_PCT: "1" }))?.card, ["+ 1% fee with PromptPay", "No fee by card or e-wallet"]);
   assert.deepEqual(resultsFeeNotes(beamPage({ BOOKING_CARD_FEE_PCT: "0" })), { card: null, results: null });
+  // Every line stays short (at most 28 characters, the longest being '+ 3% fee by card or e-wallet'), names no Stripe, promises no receipt.
+  for (const [name, make] of Object.entries(BEAM_PAGES)) {
+    for (const line of resultsFeeNotes(make())?.card ?? []) {
+      assert.ok(line.length <= 28, `${name}: ${line}`);
+      assert.doesNotMatch(line, /Stripe|receipt/i, name);
+    }
+  }
   // The card/e-wallet fee is what the results price with (the same number as cardFeePct on a Beam config).
   assert.equal(pagePricing(beamPage(), null).cardFeePct, beamPage().cardFeePct);
 });
@@ -900,5 +909,46 @@ test("the results header (round 7): every Beam page says resultsFeeNotes(config)
     const c = config(env);
     const expected = c.cardFeePct > 0 ? `Prices are for the stay; a ${c.cardFeePct}% payment processing fee is added to every online payment.` : null;
     assert.equal(header(await renderResults(c)), expected, name);
+  }
+});
+
+/** The rate rows of a rendered results list: each row's grid, its price column and the fee lines under the price. */
+function rateRows(html: string) {
+  const rows = [...html.matchAll(/<li class="border-b border-\(--bk-border\) last:border-b-0"><div class="([^"]*)">([\s\S]*?)<\/li>/g)];
+  return rows.map(([, grid, body]) => {
+    const price = /<div class="col-span-2 flex items-center justify-between gap-4 sm:contents"><div class="([^"]*)">([\s\S]*?)<\/div><button/.exec(body);
+    assert.ok(price, "a price column");
+    const lines = [...price[2].matchAll(/<p class="text-xs text-\(--bk-text-muted\)">([^<]*)<\/p>/g)].map((m) => m[1]);
+    return { grid, priceClass: price[1], lines };
+  });
+}
+
+const STRIPE_ROW_GRID = "grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-3 px-4 py-3.5 sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]";
+const BEAM_ROW_GRID = "grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-3 px-4 py-3.5 sm:grid-cols-[auto_minmax(7rem,1fr)_auto_auto]";
+
+test("room cards (round 7): every Beam page shows resultsFeeNotes' short lines under each price, in a price column of at most 11rem next to a description of at least 7rem; Stripe and the demo keep their row and '+ X% payment processing fee'", async () => {
+  for (const [name, make] of Object.entries(BEAM_PAGES)) {
+    const c = make();
+    const rows = rateRows(await renderResults(c));
+    assert.ok(rows.length > 0, name);
+    const expected = (resultsFeeNotes(c)?.card ?? []).map(esc);
+    for (const row of rows) {
+      assert.equal(row.grid, BEAM_ROW_GRID, name);
+      assert.equal(row.priceClass, "sm:max-w-44 sm:text-right", name);
+      assert.match(row.lines[0], /^\d+ Nights?$/, name);
+      assert.deepEqual(row.lines.slice(1), expected, name);
+      assert.ok(!row.lines.some((l) => l.includes("payment processing fee by")), `${name}: never the long line`);
+    }
+  }
+  const zero = rateRows(await renderResults(beamPage({ BOOKING_CARD_FEE_PCT: "0" })));
+  assert.ok(zero.length > 0);
+  for (const row of zero) assert.deepEqual(row.lines.slice(1), [], "no fee: no line");
+  for (const [name, env] of Object.entries(STRIPE_DEMO_ENVS)) {
+    const c = config(env);
+    for (const row of rateRows(await renderResults(c))) {
+      assert.equal(row.grid, STRIPE_ROW_GRID, name);
+      assert.equal(row.priceClass, "sm:text-right", name);
+      assert.deepEqual(row.lines.slice(1), c.cardFeePct > 0 ? [`+ ${c.cardFeePct}% payment processing fee`] : [], name);
+    }
   }
 });

@@ -605,7 +605,14 @@ test("booking page wiring (design S5.2): Pay sends the Beam method only and wait
   assert.ok(results.includes("const feeNotes = resultsFeeNotes(availability.config);"));
   assert.ok(results.includes("feeNote={feeNotes ? feeNotes.card : undefined}"));
   const card = repoSrc("components/booking/results/RoomOfferCard.tsx");
-  assert.match(card, /\{feeNote !== undefined\s*\? feeNote && <p className="text-xs text-\(--bk-text-muted\)">\{feeNote\}<\/p>\s*: feePct > 0 && <p className="text-xs text-\(--bk-text-muted\)">\+ \{feePct\}% payment processing fee<\/p>\}/);
+  // Round 7: Beam's note is short lines, and its row keeps the description at 7rem or more (the note wraps instead).
+  assert.match(
+    card,
+    /\{feeNote !== undefined\s*\? feeNote\?\.map\(\(line\) => \(\s*<p key=\{line\} className="text-xs text-\(--bk-text-muted\)">\s*\{line\}\s*<\/p>\s*\)\)\s*: feePct > 0 && <p className="text-xs text-\(--bk-text-muted\)">\+ \{feePct\}% payment processing fee<\/p>\}/,
+  );
+  assert.ok(card.includes("const beamNote = feeNote !== undefined;"));
+  assert.ok(card.includes('<div className={beamNote ? BEAM_RATE_ROW_GRID : "grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-3 px-4 py-3.5 sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]"}>'));
+  assert.ok(card.includes('<div className={beamNote ? BEAM_RATE_PRICE : "sm:text-right"}>'));
   const modal = repoSrc("components/booking/checkout/SecurePaymentModal.tsx");
   assert.ok(modal.includes("const beam = config ? beamSecurePayment(config) : null;"));
 });

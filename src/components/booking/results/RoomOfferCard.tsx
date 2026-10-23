@@ -52,11 +52,19 @@ export interface RoomOfferCardProps {
    */
   feePct?: number;
   /**
-   * Beam (design S5.2): the line under each price instead ("+ 3% payment processing fee by card or e-wallet (none with
-   * PromptPay)"; null = no line). Undefined: "+ {feePct}% payment processing fee".
+   * Beam (design S5.2): the short lines under each price instead (round 7: "+ 3% fee by card or e-wallet", "No fee with
+   * PromptPay"; null = none), and the price column wraps them rather than squeeze the rate's description. Undefined:
+   * "+ {feePct}% payment processing fee", as before.
    */
-  feeNote?: string | null;
+  feeNote?: readonly string[] | null;
 }
+
+/**
+ * Beam's rate row (round 7): the description column keeps at least 7rem and the price column at most 11rem, so a fee
+ * note wraps instead of squeezing the description (it read "Ro / o." on a 400 px card). Stripe and the demo keep theirs.
+ */
+const BEAM_RATE_ROW_GRID = "grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-3 px-4 py-3.5 sm:grid-cols-[auto_minmax(7rem,1fr)_auto_auto]";
+const BEAM_RATE_PRICE = "sm:max-w-44 sm:text-right";
 
 export default function RoomOfferCard({
   room,
@@ -257,7 +265,7 @@ interface RateRowProps {
   promo: { code: string; pct: number } | null;
   directCode: string | null;
   feePct: number;
-  feeNote: string | null | undefined;
+  feeNote: readonly string[] | null | undefined;
   onShowPolicy: () => void;
   onAdd: (adults: number) => void;
 }
@@ -278,10 +286,12 @@ function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason,
   // Same satang rounding as the quote's promo line (quote.ts), so card, summary and server agree.
   const discounted = promo ? total - percentOf(total, promo.pct) : total;
   const wasTotal = discountLabel !== null ? listTotal : promo ? total : null;
+  // Beam (a page that asks how to pay): its fee lines and the row's layout guard; Stripe and the demo as before.
+  const beamNote = feeNote !== undefined;
 
   return (
     <li className="border-b border-(--bk-border) last:border-b-0">
-      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-3 px-4 py-3.5 sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]">
+      <div className={beamNote ? BEAM_RATE_ROW_GRID : "grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-3 px-4 py-3.5 sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]"}>
         {plan.image ? (
           <button
             type="button"
@@ -311,7 +321,7 @@ function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason,
         </div>
 
         <div className="col-span-2 flex items-center justify-between gap-4 sm:contents">
-          <div className="sm:text-right">
+          <div className={beamNote ? BEAM_RATE_PRICE : "sm:text-right"}>
             {wasTotal !== null && (
               <p className="bk-price text-xs leading-tight text-(--bk-text-subtle) line-through">
                 <span className="bk-sr-only">Was </span>
@@ -333,7 +343,11 @@ function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason,
               </p>
             )}
             {feeNote !== undefined
-              ? feeNote && <p className="text-xs text-(--bk-text-muted)">{feeNote}</p>
+              ? feeNote?.map((line) => (
+                  <p key={line} className="text-xs text-(--bk-text-muted)">
+                    {line}
+                  </p>
+                ))
               : feePct > 0 && <p className="text-xs text-(--bk-text-muted)">+ {feePct}% payment processing fee</p>}
           </div>
           <button

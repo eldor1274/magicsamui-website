@@ -318,8 +318,11 @@ export function feeLineHidden(config: MethodCopyConfig, quote: { cardFeeSatang: 
 
 /** The fee notes of the results step on a Beam method-choice page (null fields: no fee to mention). */
 export interface ResultsFeeNotes {
-  /** Under each rate's price: "+ 3% payment processing fee by card or e-wallet (none with PromptPay)". */
-  card: string | null;
+  /**
+   * Under each rate's price, one short line each (round 7: a long single line squeezed the rate's description on a
+   * narrow card): ["+ 3% fee by card or e-wallet", "No fee with PromptPay"]. null: no fee to mention.
+   */
+  card: string[] | null;
   /** The results header: "Prices are for the stay; a 3% payment processing fee is added when you pay by card or e-wallet (none with PromptPay)." */
   results: string | null;
 }
@@ -336,17 +339,17 @@ export function resultsFeeNotes(config: MethodCopyConfig): ResultsFeeNotes | nul
   const words = cardGroupWords(f);
   if (card > 0) {
     if (pp === null || pp === card) {
-      return { card: `+ ${card}% payment processing fee`, results: `Prices are for the stay; a ${card}% payment processing fee is added to every online payment.` };
+      return { card: [`+ ${card}% payment processing fee`], results: `Prices are for the stay; a ${card}% payment processing fee is added to every online payment.` };
     }
     const other = pp === 0 ? "none" : `${pp}%`;
     return {
-      card: `+ ${card}% payment processing fee by ${words} (${other} with PromptPay)`,
+      card: [`+ ${card}% fee by ${words}`, pp === 0 ? "No fee with PromptPay" : `+ ${pp}% fee with PromptPay`],
       results: `Prices are for the stay; a ${card}% payment processing fee is added when you pay by ${words} (${other} with PromptPay).`,
     };
   }
   if (pp !== null && pp > 0) {
     return {
-      card: `+ ${pp}% payment processing fee with PromptPay (none by ${words})`,
+      card: [`+ ${pp}% fee with PromptPay`, `No fee by ${words}`],
       results: `Prices are for the stay; a ${pp}% payment processing fee is added when you pay with Thai PromptPay QR (none by ${words}).`,
     };
   }
