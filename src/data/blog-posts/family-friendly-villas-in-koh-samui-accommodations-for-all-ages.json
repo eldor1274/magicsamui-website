@@ -114,6 +114,53 @@
         "Mosquito repellent — use DEET-based repellent at dawn and dusk. Dengue fever exists on the island though risk is low for villa-based visitors.",
         "Medical care — Bangkok Hospital Samui near Chaweng provides excellent paediatric care. Keep the emergency number saved."
       ]
+    },
+    {
+      "type": "h2",
+      "text": "Where to Stay with Us"
+    },
+    {
+      "type": "p",
+      "text": "Magic Suites & Villas is on a hillside in Plai Laem, minutes from Choeng Mon Beach. For families we have 3-bedroom stays for 6 guests and the entire Magic Villa for up to 10, each with a kitchen and a private pool:"
+    },
+    {
+      "type": "ul",
+      "items": [
+        {
+          "label": "The entire Magic Villa",
+          "href": "/rooms/magic-1-villa",
+          "text": "5 bedrooms, 4 private pools, sleeps 10. All four suites across three floors, from ฿40,000 a night."
+        },
+        {
+          "label": "Tower Club Hangover Suite",
+          "href": "/rooms/tower-club-3br",
+          "text": "3 bedrooms for 6 guests, with an infinity pool and a jet plunge pool, from ฿18,000 a night."
+        },
+        {
+          "label": "Island Views & Sunrise 3 Bedroom Suite",
+          "href": "/rooms/island-view-3br",
+          "text": "3 bedrooms for 6 guests, with jet plunge pools, from ฿18,000 a night. It shares the Magic Seaview level with Tower Club, so only one of the two can be booked for any given night."
+        },
+        {
+          "label": "Tuxedo Villa, 3 bedrooms",
+          "href": "/rooms/tuxedo-3br",
+          "text": "the whole Tuxedo villa plus its Seaview lower level, for 6 guests, from ฿25,000 a night. On request, not bookable online."
+        },
+        {
+          "label": "Book online",
+          "href": "/booking",
+          "text": "live availability and prices for the entire Magic Villa, Tower Club and Island View."
+        },
+        {
+          "label": "Message us on WhatsApp",
+          "href": "https://wa.me/66952466011",
+          "text": "to ask for the Tuxedo Villa with 3 bedrooms, or about children under 12 before you book."
+        }
+      ]
+    },
+    {
+      "type": "p",
+      "text": "Travelling with children under 12? Please message us before booking: children under 12 stay on request, accompanied by an adult."
     }
   ]
 }
