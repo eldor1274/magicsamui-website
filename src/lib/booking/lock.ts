@@ -144,6 +144,18 @@ export const keys = {
    * once it is BEAM_WATCH_REREAD_MS old (round 7). Dropped with the link's late-watch entry.
    */
   beamLinksWatchRead: (scope: string) => `msv:${scope}:beam:links:watchread`,
+  /**
+   * The support index (payments/beamSupport.ts, read by the WhatsApp bot's payment lookup): a booking ref -> its
+   * link, rooms and creation time (JSON BeamSupportEntry, SUPPORT_INDEX_TTL_SECONDS). Written at Beam checkout only.
+   */
+  beamSupportRef: (scope: string, ref: string) => `msv:${scope}:beam:support:ref:${ref}`,
+  /**
+   * The support index: a keyed one-way code of the guest's email address or phone number (never the value itself) ->
+   * that guest's recent Beam attempts (JSON BeamSupportEntry[], newest first, capped). Written at Beam checkout only.
+   */
+  beamSupportContact: (scope: string, kind: "email" | "phone", hash: string) => `msv:${scope}:beam:support:${kind}:${hash}`,
+  /** The payment lookup's fixed-window request counters: per keyed client IP code, and 'all'. */
+  beamSupportRate: (scope: string, who: string) => `msv:${scope}:beam:support:rate:${who}`,
 };
 
 /**

@@ -161,7 +161,7 @@ test("every Stripe key name, TTL and hold suffix is byte-identical; the Beam key
     [
       "beamPayment", "beamCharge", "beamPrimary", "beamLinksOpen", "beamLinksWatch", "beamReported", "beamTxn", "beamBadSignatures",
       "beamRateLimited", "beamDisableFail", "beamReadFailures", "beamPageFail", "beamPaused", "beamDeepScan", "beamSweepFailures",
-      "beamLinksPending", "beamLinksWatchRead",
+      "beamLinksPending", "beamLinksWatchRead", "beamSupportRef", "beamSupportContact", "beamSupportRate",
     ],
   );
   assert.equal(LOCK_TTL_SECONDS, 120);

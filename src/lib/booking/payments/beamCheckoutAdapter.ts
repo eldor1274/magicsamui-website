@@ -26,8 +26,16 @@
 // - The hold's Cloudbeds note says when an unpaid hold goes, the PromptPay/wallet grace included, and the crash
 //   alert says the page was 'disabled' (never Stripe's 'expired').
 //
+// - The support index (payments/beamSupport.ts, read by the WhatsApp bot's payment lookup): afterCreate, once the
+//   record and the links-open entry are written, indexes the attempt under keyed one-way codes of the guest's email
+//   address and phone number (computed in createPage; the values themselves are never kept), best effort: a Redis
+//   error is logged (beam_support_index_failed, no personal data) and the checkout goes on; it waits at most
+//   SUPPORT_INDEX_WAIT_MS for the write (beam_support_index_slow), and skips it when less than
+//   SUPPORT_INDEX_MIN_REMAINING_MS is left of the deadline (beam_support_index_skipped). Stripe has no such index.
+//
 // No personal data reaches Beam, Redis or the logs from here: the note and the record carry booking facts and
-// yes/no flags only; the guest's name, email, phone and requests never leave the core.
+// yes/no flags only, and the support index one-way codes; the guest's name, email, phone and requests never leave
+// the core.
 
 import { BEAM_MAX_CHARGE_SATANG, beamErrorInfo, buildPaymentLinkRequest, createPaymentLink, isBeamHostedPageUrl } from "../beam.ts";
 import type { BeamCallOptions, BeamErrorInfo } from "../beam.ts";
@@ -46,6 +54,8 @@ import { beamGateway, trackOpenLink } from "./beamGateway.ts";
 import type { BeamGatewayDeps } from "./beamGateway.ts";
 import { buildBeamNote, writeRecord } from "./beamRecord.ts";
 import type { BeamNote, PaymentRecord } from "./beamRecord.ts";
+import { SUPPORT_INDEX_MIN_REMAINING_MS, SUPPORT_INDEX_WAIT_MS, supportEntry, supportIndexWrite, writeSupportIndex } from "./beamSupport.ts";
+import type { SupportIndexWrite } from "./beamSupport.ts";
 
 /** Failed create calls in a row (inside one window) that pause Beam checkout. */
 export const BEAM_PAGE_FAIL_PAUSE_COUNT = 3;
@@ -91,6 +101,44 @@ export function beamCheckoutAdapter(deps: BeamGatewayDeps, beam: BeamSettings, a
   const gw = beamGateway({ ...deps, beam });
   /** The record of each link this adapter created, written by afterCreate. */
   const records = new Map<string, PaymentRecord>();
+  /** The support index write of each link this adapter created (one-way codes only), written by afterCreate. */
+  const supportWrites = new Map<string, SupportIndexWrite>();
+
+  /** A log line's word for an error: its name only (a Redis message may quote a key). */
+  const errorName = (e: unknown): string => (e instanceof Error ? e.name : "unknown");
+
+  /**
+   * The support index write (best effort, never throws): skipped near the deadline, waited for at most
+   * SUPPORT_INDEX_WAIT_MS (the write keeps running), a failure logged.
+   */
+  async function indexForSupport(key: string): Promise<void> {
+    const write = supportWrites.get(key);
+    if (!write) return;
+    const ref = write.entry.ref;
+    try {
+      const remainingMs = deps.deadlineMs !== undefined ? deps.deadlineMs - clock() : Number.POSITIVE_INFINITY;
+      if (remainingMs < SUPPORT_INDEX_MIN_REMAINING_MS) {
+        deps.log("beam_support_index_skipped", { ref, remainingMs: Math.round(remainingMs) });
+        return;
+      }
+      const written = writeSupportIndex(deps.kv, write).then(
+        () => "written" as const,
+        (e: unknown) => {
+          deps.log("beam_support_index_failed", { ref, error: errorName(e) });
+          return "failed" as const;
+        },
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const slow = new Promise<"slow">((resolve) => {
+        timer = setTimeout(() => resolve("slow"), SUPPORT_INDEX_WAIT_MS);
+      });
+      const outcome = await Promise.race([written, slow]);
+      clearTimeout(timer);
+      if (outcome === "slow") deps.log("beam_support_index_slow", { ref, waitedMs: SUPPORT_INDEX_WAIT_MS });
+    } catch (e) {
+      deps.log("beam_support_index_failed", { ref, error: errorName(e) });
+    }
+  }
 
   /** Counts a failed create call; the third in a row pauses Beam checkout and tells the owner. Never throws. */
   async function countPageFailure(info: BeamErrorInfo): Promise<void> {
@@ -125,7 +173,7 @@ export function beamCheckoutAdapter(deps: BeamGatewayDeps, beam: BeamSettings, a
       return fail(503, { error: "payment_unavailable", message: BEAM_PAUSED_MESSAGE });
     },
 
-    async createPage({ ref, reservationId, quote, token, basePath, guestFlags, budgetMs, nonce }) {
+    async createPage({ ref, reservationId, quote, guest, token, basePath, guestFlags, budgetMs, nonce }) {
       // The second check of the BEAM_PROMPTPAY switch (S4.6 refuses first): no link for a group the checkout does not take.
       if (!payMethodOffered(config, payMethod)) throw new RangeError(`Beam ${String(payMethod)} payments are switched off`);
       // Exactly the link body's expiresAt: the record and the note carry it (the gateway's fallbackExpiresAtMs).
@@ -181,6 +229,13 @@ export function beamCheckoutAdapter(deps: BeamGatewayDeps, beam: BeamSettings, a
       await deps.kv.del(keys.beamPageFail(scope)).catch(() => undefined);
       const key = beamKeyOf(link.id);
       records.set(key, { v: 1, linkId: link.id, merchantId: beam.merchantId, createdAt: at.nowMs, ...facts });
+      // The support index's codes, computed now so the guest's details are not kept (best effort: never fails the page).
+      try {
+        const entry = supportEntry(ref, link.id, at.nowMs, quote.lines.map((l) => l.slug));
+        if (entry) supportWrites.set(key, supportIndexWrite(mode, config.tokenSecret, entry, guest));
+      } catch (e) {
+        deps.log("beam_support_index_failed", { ref, error: errorName(e) });
+      }
       return { key, paymentId: link.id, redirectUrl: link.url };
     },
 
@@ -193,6 +248,8 @@ export function beamCheckoutAdapter(deps: BeamGatewayDeps, beam: BeamSettings, a
       if (!record) throw new Error("Beam checkout: no payment record for the page");
       await writeRecord(deps.kv, record);
       await trackOpenLink(deps.kv, mode, record.linkId, record.expiresAt);
+      // Last, and never throws: the payment must not depend on the support index.
+      await indexForSupport(page.key);
     },
 
     cancelPage: (key) => gw.cancel(key),
