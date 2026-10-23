@@ -22,10 +22,12 @@ import { promoCodeHint, promoInputOffered } from "@/lib/booking/quote";
 import DesktopVideo from "@/components/DesktopVideo";
 import ReviewsSection from "@/components/ReviewsSection";
 import RoomCard from "@/components/RoomCard";
-import { rooms } from "@/data/rooms";
+import { getRoomBySlug, rooms, type Room } from "@/data/rooms";
 import { reviewStats } from "@/data/reviews";
 import { getAllBlogPosts } from "@/data/blog";
 import { LANG_ALTERNATES, OWN_ENGINE_PERK } from "@/data/landings";
+import { site } from "@/data/site";
+import { isBookableSlug, sharedUnits } from "@/lib/booking/catalogue";
 import { Star } from "lucide-react";
 
 const featuredRooms = rooms.filter(
@@ -39,6 +41,67 @@ const featuredRooms = rooms.filter(
       "tuxedo-3br",
     ].includes(r.slug)
 );
+
+/**
+ * "Families & groups": the stays for 6 and 10 guests that the cards above leave out. Bedrooms,
+ * guests, prices and whether a stay books online all come from the room data and the booking
+ * catalogue, so this block can't drift from the room pages.
+ */
+const towerClub = getRoomBySlug("tower-club-3br")!;
+const islandView = getRoomBySlug("island-view-3br")!;
+const tuxedo3br = getRoomBySlug("tuxedo-3br")!;
+const wholeMagicVilla = getRoomBySlug("magic-1-villa")!;
+
+const thb = (n: number) => `฿${n.toLocaleString("en-US")}`;
+const sizeLine = (r: Room) => `${r.bedrooms} bedrooms · up to ${r.guests} guests`;
+// Tower Club and Island View both use the Magic Seaview level, so only one of them sells per night.
+const threeBedroomsShareALevel = sharedUnits(towerClub.slug, islandView.slug).length > 0;
+
+const groupStays: {
+  key: string;
+  label: string;
+  title: string;
+  facts: string;
+  text: string;
+  fromThb: number;
+  links: Room[];
+  bookable: boolean;
+}[] = [
+  {
+    key: "magic-3br",
+    label: "Magic Villa",
+    title: `${towerClub.bedrooms} bedrooms for ${towerClub.guests} guests`,
+    facts: "Tower Club or Island View",
+    text: `Both with private pools and sea views.${
+      threeBedroomsShareALevel
+        ? " They share the Magic Seaview level, so Magic Villa has one 3-bedroom stay per night."
+        : ""
+    }`,
+    fromThb: Math.min(towerClub.priceThb, islandView.priceThb),
+    links: [towerClub, islandView],
+    bookable: isBookableSlug(towerClub.slug) && isBookableSlug(islandView.slug),
+  },
+  {
+    key: "tuxedo-3br",
+    label: "Tuxedo Villa",
+    title: `Tuxedo Villa, ${tuxedo3br.bedrooms} bedrooms for ${tuxedo3br.guests}`,
+    facts: sizeLine(tuxedo3br),
+    text: "The whole Tuxedo villa with its waterfall infinity pool, plus the Seaview lower level.",
+    fromThb: tuxedo3br.priceThb,
+    links: [tuxedo3br],
+    bookable: isBookableSlug(tuxedo3br.slug),
+  },
+  {
+    key: "magic-1-villa",
+    label: "Magic Villa",
+    title: "The entire Magic Villa",
+    facts: `${wholeMagicVilla.bedrooms} bedrooms · ${wholeMagicVilla.poolType} · sleeps ${wholeMagicVilla.guests}`,
+    text: "All four suites across three floors, for your group only.",
+    fromThb: wholeMagicVilla.priceThb,
+    links: [wholeMagicVilla],
+    bookable: isBookableSlug(wholeMagicVilla.slug),
+  },
+];
 
 const directPerks = [
   {
@@ -255,6 +318,52 @@ export default function Home() {
           <Link href="/rooms" className="flex items-center gap-2 text-sm text-pool">
             View all <ArrowRight size={16} />
           </Link>
+        </div>
+      </section>
+
+      <section id="families-groups" className="mx-auto max-w-6xl px-5 pb-16">
+        <p className="text-sm uppercase tracking-[0.3em] text-pool">Travelling together</p>
+        <h2 className="mt-3 font-serif text-3xl text-ink">Families &amp; Groups</h2>
+        <p className="mt-3 max-w-2xl text-ink-soft">
+          Stay together on one hillside: 3-bedroom stays for {towerClub.guests} guests, or the
+          entire Magic Villa for up to {wholeMagicVilla.guests}.
+        </p>
+        <div className="mt-8 grid gap-6 md:grid-cols-3">
+          {groupStays.map((stay) => (
+            <div key={stay.key} className="flex flex-col rounded-2xl bg-stone-100 p-6">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-pool">{stay.label}</p>
+              <h3 className="mt-2 font-serif text-xl text-ink">{stay.title}</h3>
+              <p className="mt-1 text-sm font-medium text-ink">{stay.facts}</p>
+              <p className="mt-3 text-sm leading-relaxed text-ink-soft">{stay.text}</p>
+              <div className="mt-3 flex flex-col gap-1.5">
+                {stay.links.map((room) => (
+                  <Link
+                    key={room.slug}
+                    href={`/rooms/${room.slug}`}
+                    className="inline-flex items-center gap-1.5 text-sm text-pool hover:underline"
+                  >
+                    {room.shortName} <ArrowRight size={14} />
+                  </Link>
+                ))}
+              </div>
+              <p className="mt-auto pt-5 font-serif text-lg text-pool">
+                From {thb(stay.fromThb)}
+                <span className="text-xs text-ink-soft"> / night{stay.bookable ? "" : " · on request"}</span>
+              </p>
+              <div className="mt-5">
+                {stay.bookable ? (
+                  <BookNowButton className="w-full">Book online</BookNowButton>
+                ) : (
+                  <a
+                    href={site.whatsapp}
+                    className="inline-flex w-full items-center justify-center rounded-full border border-pool px-6 py-3 text-sm font-medium text-pool transition-colors hover:bg-pool hover:text-white"
+                  >
+                    Ask on WhatsApp
+                  </a>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       </section>
 
