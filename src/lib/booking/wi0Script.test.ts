@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolveCloudbedsPaymentMethod } from "./config.ts";
 
 const SCRIPT = fileURLToPath(new URL("../../../scripts/cloudbeds-wi0-check.mjs", import.meta.url));
 const CHECK_IN = "2027-12-05";
@@ -15,7 +16,10 @@ const STAY = ["2027-12-05", "2027-12-06", "2027-12-07"];
 type Json = Record<string, unknown>;
 
 /** Runs the script with every Cloudbeds call answered from `answers` (by endpoint; getRatePlans by roomTypeID). */
-function runScript(answers: { getAvailableRoomTypes: Json; getRatePlans?: Record<string, Json>; getSources?: Json }, extraEnv: Record<string, string> = {}): string {
+function runScript(
+  answers: { getAvailableRoomTypes: Json; getRatePlans?: Record<string, Json>; getSources?: Json; getPaymentMethods?: Json },
+  extraEnv: Record<string, string> = {},
+): string {
   const stub = `
 const ANSWERS = ${JSON.stringify(answers)};
 globalThis.fetch = async (url, init) => {
@@ -158,4 +162,169 @@ test("WI-0 section 4b reads getSources rows nested inside data, as live on 2026-
   assert.match(s4b, /CLOUDBEDS_SOURCE_ID="s-1192402": "magicsamui\.com own booking page" \(s-1192402\) active; exclusive % = 0%/);
   assert.doesNotMatch(s4b, /sourceID=null/);
   assert.doesNotMatch(s4b, /NOT FOUND/);
+});
+
+/* ---------------- section 6b: the custom 'Beam(website)' payment method (design S6.1) ---------------- */
+
+const ONE_ROOM: Json = {
+  success: true,
+  data: [{ propertyID: "235064", propertyCurrency: { currencyCode: "THB" }, propertyRooms: [row("462958", "default", null)] }],
+};
+
+/** getPaymentMethods as the property lists them (live 2026-10-06, shortened), plus `extra` rows. */
+function paymentMethods(extra: Json[] = []): Json {
+  const m = (method: string, code: string, name: string) => ({ method, code, name });
+  return {
+    success: true,
+    data: {
+      methods: [
+        m("credit", "cards", "Credit Card"),
+        m("bank_transfer", "ebanking", "Bank Transfer"),
+        m("cash", "cash", "Cash"),
+        m("Stripe(website)", "Stripe(website)", "Stripe (website)"),
+        ...extra,
+      ],
+      gateway: { name: "StripeConnectGateway", currency: "THB" },
+    },
+  };
+}
+
+const BEAM_ROW: Json = { method: "Beam(website)", code: "Beam(website)", name: "Beam (website)" };
+
+function section6b(out: string): string {
+  const start = out.indexOf("=== 6b.");
+  const end = out.indexOf("=== 7.");
+  assert.ok(start >= 0 && end > start, "section 6b printed");
+  return out.slice(start, end);
+}
+
+/** The line a method variable's verdict is printed on. */
+const verdictOf = (text: string, name: string) => text.split("\n").find((l) => l.trim().startsWith(`${name}=`) || l.trim().startsWith(`${name}:`)) ?? "";
+
+test("WI-0 section 6b finds the custom Beam method and prints its exact method value; the Beam variables get the engine's verdicts", () => {
+  const out = runScript(
+    { getAvailableRoomTypes: ONE_ROOM, getPaymentMethods: paymentMethods([BEAM_ROW]) },
+    { CLOUDBEDS_STRIPE_PAYMENT_METHOD: "Stripe(website)", CLOUDBEDS_BEAM_PAYMENT_METHOD: "Beam(website)", CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD: " " },
+  );
+  const s6b = section6b(out);
+  assert.match(s6b, /Beam\(website\) \| Beam\(website\) \| Beam \(website\)/);
+  assert.match(s6b, /-> custom Beam method found: method value "Beam\(website\)" - copy it EXACTLY into CLOUDBEDS_BEAM_PAYMENT_METHOD/);
+  assert.match(verdictOf(s6b, "CLOUDBEDS_BEAM_PAYMENT_METHOD"), /^ *CLOUDBEDS_BEAM_PAYMENT_METHOD="Beam\(website\)": EXACT \(Beam\(website\) \| Beam\(website\) \| Beam \(website\)\)$/);
+  // An empty (or blank) TEST variable is not set: the engine records Beam test money under the live variable's method.
+  assert.match(verdictOf(s6b, "CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD"), /: empty, so the engine uses CLOUDBEDS_BEAM_PAYMENT_METHOD\.$/);
+  // Section 6 (Stripe) reads as before.
+  const s6 = out.slice(out.indexOf("=== 6."), out.indexOf("=== 6b."));
+  assert.match(s6, /CLOUDBEDS_STRIPE_PAYMENT_METHOD="Stripe\(website\)": EXACT \(Stripe\(website\) \| Stripe\(website\) \| Stripe \(website\)\)/);
+  assert.match(s6, /CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD: not set in this shell/);
+  assert.doesNotMatch(s6, /CLOUDBEDS_BEAM/);
+  assert.match(out, /Nothing was written to Cloudbeds\./);
+});
+
+test("WI-0 section 6b keeps the exact case, refuses built-in methods and the Stripe method (naming the Stripe variable), and names a Stripe row", () => {
+  const out = runScript(
+    { getAvailableRoomTypes: ONE_ROOM, getPaymentMethods: paymentMethods([BEAM_ROW]) },
+    {
+      CLOUDBEDS_STRIPE_PAYMENT_METHOD: "Stripe(website)",
+      CLOUDBEDS_BEAM_PAYMENT_METHOD: "beam(website)",
+      CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD: "CASH",
+    },
+  );
+  const s6b = section6b(out);
+  assert.match(verdictOf(s6b, "CLOUDBEDS_BEAM_PAYMENT_METHOD"), /: NEAR, not exact - candidates: Beam\(website\) \| Beam\(website\) \| Beam \(website\) \(copy the exact method value\)$/);
+  assert.match(
+    verdictOf(s6b, "CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD"),
+    /: BUILT-IN NOT ALLOWED \("CASH" is a Cloudbeds built-in method; use the custom 'Beam\(website\)' method\)$/,
+  );
+
+  const clash = section6b(
+    runScript(
+      { getAvailableRoomTypes: ONE_ROOM, getPaymentMethods: paymentMethods([BEAM_ROW]) },
+      {
+        CLOUDBEDS_STRIPE_PAYMENT_METHOD: "Stripe(website)",
+        CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD: "StripeTest(website)",
+        CLOUDBEDS_BEAM_PAYMENT_METHOD: "STRIPE(WEBSITE)",
+        CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD: " stripetest(website) ",
+      },
+    ),
+  );
+  assert.match(
+    verdictOf(clash, "CLOUDBEDS_BEAM_PAYMENT_METHOD"),
+    /: STRIPE METHOD NOT ALLOWED \("STRIPE\(WEBSITE\)" is the Stripe method in CLOUDBEDS_STRIPE_PAYMENT_METHOD; Beam money must be recorded under the custom 'Beam\(website\)' method\)$/,
+  );
+  assert.match(verdictOf(clash, "CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD"), /: STRIPE METHOD NOT ALLOWED \("stripetest\(website\)" is the Stripe method in CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD;/);
+
+  // Without the Stripe variables in the shell the engine can't tell, but the script still names Cloudbeds' Stripe row.
+  const noVars = section6b(runScript({ getAvailableRoomTypes: ONE_ROOM, getPaymentMethods: paymentMethods([BEAM_ROW]) }, { CLOUDBEDS_BEAM_PAYMENT_METHOD: "Stripe(website)" }));
+  assert.match(
+    verdictOf(noVars, "CLOUDBEDS_BEAM_PAYMENT_METHOD"),
+    /: EXACT \(Stripe\(website\) \| Stripe\(website\) \| Stripe \(website\)\) {2}<- that is a Stripe method of Cloudbeds' list: Beam money belongs under the custom Beam method$/,
+  );
+  assert.match(verdictOf(noVars, "CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD"), /CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD: not set in this shell/);
+});
+
+test("WI-0 section 6b says when Cloudbeds has no custom Beam method, and prints a Beam method's value whatever Cloudbeds assigned", () => {
+  // A built-in method whose display name mentions Beam is never the custom method (Beam money can't go there).
+  const none = section6b(
+    runScript({ getAvailableRoomTypes: ONE_ROOM, getPaymentMethods: paymentMethods([{ method: "pay_pal", code: "pay_pal", name: "PayPal (not Beam)" }]) }),
+  );
+  assert.doesNotMatch(none, /pay_pal/);
+  assert.match(none, /-> NO custom Beam method in Cloudbeds\. Create it \(Account > Settings > Finance > Additional and Custom Payment Methods > \+ Add Payment Type, name Beam\(website\)\)/);
+  assert.doesNotMatch(none, /custom Beam method found/);
+
+  // Cloudbeds assigns the value (the property's "With Cash On Arrival" got 1): the name finds it, the value is printed as is.
+  const numbered = section6b(
+    runScript(
+      { getAvailableRoomTypes: ONE_ROOM, getPaymentMethods: paymentMethods([{ method: "7", code: "7", name: "Beam(website)" }]) },
+      { CLOUDBEDS_BEAM_PAYMENT_METHOD: "7" },
+    ),
+  );
+  assert.match(numbered, /-> custom Beam method found: method value "7" - copy it EXACTLY into CLOUDBEDS_BEAM_PAYMENT_METHOD/);
+  assert.match(verdictOf(numbered, "CLOUDBEDS_BEAM_PAYMENT_METHOD"), /: EXACT \(7 \| 7 \| Beam\(website\)\)$/);
+
+  // A live and a separate test method: both printed, and which variable takes which.
+  const two = section6b(
+    runScript({ getAvailableRoomTypes: ONE_ROOM, getPaymentMethods: paymentMethods([BEAM_ROW, { method: "BeamTest(website)", code: "BeamTest(website)", name: "BeamTest (website)" }]) }),
+  );
+  assert.match(two, /-> custom Beam method found: method value "Beam\(website\)"\n/);
+  assert.match(two, /-> custom Beam method found: method value "BeamTest\(website\)"\n/);
+  assert.match(two, /-> more than one method mentions Beam: copy the website's Beam method's value EXACTLY into CLOUDBEDS_BEAM_PAYMENT_METHOD, and a separate test method's \(if any\) into CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD\./);
+
+  // getPaymentMethods not answered (e.g. a key without read:payment): nothing to look in.
+  const refused = section6b(runScript({ getAvailableRoomTypes: ONE_ROOM }));
+  assert.match(refused, /not checked: getPaymentMethods failed \(see section 6\)\./);
+});
+
+test("WI-0 section 6b refuses exactly the Beam method values config.ts refuses (the payment-method-config problem)", () => {
+  const stripeVars = { CLOUDBEDS_STRIPE_PAYMENT_METHOD: "Stripe(website)", CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD: "StripeTest(website)" };
+  const values = [
+    "Beam(website)",
+    "beam(website)",
+    "Beam (website)",
+    "cash",
+    "Bank_Transfer",
+    "stripe(website)",
+    "STRIPETEST(website)",
+    `B${"e".repeat(64)}`,
+    "Beam​(website)",
+    "BeamTest(website)",
+  ];
+  const refusedVerdict = /: (INVALID FOR THE ENGINE|BUILT-IN NOT ALLOWED|STRIPE METHOD NOT ALLOWED) /;
+  for (let i = 0; i < values.length; i += 2) {
+    const [live, testValue] = [values[i], values[i + 1]];
+    const env = { ...stripeVars, CLOUDBEDS_BEAM_PAYMENT_METHOD: live, CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD: testValue };
+    const s6b = section6b(runScript({ getAvailableRoomTypes: ONE_ROOM, getPaymentMethods: paymentMethods([BEAM_ROW]) }, env));
+    // beam-live reads only the live variable; beam-playground reads the TEST one while it is set.
+    const liveProblem = resolveCloudbedsPaymentMethod(env, "beam-live").problem;
+    const testProblem = resolveCloudbedsPaymentMethod(env, "beam-playground").problem;
+    assert.equal(refusedVerdict.test(verdictOf(s6b, "CLOUDBEDS_BEAM_PAYMENT_METHOD")), liveProblem !== null, `live ${JSON.stringify(live)}: ${liveProblem}`);
+    assert.equal(refusedVerdict.test(verdictOf(s6b, "CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD")), testProblem !== null, `test ${JSON.stringify(testValue)}: ${testProblem}`);
+    // A refusal that names the Stripe method names the same variable as the engine's problem text.
+    for (const [name, problem] of [
+      ["CLOUDBEDS_BEAM_PAYMENT_METHOD", liveProblem],
+      ["CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD", testProblem],
+    ] as const) {
+      const clash = /is the Stripe method in (CLOUDBEDS_STRIPE_\w+)/.exec(verdictOf(s6b, name))?.[1];
+      if (clash) assert.ok(problem?.includes(`is the Stripe method (${clash})`), `${name}: ${problem}`);
+    }
+  }
 });

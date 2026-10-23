@@ -10,7 +10,8 @@
 //   CLOUDBEDS_API_KEY_BOOKING=cbat_... CLOUDBEDS_PROPERTY_ID=235064 node scripts/cloudbeds-wi0-check.mjs [checkin] [nights]
 //
 // Optional, checked when set in the shell (not secrets, printed as typed):
-//   CLOUDBEDS_STRIPE_PAYMENT_METHOD, CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD (section 6), CLOUDBEDS_SOURCE_ID (section 4b).
+//   CLOUDBEDS_STRIPE_PAYMENT_METHOD, CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD (section 6), CLOUDBEDS_SOURCE_ID (section 4b),
+//   CLOUDBEDS_BEAM_PAYMENT_METHOD, CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD (section 6b: the custom 'Beam(website)' method).
 //
 // Falls back to CLOUDBEDS_API_KEY (the existing read key) when the booking key
 // is not set; some checks then fail with a scope error, which is itself an
@@ -109,6 +110,8 @@ const j = (v) => JSON.stringify(v ?? null);
 const rowsOf = (res) => (Array.isArray(res.json?.data) ? res.json.data : []);
 const slugOf = (id) => SITE_ROOM_TYPES[String(id)] ?? "?";
 const truthy = (v) => v === true || v === 1 || v === "1" || v === "true";
+/** Cloudbeds' built-in payment methods (config.ts BUILT_IN_PAYMENT_METHODS): Stripe or Beam money must never be filed under one. */
+const BUILT_IN_METHODS = ["credit", "cards", "cash", "bank_transfer", "ebanking", "pay_pal", "debit", "check", "check_true", "bill"];
 
 /** getAvailableRoomTypes base (BAR) row: not derived, public name "default" or empty (live 2026-10-06: "default"). */
 function isBaseAvailRow(r) {
@@ -405,6 +408,46 @@ for (const name of ["CLOUDBEDS_STRIPE_PAYMENT_METHOD", "CLOUDBEDS_STRIPE_TEST_PA
   }
 }
 console.log("-> CLOUDBEDS_STRIPE_PAYMENT_METHOD must be the EXACT `method` value of the custom Stripe row above (case and punctuation kept).");
+
+section("6b. Beam payment method (the custom 'Beam(website)' method, from the section 6 list)");
+// Beam money (card, e-wallet and PromptPay alike) is recorded under ONE custom method of the property's own, as
+// config.ts resolveCloudbedsPaymentMethod reads it for the Beam modes: never a built-in method, never the Stripe one.
+const beamLike = methods.filter((m) => [m.method, m.code, m.name].some((v) => /beam/i.test(String(v ?? ""))));
+const beamCustom = beamLike.filter((m) => !BUILT_IN_METHODS.includes(String(m.method ?? "").toLowerCase()));
+if (pm.json?.success !== true) {
+  console.log("  not checked: getPaymentMethods failed (see section 6).");
+} else if (beamCustom.length === 0) {
+  console.log("-> NO custom Beam method in Cloudbeds. Create it (Account > Settings > Finance > Additional and Custom Payment Methods > + Add Payment Type, name Beam(website)), then run this script again.");
+} else {
+  for (const m of beamCustom) {
+    console.log(`  ${methodRow(m)}`);
+    console.log(
+      beamCustom.length === 1
+        ? `-> custom Beam method found: method value ${j(m.method)} - copy it EXACTLY into CLOUDBEDS_BEAM_PAYMENT_METHOD (case and punctuation kept; Cloudbeds assigns it, it can even be a number).`
+        : `-> custom Beam method found: method value ${j(m.method)}`,
+    );
+  }
+  if (beamCustom.length > 1) {
+    console.log(
+      "-> more than one method mentions Beam: copy the website's Beam method's value EXACTLY into CLOUDBEDS_BEAM_PAYMENT_METHOD, and a separate test method's (if any) into CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD.",
+    );
+  }
+}
+for (const name of ["CLOUDBEDS_BEAM_PAYMENT_METHOD", "CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD"]) {
+  const raw = process.env[name];
+  if (raw === undefined) {
+    console.log(`  ${name}: not set in this shell, nothing to check (set it to the value Vercel has).`);
+  } else if (name === "CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD" && !raw.trim()) {
+    console.log(`  ${name}=${j(raw)}: empty, so the engine uses CLOUDBEDS_BEAM_PAYMENT_METHOD.`);
+  } else {
+    const verdict = methodVerdict(raw, methods, { custom: "the custom 'Beam(website)' method", stripeVars: ["CLOUDBEDS_STRIPE_PAYMENT_METHOD", "CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD"] });
+    // The engine refuses a Stripe method only by the Stripe variables; a Stripe row of Cloudbeds' own list is named here too.
+    const v = raw.trim().toLowerCase();
+    const stripeRow = /^(EXACT|NEAR)/.test(verdict) && stripeLike.some((m) => String(m.method ?? "").toLowerCase() === v);
+    console.log(`  ${name}=${j(raw)}: ${verdict}${stripeRow ? "  <- that is a Stripe method of Cloudbeds' list: Beam money belongs under the custom Beam method" : ""}`);
+  }
+}
+console.log("-> CLOUDBEDS_BEAM_PAYMENT_METHOD must be the EXACT `method` value of the custom Beam row above (case and punctuation kept), never a built-in method and never the Stripe method.");
 
 section("7. Restrictions sample (getRatePlans honeymoon, detailedRates)");
 const planParams = (endDate) => ({ propertyIDs: propertyId, roomTypeID: "462958", startDate: checkIn, endDate, adults: 2, children: 0, detailedRates: "true" });
@@ -704,7 +747,17 @@ function idCore(v) {
   return String(v ?? "").trim().replace(/^s-/i, "").replace(/-1$/, "");
 }
 
-function methodVerdict(raw, list) {
+/** A getPaymentMethods row as printed, with a warning when Cloudbeds' method and code differ (the engine sends method). */
+function methodRow(m) {
+  return `${m.method} | ${m.code} | ${m.name}${m.method !== m.code ? `  <- method != code ("${m.method}" vs "${m.code}"; the engine sends method)` : ""}`;
+}
+
+/**
+ * The engine's verdict on a method variable (config.ts resolveCloudbedsPaymentMethod), then whether Cloudbeds lists it.
+ * opts.custom: the custom method the money belongs under (Stripe's by default); opts.stripeVars (Beam only): a value
+ * equal, ignoring case, to one of these variables when it is set in the shell is the Stripe method, refused.
+ */
+function methodVerdict(raw, list, opts = {}) {
   const v = String(raw).trim();
   const problem = !v
     ? "empty"
@@ -716,14 +769,18 @@ function methodVerdict(raw, list) {
           ? `longer than 64 (${[...v].length})`
           : null;
   if (problem) return `INVALID FOR THE ENGINE (${problem})`;
-  const builtIn = ["credit", "cards", "cash", "bank_transfer", "ebanking", "pay_pal", "debit", "check", "check_true", "bill"];
-  if (builtIn.includes(v.toLowerCase())) return `BUILT-IN NOT ALLOWED ("${v}" is a Cloudbeds built-in method; use the custom Stripe method)`;
+  const custom = opts.custom ?? "the custom Stripe method";
+  if (BUILT_IN_METHODS.includes(v.toLowerCase())) return `BUILT-IN NOT ALLOWED ("${v}" is a Cloudbeds built-in method; use ${custom})`;
+  const clash = (opts.stripeVars ?? []).find((name) => {
+    const other = String(process.env[name] ?? "").trim();
+    return other !== "" && other.toLowerCase() === v.toLowerCase();
+  });
+  if (clash) return `STRIPE METHOD NOT ALLOWED ("${v}" is the Stripe method in ${clash}; Beam money must be recorded under ${custom})`;
   if (!list.length) return "not checked (getPaymentMethods returned no methods)";
-  const row = (m) => `${m.method} | ${m.code} | ${m.name}${m.method !== m.code ? `  <- method != code ("${m.method}" vs "${m.code}"; the engine sends method)` : ""}`;
   const exact = list.find((m) => m.method === v);
-  if (exact) return `EXACT (${row(exact)})`;
+  if (exact) return `EXACT (${methodRow(exact)})`;
   const squash = (x) => String(x ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
   const near = list.filter((m) => [m.method, m.code, m.name].some((x) => squash(x) && squash(x) === squash(v)));
-  if (near.length) return `NEAR, not exact - candidates: ${near.map(row).join("; ")} (copy the exact method value)`;
+  if (near.length) return `NEAR, not exact - candidates: ${near.map(methodRow).join("; ")} (copy the exact method value)`;
   return "NOT FOUND (no active method with this value)";
 }
