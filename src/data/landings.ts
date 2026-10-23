@@ -75,6 +75,9 @@ export interface Landing {
   roomsSub: string;
   viewAll: string;
   guestsWord: string;
+  /** Families & groups card (the entire Magic Villa); {price} is filled in from rooms.ts. */
+  familyTitle: string;
+  familyText: string;
   perksTitle: string;
   perks: LandingPerk[];
   reviewsLine: string;
@@ -127,6 +130,8 @@ export const landings: Record<string, Landing> = {
     roomsSub: "כל יחידה פרטית לגמרי — עם בריכה, מרפסת ונוף לים.",
     viewAll: "לכל הווילות והסוויטות",
     guestsWord: "אורחים",
+    familyTitle: "למשפחות ולקבוצות",
+    familyText: "כל הווילה רק שלכם: 5 חדרי שינה, 4 בריכות פרטיות, עד 10 אורחים. החל מ־฿{price} ללילה.",
     perksTitle: "למה להזמין ישירות?",
     perks: [
       { title: "המחיר הטוב ביותר, תמיד", text: "קוד DIRECT בתשלום — זול יותר מכל אתר הזמנות." },
@@ -161,6 +166,8 @@ export const landings: Record<string, Landing> = {
     roomsSub: "Каждый номер полностью приватный: свой бассейн, терраса и вид на море.",
     viewAll: "Все виллы и люксы",
     guestsWord: "гостей",
+    familyTitle: "Для семей и компаний",
+    familyText: "Вся вилла только для вас: 5 спален, 4 частных бассейна, до 10 гостей. От ฿{price} за ночь.",
     perksTitle: "Почему бронировать напрямую",
     perks: [
       { title: "Лучшая цена — всегда", text: "Промокод DIRECT при оформлении дешевле любого сайта бронирования." },
@@ -195,6 +202,8 @@ export const landings: Record<string, Landing> = {
     roomsSub: "Chaque logement est entièrement privé : piscine, terrasse et vue mer.",
     viewAll: "Voir toutes les villas et suites",
     guestsWord: "personnes",
+    familyTitle: "Pour les familles et les groupes",
+    familyText: "Toute la villa rien que pour vous : 5 chambres, 4 piscines privées, jusqu’à 10 personnes. À partir de ฿{price} la nuit.",
     perksTitle: "Pourquoi réserver en direct ?",
     perks: [
       { title: "Le meilleur tarif, toujours", text: "Le code DIRECT au paiement bat tous les sites de réservation." },
@@ -229,6 +238,8 @@ export const landings: Record<string, Landing> = {
     roomsSub: "Jede Unterkunft ist komplett privat: eigener Pool, Terrasse und Meerblick.",
     viewAll: "Alle Villen und Suiten ansehen",
     guestsWord: "Gäste",
+    familyTitle: "Für Familien und Gruppen",
+    familyText: "Die ganze Villa für Sie allein: 5 Schlafzimmer, 4 private Pools, bis zu 10 Gäste. Ab ฿{price} pro Nacht.",
     perksTitle: "Warum direkt buchen?",
     perks: [
       { title: "Immer der beste Preis", text: "Mit dem Code DIRECT an der Kasse günstiger als auf jedem Buchungsportal." },
@@ -263,6 +274,8 @@ export const landings: Record<string, Landing> = {
     roomsSub: "每间均完全独立：私人泳池、露台与海景。",
     viewAll: "查看全部别墅与套房",
     guestsWord: "位客人",
+    familyTitle: "适合家庭与团体",
+    familyText: "整栋别墅由您独享：5 间卧室、4 个私人泳池，最多可住 10 位客人。每晚 ฿{price} 起。",
     perksTitle: "为什么直接预订",
     perks: [
       { title: "始终最优价", text: "结账时使用 DIRECT 优惠码，比任何预订网站都划算。" },
@@ -296,6 +309,8 @@ export const landings: Record<string, Landing> = {
     roomsSub: "Cada alojamiento es totalmente privado: piscina, terraza y vistas al mar.",
     viewAll: "Ver todas las villas y suites",
     guestsWord: "huéspedes",
+    familyTitle: "Para familias y grupos",
+    familyText: "La villa entera en exclusiva: 5 dormitorios, 4 piscinas privadas, hasta 10 huéspedes. Desde ฿{price} por noche.",
     perksTitle: "Por qué reservar directo",
     perks: [
       { title: "El mejor precio, siempre", text: "El código DIRECT al pagar supera a cualquier web de reservas." },
@@ -330,6 +345,8 @@ export const landings: Record<string, Landing> = {
     roomsSub: "ทุกยูนิตเป็นส่วนตัวทั้งหมด มีสระ ระเบียง และวิวทะเล",
     viewAll: "ดูวิลล่าและสวีททั้งหมด",
     guestsWord: "ท่าน",
+    familyTitle: "สำหรับครอบครัวและกลุ่ม",
+    familyText: "เหมาทั้งวิลล่า: 5 ห้องนอน สระว่ายน้ำส่วนตัว 4 สระ พักได้สูงสุด 10 ท่าน เริ่มต้น ฿{price} ต่อคืน",
     perksTitle: "ทำไมต้องจองตรง",
     perks: [
       { title: "ราคาดีที่สุดเสมอ", text: "ใส่โค้ด DIRECT ตอนชำระเงิน ถูกกว่าทุกเว็บจอง" },

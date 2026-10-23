@@ -17,6 +17,9 @@ const featured = ["honeymoon-suite", "sunrise-suite", "seaview-suite"]
   .map((slug) => rooms.find((r) => r.slug === slug))
   .filter((r): r is NonNullable<typeof r> => Boolean(r));
 
+// Families & groups: the entire Magic Villa (bedrooms, pools and guests are in each familyText).
+const wholeVilla = rooms.find((r) => r.slug === "magic-1-villa")!;
+
 export default function LocalizedLanding({ t }: { t: Landing }) {
   return (
     <div dir={t.dir} lang={t.htmlLang}>
@@ -94,6 +97,28 @@ export default function LocalizedLanding({ t }: { t: Landing }) {
             </Link>
           ))}
         </div>
+        <Link
+          href={`/rooms/${wholeVilla.slug}`}
+          className="group mt-6 grid overflow-hidden rounded-2xl bg-stone-100 sm:grid-cols-3"
+        >
+          <div className="relative aspect-[4/3] overflow-hidden">
+            <Image
+              src={wholeVilla.heroImage.src}
+              alt={wholeVilla.heroImage.alt}
+              fill
+              quality={60}
+              sizes="(max-width: 640px) 100vw, 33vw"
+              className="object-cover transition-transform duration-500 group-hover:scale-105"
+            />
+          </div>
+          <div className="flex flex-col justify-center p-5 sm:col-span-2 sm:p-6">
+            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-pool">{t.familyTitle}</p>
+            <p className="mt-2 font-medium text-ink">{wholeVilla.name}</p>
+            <p className="mt-1 text-sm text-ink-soft">
+              {t.familyText.replace("{price}", wholeVilla.priceThb.toLocaleString(t.htmlLang))}
+            </p>
+          </div>
+        </Link>
         <Link
           href="/rooms"
           className="mt-8 inline-block rounded-full border border-pool px-6 py-2.5 font-medium text-pool transition hover:bg-pool hover:text-white"
