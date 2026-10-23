@@ -29,7 +29,8 @@
 //   know -> 200 not ours). The booking is found through the charge index (keys.beamCharge, 708 days), else the
 //   refund's referenceId (an MSV ref: its pointer and record when they still exist). The owner's alert is keyed
 //   refund:{refundId}:{status}: SUCCEEDED -> info 'Beam refund done for booking {ref} (THB x)' with the folio
-//   steps; FAILED -> CRITICAL with the bank-transfer fallback (gap review 17): the guest is still owed money and
+//   steps of its case (round 8: an extra charge of a duplicate payment and a payment fulfil never recorded have
+//   nothing to record on the folio; refundedChargeRecord); FAILED -> CRITICAL with the bank-transfer fallback (gap review 17): the guest is still owed money and
 //   this answer is 200 (Beam does not retry), so the alert is stored and re-sent by the sweeper until a mail goes
 //   out (round 5); PENDING -> nothing yet. Only a deps.alert that throws (never the production alerter, which
 //   stores a critical alert first and reports a failed send as false) answers 503.
@@ -420,6 +421,37 @@ async function methodOfCharge(ctx: Ctx, linkId: string | null, chargeId: string)
   }
 }
 
+/**
+ * What our records say about a refunded charge in Cloudbeds (round 8), so the "refund done" alert never asks the
+ * owner to record a refund of money that was never on the folio:
+ * - extra: the link's stored primary charge (keys.beamPrimary, the one fulfil records) is another charge, so this is
+ *   an extra charge of a duplicate payment - never recorded (the 'charged twice' CRITICAL says so too);
+ * - unrecorded: fulfil never recorded the link's payment (no payment step marker: refunded before confirmation, a
+ *   late payment after its hold was released, a mismatch handed to the owner);
+ * - recorded: fulfil recorded it (the step marker), or the booking's link is not known (the alert then names only
+ *   the booking): the folio steps as before.
+ * Both markers live as long as the charge index (BEAM_RECORD_TTL_SECONDS). Redis failures throw.
+ */
+type RefundedChargeRecord = { kind: "extra"; primary: string } | { kind: "unrecorded" } | { kind: "recorded" };
+
+async function refundedChargeRecord(ctx: Ctx, linkId: string, chargeId: unknown): Promise<RefundedChargeRecord> {
+  const primary = await ctx.deps.kv.get(keys.beamPrimary(linkId));
+  if (primary !== null && primary !== chargeId) return { kind: "extra", primary };
+  return (await ctx.deps.kv.get(keys.fulfilStep(beamKeyOf(linkId), "payment"))) === null ? { kind: "unrecorded" } : { kind: "recorded" };
+}
+
+/** The "refund done" alert's folio line for each case of refundedChargeRecord. */
+function refundFolioLine(recorded: RefundedChargeRecord, reservation: string): string {
+  switch (recorded.kind) {
+    case "extra":
+      return `It is an extra charge (the booking's own payment is charge ${shown(recorded.primary, 64)}), never recorded in Cloudbeds: nothing to record on the folio; the booking and its Google Ads conversion stand (docs section 8, item 6).`;
+    case "unrecorded":
+      return `No payment was recorded in Cloudbeds for this booking (the booking engine never confirmed it): nothing to adjust on the folio unless someone recorded the payment there by hand (then add a negative adjustment); make sure ${reservation} is cancelled so the unit goes back on sale (docs section 8, items 5 and 7).`;
+    case "recorded":
+      return `Record it in Cloudbeds by hand: a negative adjustment on ${reservation}; cancel the reservation if the stay is cancelled; retract (full refund) or restate (partial refund) the Google Ads conversion (docs section 8).`;
+  }
+}
+
 async function handleRefund(ctx: Ctx, refundId: string): Promise<BeamWebhookResult> {
   const { deps } = ctx;
   let refund: BeamRefund;
@@ -456,6 +488,15 @@ async function handleRefund(ctx: Ctx, refundId: string): Promise<BeamWebhookResu
   const chargeId = shown(refund.chargeId, 64);
   const amount = money(refund.amount);
   const reservation = booking.reservationId !== null ? `reservation ${booking.reservationId}` : `the reservation of booking ${booking.ref} (search the booking reference in Cloudbeds)`;
+  let recorded: RefundedChargeRecord = { kind: "recorded" };
+  if (refund.status === "SUCCEEDED" && booking.linkId !== null) {
+    try {
+      recorded = await refundedChargeRecord(ctx, booking.linkId, refund.chargeId);
+    } catch (e) {
+      deps.log("beam_webhook_redis_failed", { kind: "refund", refundId, error: errorText(e) });
+      return { status: 503, body: "refund could not be mapped - retry" };
+    }
+  }
   try {
     if (refund.status === "SUCCEEDED") {
       const method = await methodOfCharge(ctx, booking.linkId, refund.chargeId);
@@ -463,7 +504,7 @@ async function handleRefund(ctx: Ctx, refundId: string): Promise<BeamWebhookResu
         `Beam refund done for booking ${booking.ref} (${amount})`,
         [
           `Beam refunded ${amount} of charge ${chargeId} (${method}), refund ${refundId} (Beam accepted it; the guest's bank may take days).`,
-          `Record it in Cloudbeds by hand: a negative adjustment on ${reservation}; cancel the reservation if the stay is cancelled; for a full refund retract the Google Ads conversion (docs section 8).`,
+          refundFolioLine(recorded, reservation),
         ],
         { key: `refund:${refundId}:SUCCEEDED`, severity: "info" },
       );

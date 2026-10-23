@@ -483,12 +483,25 @@ async function fulfilLocked(key: string, deps: CoreDeps, gw: PaymentGateway): Pr
   return { state: "confirmed", reservationId, ref, totalSatang: meta.totalSatang, alreadyDone: false };
 }
 
+/**
+ * The provider's own id of a payment key, as the owner finds it in the provider's dashboard (gw.idOf: Stripe's is
+ * the key itself, so every Stripe text is unchanged; Beam's drops the "beam:" prefix of the Redis key). The key
+ * itself should idOf ever refuse it: an alert is never lost for it.
+ */
+function paymentIdShown(gw: PaymentGateway, key: string): string {
+  try {
+    return gw.idOf(key);
+  } catch {
+    return key;
+  }
+}
+
 async function needsAttention(deps: CoreDeps, gw: PaymentGateway, key: string, meta: PaymentMeta, reason: string): Promise<FulfilOutcome> {
   await markDone(deps, gw, key, { state: "needs_attention", reservationId: meta.reservationId, ref: meta.ref, totalSatang: meta.totalSatang, reason, at: nowOf(deps) });
   deps.log("fulfil_needs_attention", { ref: meta.ref, reservationId: meta.reservationId });
   await deps.alert(
     `URGENT: paid booking ${meta.ref} needs attention`,
-    [reason, `${gw.brand} ${gw.text.sessionLabel.long} ${key}, Cloudbeds reservation ${meta.reservationId}, ${meta.checkIn} to ${meta.checkOut}, ${money(meta.totalSatang)}.`],
+    [reason, `${gw.brand} ${gw.text.sessionLabel.long} ${paymentIdShown(gw, key)}, Cloudbeds reservation ${meta.reservationId}, ${meta.checkIn} to ${meta.checkOut}, ${money(meta.totalSatang)}.`],
     { key: `attention:${key}`, severity: "critical" },
   );
   return { state: "needs_attention", reservationId: meta.reservationId, ref: meta.ref, reason };
@@ -525,8 +538,8 @@ export async function alertFulfilPaymentFailure(deps: CoreDeps, gw: PaymentGatew
     `Paid booking ${paid ? `${paid.ref} ` : ""}not yet confirmed in Cloudbeds (retrying)`,
     [
       paid
-        ? `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}, ${money(paid.totalSatang)}, ${gw.brand} ${gw.text.sessionLabel.short} ${key}) is PAID, but confirming it in Cloudbeds failed: ${message.slice(0, 200)}`
-        : `${gw.brand} ${gw.text.sessionLabel.long} ${key} is paid but confirming it in Cloudbeds failed: ${message.slice(0, 200)}`,
+        ? `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}, ${money(paid.totalSatang)}, ${gw.brand} ${gw.text.sessionLabel.short} ${paymentIdShown(gw, key)}) is PAID, but confirming it in Cloudbeds failed: ${message.slice(0, 200)}`
+        : `${gw.brand} ${gw.text.sessionLabel.long} ${paymentIdShown(gw, key)} is paid but confirming it in Cloudbeds failed: ${message.slice(0, 200)}`,
       `It is retried automatically (${gw.text.webhookRetryHint}, the guest's return page and the sweeper). Do NOT cancel the reservation. If this repeats, check Cloudbeds.`,
     ],
     { key: `fulfil-fail:${key}`, severity: "warning" },
@@ -563,7 +576,7 @@ async function alertPaymentRefused(deps: CoreDeps, gw: PaymentGateway, paid: Pai
   await deps.alert(
     `URGENT: paid booking ${paid.ref}: Cloudbeds refused to record the payment`,
     [
-      `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}) was PAID via ${brand} (${money(paid.totalSatang)}, ${gw.text.sessionLabel.short} ${paid.sessionId}), but Cloudbeds refused to record the payment: ${detail.slice(0, 200)}`,
+      `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}) was PAID via ${brand} (${money(paid.totalSatang)}, ${gw.text.sessionLabel.short} ${paymentIdShown(gw, paid.sessionId)}), but Cloudbeds refused to record the payment: ${detail.slice(0, 200)}`,
       `Payment method sent: ${method === null ? "none" : JSON.stringify(method)}, from ${gw.text.methodEnvVar}${testVar}. ${
         deps.config.cloudbedsPaymentMethodProblem ??
         `It must be the exact 'method' value scripts/cloudbeds-wi0-check.mjs prints for the custom ${brand} method (for HTTP 401/403, check the booking key's write:payment scope instead).`
@@ -586,7 +599,7 @@ export async function alertPaidPaymentStuck(deps: CoreDeps, gw: PaymentGateway, 
   await deps.alert(
     `URGENT: paid booking ${paid.ref} still not confirmed in Cloudbeds`,
     [
-      `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}) was PAID via ${brand} (${money(paid.totalSatang)}, ${gw.text.sessionLabel.short} ${paid.sessionId}), but confirming it in Cloudbeds has failed for ${detail}`,
+      `Booking ${paid.ref} (Cloudbeds reservation ${paid.reservationId}) was PAID via ${brand} (${money(paid.totalSatang)}, ${gw.text.sessionLabel.short} ${paymentIdShown(gw, paid.sessionId)}), but confirming it in Cloudbeds has failed for ${detail}`,
       `Do NOT cancel this reservation: the guest has paid. First open the folio: the sweeper keeps retrying it, so if a ${brand} payment of ${money(paid.totalSatang)} is already listed, it was recorded automatically - do not add it again, only confirm the reservation if it is not Confirmed yet. Otherwise record the FULL ${brand} payment (${money(paid.totalSatang)}, rooms + fee) once on its folio (the custom ${brand} method) and confirm it by hand - or fix the cause (${gw.text.methodEnvVar}, the booking key's scopes) - never both.`,
       feeWhileRetrying(gw.text.feeItemName),
     ],

@@ -18,9 +18,10 @@ import type { BeamCreatePaymentLinkRequest } from "../beam.ts";
 import { BEAM_TEST_ENV, BEAM_LIVE_ENV, BEAM_CLOUDBEDS_METHOD, beamHeld, cardDigitsShown, makeBeamKit } from "../beamTestkit.ts";
 import type { BeamKit } from "../beamTestkit.ts";
 import { resolveCloudbedsPaymentMethod } from "../config.ts";
-import { abandonPayment, alertFulfilPaymentFailure, feeItemFor, fulfilPayment, releasePayment } from "../fulfil.ts";
+import { abandonPayment, alertFulfilPaymentFailure, alertPaidPaymentStuck, feeItemFor, fulfilPayment, releasePayment } from "../fulfil.ts";
 import { createMemoryKv } from "../kv.ts";
 import { BEAM_RECORD_TTL_SECONDS, keyScope, keys, readJson } from "../lock.ts";
+import type { PaidPending } from "../lock.ts";
 import { feePctFor, percentOf, satangToBahtString } from "../quote.ts";
 import { NOW, TEST_EMAIL, TOKEN_SECRET, recordingKv } from "../testkit.ts";
 import { beamGateway } from "./beamGateway.ts";
@@ -354,7 +355,9 @@ test("refunded before confirmation: needs_attention (never confirmed, never rele
   const urgent = critical(kit);
   assert.equal(urgent.length, 1);
   assert.equal(urgent[0].subject, `URGENT: paid booking ${h.ref} needs attention`);
-  assert.match(urgent[0].lines[1], new RegExp(`^Beam payment link beam:${h.linkId}, Cloudbeds reservation ${h.reservationId}, `));
+  // Round 8: the link id as Lighthouse shows it, never the Redis key ("beam:{linkId}").
+  assert.match(urgent[0].lines[1], new RegExp(`^Beam payment link ${h.linkId}, Cloudbeds reservation ${h.reservationId}, `));
+  assert.ok(!urgent[0].lines[1].includes(h.key), urgent[0].lines[1]);
   assert.deepEqual(await releasePayment(h.key, kit.deps, kit.gw, "sweeper"), { state: "refused_paid", reservationId: h.reservationId });
   assert.deepEqual(await abandonPayment(h.key, kit.deps, kit.gw, h.ref), { state: "closed" });
   assert.equal(res(kit, h.reservationId).status, "not_confirmed", "left for a person");
@@ -766,10 +769,42 @@ test("without CLOUDBEDS_BEAM_PAYMENT_METHOD the paid booking is not recorded: th
   const refused = critical(kit).find((a) => a.subject === `URGENT: paid booking ${h.ref}: Cloudbeds refused to record the payment`);
   assert.ok(refused, JSON.stringify(kit.alerts));
   assert.ok(refused.lines[1].startsWith("Payment method sent: none, from CLOUDBEDS_BEAM_PAYMENT_METHOD (outside live: CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD when set)."), refused.lines[1]);
+  // Round 8: the link id as Lighthouse shows it, never the Redis key.
+  assert.ok(refused.lines[0].includes(`via Beam (${money(h.quote.totalSatang)}, link ${h.linkId}), but Cloudbeds refused`), refused.lines[0]);
+  assert.ok(!refused.lines.join("\n").includes(h.key), refused.lines[0]);
   assert.equal(calls(kit, "postPayment").length, 0);
   // The texts name exactly the variables the Beam config reads.
   assert.match(resolveCloudbedsPaymentMethod({}, "beam-live").problem ?? "", new RegExp(`^${BEAM_GATEWAY_TEXT.methodEnvVar} is not set`));
   assert.match(resolveCloudbedsPaymentMethod({ CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD: "credit" }, "beam-playground").problem ?? "", new RegExp(`^${BEAM_GATEWAY_TEXT.testMethodEnvVar} "credit"`));
+});
+
+test("round 8: fulfil's retrying and still-not-confirmed alerts name the Beam link id as Lighthouse shows it, never the Redis key", async () => {
+  const kit = makeBeamKit();
+  const h = await beamHeld(kit);
+  kit.fakeBeam.pay(h.linkId, "CARD");
+  // Before fulfil saw the payment paid: the line names the link only.
+  const early = makeBeamKit();
+  const e = await beamHeld(early);
+  await alertFulfilPaymentFailure(early.deps, early.gw, e.key, new Error("simulated"));
+  assert.equal(early.alerts.at(-1)?.lines[0], `Beam payment link ${e.linkId} is paid but confirming it in Cloudbeds failed: simulated`);
+  // Seen paid (the paid entry exists), then Cloudbeds fails: the booking and the link.
+  kit.fakeCb.failNext("getReservation", "http500");
+  const failed = await fulfilPayment(h.key, kit.deps, kit.gw).then(
+    () => null,
+    (err: unknown) => err,
+  );
+  assert.ok(failed instanceof Error, String(failed));
+  await alertFulfilPaymentFailure(kit.deps, kit.gw, h.key, failed);
+  const retrying = kit.alerts.at(-1);
+  assert.equal(retrying?.subject, `Paid booking ${h.ref} not yet confirmed in Cloudbeds (retrying)`);
+  assert.ok(retrying.lines[0].startsWith(`Booking ${h.ref} (Cloudbeds reservation ${h.reservationId}, ${money(h.quote.totalSatang)}, Beam link ${h.linkId}) is PAID, `), retrying.lines[0]);
+  const paid = await readJson<PaidPending>(kit.deps.kv, keys.paidPending(h.key));
+  assert.ok(paid);
+  await alertPaidPaymentStuck(kit.deps, kit.gw, paid, "125 minutes; latest error: simulated");
+  const stuck = critical(kit).find((a) => a.subject === `URGENT: paid booking ${h.ref} still not confirmed in Cloudbeds`);
+  assert.ok(stuck, JSON.stringify(kit.alerts));
+  assert.ok(stuck.lines[0].includes(`was PAID via Beam (${money(h.quote.totalSatang)}, link ${h.linkId}), but confirming it`), stuck.lines[0]);
+  for (const a of kit.alerts) assert.ok(!a.lines.join("\n").includes(h.key), `${a.subject}: ${a.lines.join(" | ")}`);
 });
 
 test("the mock Cloudbeds writer without a Beam method records the payment as 'mock-beam' (text.mockMethod)", async () => {

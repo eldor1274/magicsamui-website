@@ -531,7 +531,7 @@ test("refund.succeeded: the info alert keyed refund:{id}:SUCCEEDED with the foli
   assert.equal(done[0].subject, `Beam refund done for booking ${h.ref} (${money(h.quote.totalSatang)})`);
   assert.deepEqual(done[0].lines, [
     `Beam refunded ${money(h.quote.totalSatang)} of charge ${chargeId} (card), refund ${refundId} (Beam accepted it; the guest's bank may take days).`,
-    `Record it in Cloudbeds by hand: a negative adjustment on reservation ${h.reservationId}; cancel the reservation if the stay is cancelled; for a full refund retract the Google Ads conversion (docs section 8).`,
+    `Record it in Cloudbeds by hand: a negative adjustment on reservation ${h.reservationId}; cancel the reservation if the stay is cancelled; retract (full refund) or restate (partial refund) the Google Ads conversion (docs section 8).`,
   ]);
   assert.ok(await kit.deps.kv.get(keys.alerted(SCOPE, `refund:${refundId}:SUCCEEDED`)), "keyed refund:{refundId}:{status}");
   assert.equal(res(kit, h.reservationId).status, "confirmed", "a refund changes nothing in Cloudbeds by itself");
@@ -542,6 +542,82 @@ test("refund.succeeded: the info alert keyed refund:{id}:SUCCEEDED with the foli
   const partial = kit2.fakeBeam.refund(b.chargeId, half);
   await deliver(kit2, kit2.fakeBeam.signedEvent("refund.succeeded", partial));
   assert.equal(withSubject(kit2, /^Beam refund done/)[0].subject, `Beam refund done for booking ${b.h.ref} (${money(half)})`);
+});
+
+test("refund.succeeded by case (round 8): the extra charge of a duplicate payment and a payment never recorded in Cloudbeds have nothing to record on the folio; the recorded payment keeps the folio steps", async () => {
+  const folioLine = (kit: BeamKit) => {
+    const done = withSubject(kit, /^Beam refund done/);
+    assert.equal(done.length, 1);
+    assert.equal(done[0].severity, "info");
+    return done[0].lines[1];
+  };
+
+  // (a) The extra charge of a duplicate payment: the booking stands, nothing to record ('charged twice' says the same).
+  const kit = makeBeamKit();
+  const { h, chargeId } = await confirmedBooking(kit);
+  kit.now.ms += 10 * MIN;
+  const extra = kit.fakeBeam.secondCharge(h.linkId, "CARD");
+  assert.deepEqual(await deliver(kit, kit.fakeBeam.signedEvent("charge.succeeded", extra.chargeId)), { status: 200, body: "confirmed" });
+  assert.equal(withSubject(kit, /charged twice/).length, 1);
+  const cb = cbWrites(kit);
+  const extraRefund = kit.fakeBeam.refund(extra.chargeId);
+  assert.deepEqual(await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", extraRefund)), { status: 200, body: "refund succeeded" });
+  assert.equal(
+    folioLine(kit),
+    `It is an extra charge (the booking's own payment is charge ${chargeId}), never recorded in Cloudbeds: nothing to record on the folio; the booking and its Google Ads conversion stand (docs section 8, item 6).`,
+  );
+  assert.equal(cbWrites(kit), cb, "nothing written to Cloudbeds");
+  assert.equal(res(kit, h.reservationId).status, "confirmed");
+
+  // (b) Refunded before the booking was confirmed: fulfil handed it to the owner and never recorded the payment.
+  const kit2 = makeBeamKit();
+  const g = await beamHeld(kit2);
+  const card = kit2.fakeBeam.pay(g.linkId, "CARD");
+  const refundId = kit2.fakeBeam.refund(card.chargeId);
+  assert.deepEqual(await deliver(kit2, kit2.fakeBeam.signedEvent("charge.succeeded", card.chargeId)), { status: 200, body: "needs_attention" });
+  assert.match(critical(kit2)[0].lines[0], /^REFUNDED at Beam before the booking was confirmed/);
+  assert.deepEqual(await deliver(kit2, kit2.fakeBeam.signedEvent("refund.succeeded", refundId)), { status: 200, body: "refund succeeded" });
+  const unrecorded = (reservationId: string) =>
+    `No payment was recorded in Cloudbeds for this booking (the booking engine never confirmed it): nothing to adjust on the folio unless someone recorded the payment there by hand (then add a negative adjustment); make sure reservation ${reservationId} is cancelled so the unit goes back on sale (docs section 8, items 5 and 7).`;
+  assert.equal(folioLine(kit2), unrecorded(g.reservationId));
+  assert.equal(calls(kit2, "postPayment").length, 0);
+
+  // (c) A late payment after its hold was released ("the guest PAID but the Cloudbeds hold is CANCELLED"), refunded in full.
+  const kit3 = makeBeamKit();
+  const k = await beamHeld(kit3);
+  const declined = kit3.fakeBeam.decline(k.linkId, "CARD");
+  kit3.fakeBeam.expire(k.linkId);
+  assert.deepEqual(await deliver(kit3, kit3.fakeBeam.signedEvent("charge.failed", declined.chargeId)), { status: 200, body: "released" });
+  const late = kit3.fakeBeam.payAfterClose(k.linkId, "CARD");
+  assert.deepEqual(await deliver(kit3, kit3.fakeBeam.signedEvent("charge.succeeded", late.chargeId)), { status: 200, body: "needs_attention" });
+  assert.match(critical(kit3)[0].lines[0], /^The guest PAID but the Cloudbeds hold is CANCELLED/);
+  const lateRefund = kit3.fakeBeam.refund(late.chargeId);
+  assert.deepEqual(await deliver(kit3, kit3.fakeBeam.signedEvent("refund.succeeded", lateRefund)), { status: 200, body: "refund succeeded" });
+  assert.equal(folioLine(kit3), unrecorded(k.reservationId));
+  assert.equal(calls(kit3, "postPayment").length, 0);
+
+  // (d) The recorded payment, refunded in part: the folio steps, the conversion restated.
+  const kit4 = makeBeamKit();
+  const p = await confirmedBooking(kit4);
+  const part = kit4.fakeBeam.refund(p.chargeId, 1_000);
+  await deliver(kit4, kit4.fakeBeam.signedEvent("refund.succeeded", part));
+  assert.equal(
+    folioLine(kit4),
+    `Record it in Cloudbeds by hand: a negative adjustment on reservation ${p.h.reservationId}; cancel the reservation if the stay is cancelled; retract (full refund) or restate (partial refund) the Google Ads conversion (docs section 8).`,
+  );
+
+  // Redis unreadable while the case is read: 503, Beam retries; nothing told yet.
+  const kit5 = makeBeamKit();
+  const q = await confirmedBooking(kit5);
+  const r5 = kit5.fakeBeam.refund(q.chargeId);
+  const failing: BeamGatewayDeps = {
+    ...kit5.deps,
+    kv: { ...kit5.deps.kv, get: (key) => (key === keys.beamPrimary(q.h.linkId) ? Promise.reject(new Error("simulated Redis failure")) : kit5.deps.kv.get(key)) },
+  };
+  assert.deepEqual(await deliver(kit5, kit5.fakeBeam.signedEvent("refund.succeeded", r5), failing), { status: 503, body: "refund could not be mapped - retry" });
+  assert.equal(withSubject(kit5, /^Beam refund done/).length, 0);
+  assert.deepEqual(await deliver(kit5, kit5.fakeBeam.signedEvent("refund.succeeded", r5)), { status: 200, body: "refund succeeded" });
+  assert.equal(withSubject(kit5, /^Beam refund done/).length, 1);
 });
 
 test("a signed refund.failed body sent with the header refund.succeeded: no 'done' alert, the FAILED CRITICAL, the disagreement logged", async () => {
