@@ -1,10 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 
+/** A list item that links to a page on this site: `label` is the link text, `text` follows it. */
+export interface BlogLinkItem {
+  label: string;
+  href: string;
+  text?: string;
+}
+
 export interface BlogBlock {
   type: "h2" | "h3" | "h4" | "p" | "ul" | "ol" | "quote";
   text?: string;
-  items?: string[];
+  items?: (string | BlogLinkItem)[];
 }
 
 export interface BlogPost {

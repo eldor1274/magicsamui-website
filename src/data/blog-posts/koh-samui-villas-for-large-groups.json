@@ -90,6 +90,44 @@
     {
       "type": "p",
       "text": "For a group of 10+, book a dedicated minibus and driver for the duration of the stay. A full-day minibus hire with driver costs approximately 2,000-3,000 THB — split between a group this is negligible. It eliminates the coordination headache of managing multiple Grab bookings every time you move."
+    },
+    {
+      "type": "h2",
+      "text": "Where to Stay with Us"
+    },
+    {
+      "type": "p",
+      "text": "Magic Suites & Villas is on a hillside in Plai Laem, minutes from Choeng Mon Beach. For groups of up to 10 guests, these are our largest stays:"
+    },
+    {
+      "type": "ul",
+      "items": [
+        {
+          "label": "The entire Magic Villa",
+          "href": "/rooms/magic-1-villa",
+          "text": "5 bedrooms, 4 private pools, sleeps 10. All four suites across three floors, from ฿40,000 a night."
+        },
+        {
+          "label": "Tower Club Hangover Suite",
+          "href": "/rooms/tower-club-3br",
+          "text": "3 bedrooms for 6 guests, with an infinity pool and a jet plunge pool, from ฿18,000 a night."
+        },
+        {
+          "label": "Island Views & Sunrise 3 Bedroom Suite",
+          "href": "/rooms/island-view-3br",
+          "text": "3 bedrooms for 6 guests, with jet plunge pools, from ฿18,000 a night. It shares the Magic Seaview level with Tower Club, so one of the two can be booked on a given night."
+        },
+        {
+          "label": "Tuxedo Villa, 3 bedrooms",
+          "href": "/rooms/tuxedo-3br",
+          "text": "the whole Tuxedo villa plus its Seaview lower level, for 6 guests, from ฿25,000 a night. On request only: message us on WhatsApp."
+        },
+        {
+          "label": "Book online",
+          "href": "/booking",
+          "text": "live availability and prices for the entire Magic Villa, Tower Club and Island View."
+        }
+      ]
     }
   ]
 }

@@ -1,4 +1,17 @@
-import type { BlogBlock } from "@/data/blog";
+import Link from "next/link";
+import type { BlogBlock, BlogLinkItem } from "@/data/blog";
+
+function ListItem({ item }: { item: string | BlogLinkItem }) {
+  if (typeof item === "string") return <>{item}</>;
+  return (
+    <>
+      <Link href={item.href} className="font-medium text-pool hover:underline">
+        {item.label}
+      </Link>
+      {item.text ? ` — ${item.text}` : null}
+    </>
+  );
+}
 
 export default function BlogContent({ blocks }: { blocks: BlogBlock[] }) {
   return (
@@ -27,7 +40,9 @@ export default function BlogContent({ blocks }: { blocks: BlogBlock[] }) {
             return (
               <ul key={i} className="list-disc space-y-1 pl-5 text-ink-soft">
                 {block.items?.map((item, j) => (
-                  <li key={j}>{item}</li>
+                  <li key={j}>
+                    <ListItem item={item} />
+                  </li>
                 ))}
               </ul>
             );
@@ -35,7 +50,9 @@ export default function BlogContent({ blocks }: { blocks: BlogBlock[] }) {
             return (
               <ol key={i} className="list-decimal space-y-1 pl-5 text-ink-soft">
                 {block.items?.map((item, j) => (
-                  <li key={j}>{item}</li>
+                  <li key={j}>
+                    <ListItem item={item} />
+                  </li>
                 ))}
               </ol>
             );
