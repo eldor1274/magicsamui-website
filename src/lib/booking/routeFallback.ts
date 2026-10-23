@@ -15,7 +15,7 @@
 // config signs with it, as a strong secret) and only a Beam booking's token goes on to the Beam deps, so a
 // Stripe, demo or garbage request builds no config, logs nothing and writes nothing more than before. Server only.
 
-import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, BookingConfigError, isStrongTokenSecret } from "./config.ts";
+import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, BookingConfigError, LIVE_FULFILMENT_READY, isStrongTokenSecret, resolveProvider } from "./config.ts";
 import type { BookingConfig, Env } from "./config.ts";
 import { providerOf } from "./payments/provider.ts";
 import { getFulfilmentProviderDeps } from "./runtime.ts";
@@ -32,18 +32,31 @@ export function isBeamFallbackError(e: unknown): e is BookingConfigError {
   return e instanceof BookingConfigError && (e.code === "payment_misconfigured" || e.code === "invalid_beam_base");
 }
 
+/** The provider BOOKING_PAYMENT_PROVIDER names, or null for a value that is not one (a typo). Never throws. */
+function providerNamed(env: Env): ReturnType<typeof resolveProvider> | null {
+  try {
+    return resolveProvider(env);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Whether the fallback could answer any request at all, from the error and the variables alone (nothing built,
- * nothing logged): a typo error, a strong BOOKING_TOKEN_SECRET, a Beam API base (live or playground) and both
- * Beam keys. False: the route keeps today's code path exactly (the abandon route reads no body).
+ * nothing logged): a typo error, a provider other than beam (with beam the Beam config is the active one, which just
+ * threw, and there is no Beam drain), a strong BOOKING_TOKEN_SECRET, a Beam API base, both Beam keys and
+ * BEAM_WEBHOOK_HMAC_KEY - what getBeamDrainConfig requires - and the live base only while LIVE_FULFILMENT_READY.beam
+ * is true (round 7: no beam-live drain exists before). False: the route keeps today's code path exactly (the abandon
+ * route reads no body).
  */
 export function beamFallbackPossible(e: unknown, env: Env): boolean {
-  if (!isBeamFallbackError(e)) return false;
+  if (!isBeamFallbackError(e) || providerNamed(env) === "beam") return false;
   const base = trimmed(env.BEAM_API_BASE).replace(/\/+$/, "");
   return (
-    (base === BEAM_LIVE_BASE || base === BEAM_PLAYGROUND_BASE) &&
+    ((base === BEAM_LIVE_BASE && LIVE_FULFILMENT_READY.beam) || base === BEAM_PLAYGROUND_BASE) &&
     trimmed(env.BEAM_MERCHANT_ID) !== "" &&
     trimmed(env.BEAM_API_KEY) !== "" &&
+    trimmed(env.BEAM_WEBHOOK_HMAC_KEY) !== "" &&
     isStrongTokenSecret(trimmed(env.BOOKING_TOKEN_SECRET))
   );
 }

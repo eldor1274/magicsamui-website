@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 import { buildOffers } from "./availability.ts";
 import { BEAM_API_KEY, BEAM_HMAC_KEY_B64, BEAM_MERCHANT_ID } from "./beamTestkit.ts";
 import { POLICY_VERSION } from "./catalogue.ts";
-import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE } from "./config.ts";
+import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, BookingConfigError, LIVE_FULFILMENT_READY, getFulfilmentConfig } from "./config.ts";
 import type { Env } from "./config.ts";
 import { addDays } from "./dates.ts";
 import { demoInventory } from "./demoProvider.ts";
@@ -1052,6 +1052,10 @@ test("the fallback is for typos only: a lock (live_payments_locked), a missing t
     ["a provider typo on a Vercel preview: the Beam drain can't run there without real writes", { ...TYPO_ENV, VERCEL_ENV: "preview" }, NOT_CONFIGURED, "payment_misconfigured"],
     ["a provider typo with a weak BOOKING_TOKEN_SECRET: no Beam config can sign with it", { ...TYPO_ENV, BOOKING_TOKEN_SECRET: "short-secret" }, NOT_CONFIGURED, "payment_misconfigured"],
     ["a provider typo with the Beam base but neither Beam key", { ...TYPO_ENV, BEAM_MERCHANT_ID: undefined, BEAM_API_KEY: undefined }, NOT_CONFIGURED, "payment_misconfigured"],
+    // Round 7: what getBeamDrainConfig also requires - BEAM_WEBHOOK_HMAC_KEY, and the live base only once LIVE_FULFILMENT_READY.beam is true.
+    ["a provider typo with the Beam playground keys but no BEAM_WEBHOOK_HMAC_KEY (no Beam drain)", { ...TYPO_ENV, BEAM_WEBHOOK_HMAC_KEY: undefined }, NOT_CONFIGURED, "payment_misconfigured"],
+    ["a provider typo with the live Beam base while LIVE_FULFILMENT_READY.beam is false (no Beam drain)", { ...TYPO_ENV, BEAM_API_BASE: BEAM_LIVE_BASE }, NOT_CONFIGURED, "payment_misconfigured"],
+    ["a provider typo with the live Beam base and no BEAM_WEBHOOK_HMAC_KEY", { ...TYPO_ENV, BEAM_API_BASE: BEAM_LIVE_BASE, BEAM_WEBHOOK_HMAC_KEY: undefined }, NOT_CONFIGURED, "payment_misconfigured"],
   ];
   await withWorlds(t, async (open) => {
     for (const [label, env, body, code] of cases) {
@@ -1068,12 +1072,49 @@ test("the fallback is for typos only: a lock (live_payments_locked), a missing t
       for (const l of lines) assert.match(l, new RegExp(`^error \\[booking\\] config error: ${code}`), label);
       assert.deepEqual(w.order, [], `${label}: no Beam or Stripe call`);
       assert.deepEqual(w.kv.writes, [], `${label}: nothing written`);
+      // Round 7: with provider beam the Beam config is the one that threw (no Beam drain): no body read either.
+      if (label.startsWith("a Beam-primary typo")) assert.equal(abandon.bodyUsed, false, label);
       if (label.startsWith("a Beam-primary typo")) {
         const hook = await w.beamWebhook(unsignedBeam);
         assert.deepEqual([hook.status, hook.body, hook.bodyUsed], [503, "webhook not configured", false], `${label}: the Beam webhook (Beam retries)`);
       }
     }
   });
+});
+
+test("beamFallbackPossible asks what getBeamDrainConfig asks, from the variables alone (round 7): a typo error, a provider other than beam, a recognised base (the live one only with LIVE_FULFILMENT_READY.beam), both keys, BEAM_WEBHOOK_HMAC_KEY and a strong secret", async () => {
+  // routeFallback.ts imports runtime.ts (next/server): loaded once the resolve hook is in place.
+  await loadRoutes();
+  const { beamFallbackPossible } = await import("./routeFallback.ts");
+  const errorOf = (env: Env): unknown => {
+    try {
+      getFulfilmentConfig(env);
+    } catch (e) {
+      return e;
+    }
+    return null;
+  };
+  assert.equal(LIVE_FULFILMENT_READY.beam, false);
+  const cases: [string, Env, boolean][] = [
+    ["the Beam playground drain variables", TYPO_ENV, true],
+    ["no BEAM_WEBHOOK_HMAC_KEY", { ...TYPO_ENV, BEAM_WEBHOOK_HMAC_KEY: undefined }, false],
+    ["a blank BEAM_WEBHOOK_HMAC_KEY", { ...TYPO_ENV, BEAM_WEBHOOK_HMAC_KEY: "  " }, false],
+    ["the live base (the code switch is off)", { ...TYPO_ENV, BEAM_API_BASE: BEAM_LIVE_BASE }, false],
+    ["no BEAM_MERCHANT_ID", { ...TYPO_ENV, BEAM_MERCHANT_ID: undefined }, false],
+    ["no BEAM_API_KEY", { ...TYPO_ENV, BEAM_API_KEY: undefined }, false],
+    ["an unknown base", { ...TYPO_ENV, BEAM_API_BASE: "https://beam.invalid" }, false],
+    ["a weak BOOKING_TOKEN_SECRET", { ...TYPO_ENV, BOOKING_TOKEN_SECRET: "short-secret" }, false],
+    ["provider beam with a typo elsewhere", { ...BEAM_PRIMARY, CLOUDBEDS_API_KEY_BOOKING: "cbat_write_routeenvs", CLOUDBEDS_PROPERTY_ID: "not-a-number" }, false],
+  ];
+  for (const [label, env, possible] of cases) {
+    const e = errorOf(env);
+    assert.ok(e instanceof BookingConfigError && e.code === "payment_misconfigured", label);
+    assert.equal(beamFallbackPossible(e, env), possible, label);
+  }
+  // Never for an error that is not a typo, nor without one.
+  assert.equal(beamFallbackPossible(new BookingConfigError("live_payments_locked", "locked"), TYPO_ENV), false);
+  assert.equal(beamFallbackPossible(new Error("x"), TYPO_ENV), false);
+  assert.equal(beamFallbackPossible(null, TYPO_ENV), false);
 });
 
 test("Beam deps that can't be built after a typo (a runtime store that throws): the config error, as before - the routes and the return page never throw", async (t) => {
