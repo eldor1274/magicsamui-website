@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 import { buildOffers } from "./availability.ts";
 import { BEAM_API_KEY, BEAM_HMAC_KEY_B64, BEAM_MERCHANT_ID } from "./beamTestkit.ts";
 import { POLICY_VERSION } from "./catalogue.ts";
-import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, BookingConfigError, LIVE_FULFILMENT_READY, getFulfilmentConfig } from "./config.ts";
+import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, BookingConfigError, LIVE_FULFILMENT_READY, getBeamDrainConfig, getFulfilmentConfig } from "./config.ts";
 import type { Env } from "./config.ts";
 import { addDays } from "./dates.ts";
 import { demoInventory } from "./demoProvider.ts";
@@ -904,6 +904,14 @@ const TYPO = "bean";
 const TYPO_ENV: Env = { ...BEAM_PRIMARY, BOOKING_PAYMENT_PROVIDER: TYPO };
 /** The same typo without any Beam variable: today's answers, for comparison. */
 const TYPO_NO_BEAM_ENV: Env = { ...STRIPE_PRIMARY, BOOKING_PAYMENT_PROVIDER: TYPO };
+/** Real Cloudbeds writes next to the typo (round 8): the booking key, the property id and Upstash (the worlds' store). */
+const TYPO_WRITES_ENV: Env = {
+  ...TYPO_ENV,
+  CLOUDBEDS_API_KEY_BOOKING: "cbat_write_routeenvs",
+  CLOUDBEDS_PROPERTY_ID: "235064",
+  UPSTASH_REDIS_REST_URL: "https://routeenvs-redis.upstash.io",
+  UPSTASH_REDIS_REST_TOKEN: "routeenvs-redis-token",
+};
 const NOT_CONFIGURED = { ok: false, error: "payment_unavailable", message: "Online payment is not configured right now. No payment was taken." };
 const LOCKED = { ok: false, error: "live_payments_locked", message: "Online payment on this page is paused right now. No payment was taken." };
 const COULD_NOT_CHECK = { ok: false, error: "payment_unavailable", message: "We couldn't check this payment right now. Please refresh in a moment." };
@@ -1056,6 +1064,11 @@ test("the fallback is for typos only: a lock (live_payments_locked), a missing t
     ["a provider typo with the Beam playground keys but no BEAM_WEBHOOK_HMAC_KEY (no Beam drain)", { ...TYPO_ENV, BEAM_WEBHOOK_HMAC_KEY: undefined }, NOT_CONFIGURED, "payment_misconfigured"],
     ["a provider typo with the live Beam base while LIVE_FULFILMENT_READY.beam is false (no Beam drain)", { ...TYPO_ENV, BEAM_API_BASE: BEAM_LIVE_BASE }, NOT_CONFIGURED, "payment_misconfigured"],
     ["a provider typo with the live Beam base and no BEAM_WEBHOOK_HMAC_KEY", { ...TYPO_ENV, BEAM_API_BASE: BEAM_LIVE_BASE, BEAM_WEBHOOK_HMAC_KEY: undefined }, NOT_CONFIGURED, "payment_misconfigured"],
+    // Round 8: what the Beam-mode branch of the config requires of the Cloudbeds writes (no Beam drain without them).
+    ["a provider typo with the booking key but no Redis", { ...TYPO_WRITES_ENV, UPSTASH_REDIS_REST_URL: undefined, UPSTASH_REDIS_REST_TOKEN: undefined }, NOT_CONFIGURED, "payment_misconfigured"],
+    ["a provider typo with the booking key and a CLOUDBEDS_PROPERTY_ID that is not numeric", { ...TYPO_WRITES_ENV, CLOUDBEDS_PROPERTY_ID: "23506x" }, NOT_CONFIGURED, "payment_misconfigured"],
+    ["a provider typo with the booking key and BOOKING_DATA_SOURCE=demo", { ...TYPO_WRITES_ENV, BOOKING_DATA_SOURCE: "demo" }, NOT_CONFIGURED, "payment_misconfigured"],
+    ["a provider typo on the production deployment without the booking key", { ...TYPO_ENV, VERCEL_ENV: "production" }, NOT_CONFIGURED, "payment_misconfigured"],
   ];
   await withWorlds(t, async (open) => {
     for (const [label, env, body, code] of cases) {
@@ -1064,16 +1077,16 @@ test("the fallback is for typos only: a lock (live_payments_locked), a missing t
       const status = await w.status({ t: beamToken });
       const abandon = await w.abandon({ t: beamToken });
       for (const a of [status, abandon]) assert.deepEqual([a.status, a.cacheControl, a.body], [503, "no-store", body], label);
-      // No Beam config could answer (a lock, no or a weak secret, no recognised base, no keys): abandon keeps today's path and reads no body.
-      if (!label.startsWith("a Beam-primary typo") && !label.startsWith("a provider typo on a Vercel")) assert.equal(abandon.bodyUsed, false, label);
+      // No Beam config could answer (a lock, no or a weak secret, no recognised base, no keys, no writes the Beam config
+      // accepts): abandon keeps today's path and reads no body (round 8: also on a Vercel deployment without real writes).
+      assert.equal(abandon.bodyUsed, false, label);
       assert.deepEqual(await w.returnPage(beamToken), COULD_NOT_CHECK, label);
       const lines = w.lines.map(lineText);
       assert.equal(lines.length, 2, `${label}: ${lines.join(" | ")}`);
       for (const l of lines) assert.match(l, new RegExp(`^error \\[booking\\] config error: ${code}`), label);
       assert.deepEqual(w.order, [], `${label}: no Beam or Stripe call`);
       assert.deepEqual(w.kv.writes, [], `${label}: nothing written`);
-      // Round 7: with provider beam the Beam config is the one that threw (no Beam drain): no body read either.
-      if (label.startsWith("a Beam-primary typo")) assert.equal(abandon.bodyUsed, false, label);
+      // Round 7: with provider beam the Beam config is the one that threw (no Beam drain): no body read either (above).
       if (label.startsWith("a Beam-primary typo")) {
         const hook = await w.beamWebhook(unsignedBeam);
         assert.deepEqual([hook.status, hook.body, hook.bodyUsed], [503, "webhook not configured", false], `${label}: the Beam webhook (Beam retries)`);
@@ -1082,7 +1095,7 @@ test("the fallback is for typos only: a lock (live_payments_locked), a missing t
   });
 });
 
-test("beamFallbackPossible asks what getBeamDrainConfig asks, from the variables alone (round 7): a typo error, a provider other than beam, a recognised base (the live one only with LIVE_FULFILMENT_READY.beam), both keys, BEAM_WEBHOOK_HMAC_KEY and a strong secret", async () => {
+test("beamFallbackPossible asks what getBeamDrainConfig asks, from the variables alone (rounds 7 and 8): a typo error, a provider other than beam, a recognised base (the live one only with LIVE_FULFILMENT_READY.beam), both keys, BEAM_WEBHOOK_HMAC_KEY, a strong secret and the Cloudbeds writes the Beam config accepts", async () => {
   // routeFallback.ts imports runtime.ts (next/server): loaded once the resolve hook is in place.
   await loadRoutes();
   const { beamFallbackPossible } = await import("./routeFallback.ts");
@@ -1105,11 +1118,24 @@ test("beamFallbackPossible asks what getBeamDrainConfig asks, from the variables
     ["an unknown base", { ...TYPO_ENV, BEAM_API_BASE: "https://beam.invalid" }, false],
     ["a weak BOOKING_TOKEN_SECRET", { ...TYPO_ENV, BOOKING_TOKEN_SECRET: "short-secret" }, false],
     ["provider beam with a typo elsewhere", { ...BEAM_PRIMARY, CLOUDBEDS_API_KEY_BOOKING: "cbat_write_routeenvs", CLOUDBEDS_PROPERTY_ID: "not-a-number" }, false],
+    // Round 8: the Beam-mode branch's Cloudbeds writes.
+    ["real writes: the booking key, a numeric property id, Redis, live Cloudbeds data", TYPO_WRITES_ENV, true],
+    ["real writes on a Vercel preview", { ...TYPO_WRITES_ENV, VERCEL_ENV: "preview" }, true],
+    ["the booking key without Redis", { ...TYPO_WRITES_ENV, UPSTASH_REDIS_REST_URL: undefined, UPSTASH_REDIS_REST_TOKEN: undefined }, false],
+    ["the booking key with Redis by its KV_REST_API names", { ...TYPO_WRITES_ENV, UPSTASH_REDIS_REST_URL: undefined, UPSTASH_REDIS_REST_TOKEN: undefined, KV_REST_API_URL: "https://routeenvs-kv.upstash.io", KV_REST_API_TOKEN: "routeenvs-kv-token" }, true],
+    ["the booking key with a CLOUDBEDS_PROPERTY_ID that is not numeric", { ...TYPO_WRITES_ENV, CLOUDBEDS_PROPERTY_ID: "23506x" }, false],
+    ["the booking key without CLOUDBEDS_PROPERTY_ID", { ...TYPO_WRITES_ENV, CLOUDBEDS_PROPERTY_ID: undefined }, false],
+    ["the booking key with BOOKING_DATA_SOURCE=demo", { ...TYPO_WRITES_ENV, BOOKING_DATA_SOURCE: "demo" }, false],
+    ["no booking key on a Vercel preview", { ...TYPO_ENV, VERCEL_ENV: "preview" }, false],
+    ["no booking key on the production deployment", { ...TYPO_ENV, VERCEL_ENV: "production" }, false],
+    ["a blank booking key, locally (the simulated writer)", { ...TYPO_ENV, CLOUDBEDS_API_KEY_BOOKING: "  " }, true],
   ];
   for (const [label, env, possible] of cases) {
     const e = errorOf(env);
     assert.ok(e instanceof BookingConfigError && e.code === "payment_misconfigured", label);
     assert.equal(beamFallbackPossible(e, env), possible, label);
+    // Round 8: exactly when the Beam drain builds a config (the live base aside: no beam-live drain before S7.1).
+    assert.equal(getBeamDrainConfig(env) !== null, possible, `${label}: getBeamDrainConfig`);
   }
   // Never for an error that is not a typo, nor without one.
   assert.equal(beamFallbackPossible(new BookingConfigError("live_payments_locked", "locked"), TYPO_ENV), false);

@@ -15,7 +15,16 @@
 // config signs with it, as a strong secret) and only a Beam booking's token goes on to the Beam deps, so a
 // Stripe, demo or garbage request builds no config, logs nothing and writes nothing more than before. Server only.
 
-import { BEAM_LIVE_BASE, BEAM_PLAYGROUND_BASE, BookingConfigError, LIVE_FULFILMENT_READY, isStrongTokenSecret, resolveProvider } from "./config.ts";
+import {
+  BEAM_LIVE_BASE,
+  BEAM_PLAYGROUND_BASE,
+  BookingConfigError,
+  beamLiveBlockers,
+  isStrongTokenSecret,
+  resolveDataSource,
+  resolveProvider,
+  resolveRedis,
+} from "./config.ts";
 import type { BookingConfig, Env } from "./config.ts";
 import { providerOf } from "./payments/provider.ts";
 import { getFulfilmentProviderDeps } from "./runtime.ts";
@@ -45,20 +54,29 @@ function providerNamed(env: Env): ReturnType<typeof resolveProvider> | null {
  * Whether the fallback could answer any request at all, from the error and the variables alone (nothing built,
  * nothing logged): a typo error, a provider other than beam (with beam the Beam config is the active one, which just
  * threw, and there is no Beam drain), a strong BOOKING_TOKEN_SECRET, a Beam API base, both Beam keys and
- * BEAM_WEBHOOK_HMAC_KEY - what getBeamDrainConfig requires - and the live base only while LIVE_FULFILMENT_READY.beam
- * is true (round 7: no beam-live drain exists before). False: the route keeps today's code path exactly (the abandon
- * route reads no body).
+ * BEAM_WEBHOOK_HMAC_KEY - what getBeamDrainConfig requires - and what the Beam-mode branch of the config requires of
+ * the Cloudbeds writes (round 8): with CLOUDBEDS_API_KEY_BOOKING a numeric CLOUDBEDS_PROPERTY_ID, Upstash Redis and
+ * live Cloudbeds data; without it no VERCEL_ENV (the simulated writer runs locally only). The live base only when
+ * every condition for finishing beam-live payments holds (beamLiveBlockers with `fulfilment`, the code switch
+ * LIVE_FULFILMENT_READY.beam among them, so never before S7.1). True exactly when getBeamDrainConfig builds a Beam
+ * config; false: the route keeps today's code path exactly (the abandon route reads no body).
  */
 export function beamFallbackPossible(e: unknown, env: Env): boolean {
   if (!isBeamFallbackError(e) || providerNamed(env) === "beam") return false;
   const base = trimmed(env.BEAM_API_BASE).replace(/\/+$/, "");
-  return (
-    ((base === BEAM_LIVE_BASE && LIVE_FULFILMENT_READY.beam) || base === BEAM_PLAYGROUND_BASE) &&
+  const credentials =
     trimmed(env.BEAM_MERCHANT_ID) !== "" &&
     trimmed(env.BEAM_API_KEY) !== "" &&
     trimmed(env.BEAM_WEBHOOK_HMAC_KEY) !== "" &&
-    isStrongTokenSecret(trimmed(env.BOOKING_TOKEN_SECRET))
-  );
+    isStrongTokenSecret(trimmed(env.BOOKING_TOKEN_SECRET));
+  if (!credentials) return false;
+  if (base === BEAM_LIVE_BASE) return beamLiveBlockers({ ...env, BOOKING_PAYMENT_PROVIDER: "beam" }, { fulfilment: true }).length === 0;
+  if (base !== BEAM_PLAYGROUND_BASE) return false;
+  // beam-playground: the Cloudbeds writer of the Beam-mode branch of buildBookingConfig.
+  if (trimmed(env.CLOUDBEDS_API_KEY_BOOKING) !== "") {
+    return /^\d{1,12}$/.test(trimmed(env.CLOUDBEDS_PROPERTY_ID)) && resolveRedis(env) !== null && resolveDataSource(env) === "cloudbeds";
+  }
+  return trimmed(env.VERCEL_ENV) === "";
 }
 
 export interface BeamFallback {
