@@ -91,7 +91,8 @@ export default function LocalizedLanding({ t }: { t: Landing }) {
               <div className="p-4">
                 <p className="font-medium text-ink">{room.name}</p>
                 <p className="mt-1 text-sm text-ink-soft">
-                  {room.area.sqm} m² · {room.guests} {t.guestsWord}
+                  {/* bdi keeps "150 m²" in order on the right-to-left Hebrew page */}
+                  <bdi>{room.area.sqm} m²</bdi> · {room.guests} {t.guestsWord}
                 </p>
               </div>
             </Link>

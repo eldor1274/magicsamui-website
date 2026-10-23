@@ -3,11 +3,19 @@ import type { BlogBlock, BlogLinkItem } from "@/data/blog";
 
 function ListItem({ item }: { item: string | BlogLinkItem }) {
   if (typeof item === "string") return <>{item}</>;
+  const className = "font-medium text-pool hover:underline";
   return (
     <>
-      <Link href={item.href} className="font-medium text-pool hover:underline">
-        {item.label}
-      </Link>
+      {/^https?:\/\//.test(item.href) ? (
+        // WhatsApp and other outside links: a plain anchor, as in the footer.
+        <a href={item.href} className={className}>
+          {item.label}
+        </a>
+      ) : (
+        <Link href={item.href} className={className}>
+          {item.label}
+        </Link>
+      )}
       {item.text ? ` — ${item.text}` : null}
     </>
   );

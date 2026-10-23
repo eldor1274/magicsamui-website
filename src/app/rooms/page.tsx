@@ -14,7 +14,7 @@ const fromThb = Math.min(...rooms.map((r) => r.priceThb));
 export const metadata: Metadata = {
   alternates: { canonical: "/rooms" },
   title: "Suites & Villas | Magic Suites & Villas",
-  description: `Suites and villas in Koh Samui from ฿${fromThb.toLocaleString("en-US")} a night, most with a private pool: 3-bedroom stays for 6 and the whole villa, 5 bedrooms, sleeps 10.`,
+  description: `Suites and villas in Koh Samui from ฿${fromThb.toLocaleString("en-US")} a night, most with a private pool: 3-bedroom stays for 6 and the whole Magic Villa (5 bedrooms, sleeps 10).`,
 };
 
 const magicVilla = villas.find((v) => v.slug === "magic-villa")!;
@@ -167,8 +167,8 @@ export default function RoomsPage() {
         </div>
         {threeBedroomsShareALevel && (
           <p className="mt-3 text-xs text-ink-soft">
-            Tower Club and Island View share the Magic Seaview level, so one of the two can be
-            booked on a given night. The entire Magic Villa includes all four Magic Villa suites.
+            Tower Club and Island View share the Magic Seaview level, so only one of the two can be
+            booked for any given night. The entire Magic Villa includes all four Magic Villa suites.
           </p>
         )}
       </section>

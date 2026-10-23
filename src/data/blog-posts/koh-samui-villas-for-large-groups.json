@@ -115,17 +115,22 @@
         {
           "label": "Island Views & Sunrise 3 Bedroom Suite",
           "href": "/rooms/island-view-3br",
-          "text": "3 bedrooms for 6 guests, with jet plunge pools, from ฿18,000 a night. It shares the Magic Seaview level with Tower Club, so one of the two can be booked on a given night."
+          "text": "3 bedrooms for 6 guests, with jet plunge pools, from ฿18,000 a night. It shares the Magic Seaview level with Tower Club, so only one of the two can be booked for any given night."
         },
         {
           "label": "Tuxedo Villa, 3 bedrooms",
           "href": "/rooms/tuxedo-3br",
-          "text": "the whole Tuxedo villa plus its Seaview lower level, for 6 guests, from ฿25,000 a night. On request only: message us on WhatsApp."
+          "text": "the whole Tuxedo villa plus its Seaview lower level, for 6 guests, from ฿25,000 a night. On request, not bookable online."
         },
         {
           "label": "Book online",
           "href": "/booking",
           "text": "live availability and prices for the entire Magic Villa, Tower Club and Island View."
+        },
+        {
+          "label": "Message us on WhatsApp",
+          "href": "https://wa.me/66952466011",
+          "text": "to ask for the Tuxedo Villa with 3 bedrooms, or with any question about your group."
         }
       ]
     }

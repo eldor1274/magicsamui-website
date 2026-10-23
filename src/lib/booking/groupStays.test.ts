@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import type { BlogBlock, BlogLinkItem } from "../../data/blog.ts";
 import { landings } from "../../data/landings.ts";
 import { getRoomBySlug, rooms } from "../../data/rooms.ts";
+import { site } from "../../data/site.ts";
 import { hasSeaView, resortJsonLd, roomJsonLd, wholeVillaOf } from "../structuredData.ts";
 import { CATALOGUE, UNIT_NAMES, getCatalogueRoom, sharedUnits } from "./catalogue.ts";
 
@@ -36,6 +37,11 @@ test("the group stays the copy describes: 3 bedrooms for 6 and the entire Magic 
   }
 });
 
+// Which villa is meant must be clear: Tuxedo is a villa too.
+const groupStaysLine = new RegExp(
+  `${tower.bedrooms}-bedroom stays for ${tower.guests} and the whole Magic Villa \\(${villa.bedrooms} bedrooms, sleeps ${villa.guests}\\)`,
+);
+
 test("home and /rooms descriptions: true, and they name the group stays", () => {
   const layout = repoFile("src/app/layout.tsx");
   const descriptions = [...layout.matchAll(/"(Koh Samui villas and suites[^"]*)"/g)].map((m) => m[1]);
@@ -43,10 +49,11 @@ test("home and /rooms descriptions: true, and they name the group stays", () => 
   for (const d of descriptions) {
     assert.ok(d.length <= 160, `${d.length} characters: ${d}`);
     assert.match(d, /most with a private pool/);
-    assert.match(d, new RegExp(`${tower.bedrooms}-bedroom stays for ${tower.guests} and the whole villa, ${villa.bedrooms} bedrooms, sleeps ${villa.guests}`));
+    assert.match(d, groupStaysLine);
   }
   assert.doesNotMatch(layout, /each with its own private pool/);
   const roomsPage = repoFile("src/app/rooms/page.tsx");
+  assert.match(roomsPage, groupStaysLine);
   assert.match(roomsPage, /const fromThb = Math\.min\(\.\.\.rooms\.map\(\(r\) => r\.priceThb\)\);/);
   assert.doesNotMatch(roomsPage, /฿4,000|every one with its own pool/);
 });
@@ -81,7 +88,7 @@ test("blog posts: the Where to Stay sections link real pages and state the room 
       .filter((i): i is BlogLinkItem => typeof i === "object");
     assert.deepEqual(
       links.map((l) => l.href),
-      ["/rooms/magic-1-villa", "/rooms/tower-club-3br", "/rooms/island-view-3br", "/rooms/tuxedo-3br", "/booking"],
+      ["/rooms/magic-1-villa", "/rooms/tower-club-3br", "/rooms/island-view-3br", "/rooms/tuxedo-3br", "/booking", site.whatsapp],
       slug,
     );
     for (const link of links.filter((l) => l.href.startsWith("/rooms/"))) {
@@ -93,12 +100,52 @@ test("blog posts: the Where to Stay sections link real pages and state the room 
   }
 });
 
+test("the one-per-night limit on the two 3-bedroom Magic Villa stays reads as a limit wherever it is stated", () => {
+  const limit = "only one of the two can be booked for any given night";
+  for (const path of [
+    "src/app/page.tsx",
+    "src/app/rooms/page.tsx",
+    "public/llms.txt",
+    "src/data/blog-posts/koh-samui-villas-for-large-groups.json",
+    "src/data/blog-posts/family-friendly-villas-in-koh-samui-accommodations-for-all-ages.json",
+  ]) {
+    const text = repoFile(path).replace(/\s+/g, " ");
+    assert.ok(text.includes(limit), path);
+    assert.doesNotMatch(text, /on a given night|one 3-bedroom stay per night/, path);
+  }
+});
+
 test("language pages: the entire Magic Villa card states the villa's real size", () => {
   for (const t of Object.values(landings)) {
     assert.ok(t.familyText.includes("{price}"), t.code);
     for (const n of [villa.bedrooms, 4, villa.guests]) {
       assert.match(t.familyText, new RegExp(`(^|\\D)${n}(\\D|$)`), `${t.code}: ${n}`);
     }
+  }
+});
+
+// Each language's word for a pool, and for "most" (the hero line's own wording).
+const POOL_WORDS: Record<string, { pool: RegExp; most: RegExp }> = {
+  he: { pool: /בריכ/, most: /רובן/ },
+  ru: { pool: /бассейн/i, most: /большинств/i },
+  fr: { pool: /piscine/i, most: /la plupart/i },
+  de: { pool: /pool/i, most: /die meisten/i },
+  zh: { pool: /泳池/, most: /大多/ },
+  es: { pool: /piscina/i, most: /la mayoría/i },
+  th: { pool: /สระ/, most: /ส่วนใหญ่/ },
+};
+
+test("language pages: no line says every unit has its own pool or a terrace", () => {
+  // The Garden Suite and the Tuxedo Seaview Unit have no pool, so a pool is only ever "most" units.
+  assert.ok(rooms.some((r) => r.hasPool === false));
+  assert.deepEqual(Object.keys(POOL_WORDS).sort(), Object.keys(landings).sort());
+  for (const t of Object.values(landings)) {
+    const { pool, most } = POOL_WORDS[t.code];
+    for (const [field, text] of [["roomsSub", t.roomsSub], ["sub", t.sub], ["description", t.description]] as const) {
+      if (pool.test(text)) assert.match(text, most, `${t.code}.${field} claims a pool for every unit: ${text}`);
+    }
+    // The Tuxedo Seaview Unit lists no terrace.
+    assert.doesNotMatch(t.roomsSub, /מרפסת|террас|terrass|terraz|露台|ระเบียง/i, `${t.code}.roomsSub`);
   }
 });
 

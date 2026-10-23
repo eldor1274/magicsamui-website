@@ -53,7 +53,8 @@ const tuxedo3br = getRoomBySlug("tuxedo-3br")!;
 const wholeMagicVilla = getRoomBySlug("magic-1-villa")!;
 
 const thb = (n: number) => `฿${n.toLocaleString("en-US")}`;
-const sizeLine = (r: Room) => `${r.bedrooms} bedrooms · up to ${r.guests} guests`;
+/** One wording for every card: "3 bedrooms for 6 guests". */
+const sizeTitle = (r: Room) => `${r.bedrooms} bedrooms for ${r.guests} guests`;
 // Tower Club and Island View both use the Magic Seaview level, so only one of them sells per night.
 const threeBedroomsShareALevel = sharedUnits(towerClub.slug, islandView.slug).length > 0;
 
@@ -70,11 +71,11 @@ const groupStays: {
   {
     key: "magic-3br",
     label: "Magic Villa",
-    title: `${towerClub.bedrooms} bedrooms for ${towerClub.guests} guests`,
+    title: sizeTitle(towerClub),
     facts: "Tower Club or Island View",
     text: `Both with private pools and sea views.${
       threeBedroomsShareALevel
-        ? " They share the Magic Seaview level, so Magic Villa has one 3-bedroom stay per night."
+        ? " They share the Magic Seaview level, so only one of the two can be booked for any given night."
         : ""
     }`,
     fromThb: Math.min(towerClub.priceThb, islandView.priceThb),
@@ -84,9 +85,9 @@ const groupStays: {
   {
     key: "tuxedo-3br",
     label: "Tuxedo Villa",
-    title: `Tuxedo Villa, ${tuxedo3br.bedrooms} bedrooms for ${tuxedo3br.guests}`,
-    facts: sizeLine(tuxedo3br),
-    text: "The whole Tuxedo villa with its waterfall infinity pool, plus the Seaview lower level.",
+    title: sizeTitle(tuxedo3br),
+    facts: "Whole villa + Seaview lower level",
+    text: "The 2-bedroom villa with its waterfall infinity pool and rooftop terrace, plus a third bedroom on the lower level.",
     fromThb: tuxedo3br.priceThb,
     links: [tuxedo3br],
     bookable: isBookableSlug(tuxedo3br.slug),
@@ -94,8 +95,8 @@ const groupStays: {
   {
     key: "magic-1-villa",
     label: "Magic Villa",
-    title: "The entire Magic Villa",
-    facts: `${wholeMagicVilla.bedrooms} bedrooms · ${wholeMagicVilla.poolType} · sleeps ${wholeMagicVilla.guests}`,
+    title: sizeTitle(wholeMagicVilla),
+    facts: `Whole villa · ${wholeMagicVilla.poolType}`,
     text: "All four suites across three floors, for your group only.",
     fromThb: wholeMagicVilla.priceThb,
     links: [wholeMagicVilla],

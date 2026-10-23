@@ -508,7 +508,8 @@ export function resolvePromoSettings(env: Env, provider: PaymentProvider, paymen
  * descriptions) must be swapped out: the own engine serves /booking (BOOKING_ENGINE=own) but does
  * NOT honour the code with Cloudbeds' Direct rate (BOOKING_DIRECT_PROMO=off, or no live Cloudbeds
  * rates). While it honours DIRECT it shows the same copy as the classic engine; with the default
- * engine nothing changes.
+ * engine nothing changes. public/llms.txt is a static file that cannot follow this switch and keeps
+ * the best-rate line (code DIRECT): reword it there too if production ever runs with this true.
  */
 export function directCopySwapped(env: Env = process.env): boolean {
   if (resolveBookingEngine(env) !== "own") return false;

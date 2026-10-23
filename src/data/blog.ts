@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-/** A list item that links to a page on this site: `label` is the link text, `text` follows it. */
+/** A list item that links to a page on this site (or an outside URL such as WhatsApp): `label` is the link text, `text` follows it. */
 export interface BlogLinkItem {
   label: string;
   href: string;
