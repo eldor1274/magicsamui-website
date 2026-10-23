@@ -184,7 +184,9 @@ export async function runStatus(params: StatusParams, deps: StatusDeps): Promise
  * Beam only (design S4.6, gap review 16): a booking fulfil has finished is
  * answered from its done marker before any Beam call - paid, with the marker's
  * confirmed or needs_attention and the GA4 purchase (purchaseFor) - when the
- * marker's ref and amount are the token's. Anything else (no marker, or one
+ * marker's ref and amount are the token's; a needs_attention marker of a payment
+ * refunded before it was confirmed (FulfilDone.refunded) answers "refunded", as a
+ * refund read from Beam does (round 8). Anything else (no marker, or one
  * that is not this booking's) is read from Beam as above. A hold already
  * released (its release marker) is not released again: no second Beam
  * reading (round 6). A Beam token whose payMethod is present but not one of
@@ -211,6 +213,8 @@ async function holdFirstStatus(
     if (gw.provider === "beam") {
       const done = await readJson<FulfilDone>(deps.kv, keys.fulfilDone(key));
       if (done && done.ref === booking.ref && done.totalSatang === booking.dueNowSatang) {
+        // Refunded before it was confirmed (round 8): the same answer as a refund read from Beam - never "Payment received".
+        if (done.state === "needs_attention" && done.refunded === true) return ok(booking, "refunded", null, nowMs, NOT_APPLICABLE);
         const fulfilment: FulfilmentView = { state: done.state, reservationId: done.reservationId };
         return ok(booking, "paid", null, nowMs, fulfilment, purchaseFor(ctx.config, booking, fulfilment));
       }

@@ -85,6 +85,11 @@ export interface FulfilDone {
   ref: string;
   totalSatang: number;
   reason?: string;
+  /**
+   * needs_attention only: the provider reported the payment REFUNDED before it was confirmed (never Stripe). The
+   * Beam return page then answers "refunded" from this marker, never "Payment received" (round 8).
+   */
+  refunded?: true;
   at: number;
 }
 
@@ -231,6 +236,7 @@ async function fulfilLocked(key: string, deps: CoreDeps, gw: PaymentGateway): Pr
       key,
       meta,
       `REFUNDED at ${gw.brand} before the booking was confirmed: the guest's payment was refunded in ${gw.brand}. Do NOT confirm Cloudbeds reservation ${meta.reservationId}: check its folio shows no payment and cancel it by hand so the unit goes back on sale.`,
+      { refunded: true },
     );
   }
   if (payment.state !== "paid") return { state: "not_paid", payment: payment.state };
@@ -496,8 +502,15 @@ function paymentIdShown(gw: PaymentGateway, key: string): string {
   }
 }
 
-async function needsAttention(deps: CoreDeps, gw: PaymentGateway, key: string, meta: PaymentMeta, reason: string): Promise<FulfilOutcome> {
-  await markDone(deps, gw, key, { state: "needs_attention", reservationId: meta.reservationId, ref: meta.ref, totalSatang: meta.totalSatang, reason, at: nowOf(deps) });
+async function needsAttention(
+  deps: CoreDeps,
+  gw: PaymentGateway,
+  key: string,
+  meta: PaymentMeta,
+  reason: string,
+  flags: Pick<FulfilDone, "refunded"> = {},
+): Promise<FulfilOutcome> {
+  await markDone(deps, gw, key, { state: "needs_attention", reservationId: meta.reservationId, ref: meta.ref, totalSatang: meta.totalSatang, reason, ...flags, at: nowOf(deps) });
   deps.log("fulfil_needs_attention", { ref: meta.ref, reservationId: meta.reservationId });
   await deps.alert(
     `URGENT: paid booking ${meta.ref} needs attention`,

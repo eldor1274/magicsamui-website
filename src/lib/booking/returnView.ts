@@ -213,6 +213,21 @@ export function beamPolledReason(res: Pick<StatusResponse, "status" | "paymentMo
   return res.status === "pending" && providerOf(res.paymentMode) === "beam" ? { reason: res.pendingReason } : null;
 }
 
+/** The reason a Beam poll last read for the pending view (design S5.3), with the poll plan it was read under. */
+export interface PolledReason {
+  plan: PollPlan;
+  reason: StatusResponse["pendingReason"];
+}
+
+/**
+ * The page's next polled reason after a Beam poll answer (beamPolledReason; round 8, so the rule "the words follow the
+ * reason while the page polls" is table-tested): the same plan and reason keep `prev` itself (no re-render); a new
+ * reason under the same plan, or any reason under a new plan (a new round of checks), replaces it.
+ */
+export function nextPolledReason(prev: PolledReason | null, plan: PollPlan, polled: { reason: StatusResponse["pendingReason"] }): PolledReason {
+  return prev !== null && prev.plan === plan && prev.reason === polled.reason ? prev : { plan, reason: polled.reason };
+}
+
 /** Beam's pending view: its title and text, and what the page's live region says. */
 export interface BeamPendingCopy extends ViewCopy {
   announcement: string;

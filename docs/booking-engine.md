@@ -337,10 +337,10 @@ Every guarantee above holds for Beam bookings too (the hold first, the unit lock
 | pending | `unconfirmed` (the window is over, the bank's answer is still outstanding, the hold was released) | "Waiting for your bank or wallet to confirm" - don't pay again, WhatsApp with the reference; nothing was charged if it didn't go through; never "Try again". The words follow the reason while the page polls (no new 15 minutes) |
 | paid | confirming | as on Stripe |
 | paid | confirmed | Booking reference + **Cloudbeds reservation number**; "Your booking confirmation is on its way to the email address you entered" and, under What happens next, the confirmation email "is your record of this booking and payment". Without the Cloudbeds email (beam-playground without the variable, or a beam-live booking finished after it was switched off) the page is the confirmation: "Save or print" and the agreed terms, as on Stripe |
-| paid | needs_attention | as on Stripe - also a refund seen only after fulfil wrote its marker, and a payment that succeeded after its hold was released |
+| paid | needs_attention | as on Stripe - also a payment that succeeded after its hold was released |
 | expired | released | "Payment time ran out" - the room was released; Try again |
 | cancelled | released | "Payment cancelled" - hold released; Try again |
-| refunded | - | "Payment refunded" (read before anything confirmed it); no Try again |
+| refunded | - | "Payment refunded": refunded in Lighthouse before the booking was confirmed, read from Beam or, once the booking was handed to the owner ("REFUNDED at Beam before the booking was confirmed"), from its marker (round 8); no Try again |
 | failed (AMOUNT_OR_REFERENCE_MISMATCH) | - | "We need to check this payment" - contact us only |
 
 The page takes the confirmation-email flag (and, on the playground, whether the Cloudbeds writes are real) from the Beam config that answered the booking, so after a typo in the payment variables (the public config is then the locked one) a paid guest whose Cloudbeds email is on its way does not read that the page is the only confirmation.

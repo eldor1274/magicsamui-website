@@ -63,8 +63,8 @@ import {
 import { ADDONS, FREE_PICKUP_MIN_NIGHTS, HOUSE_POLICIES, RATE_PLANS, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { fetchStatus, recallLinkToken } from "@/lib/booking/apiClient";
 import { isHoldFirstMode, isLiveMode, providerOf } from "@/lib/booking/payments/provider";
-import { beamPaidCopy, beamPendingCopy, beamPolledReason, canRetryPayment, isPollingView, pollPlan, returnViewKind, unpaidCopy } from "@/lib/booking/returnView";
-import type { BeamPaidCopy, PollPlan, ReturnViewKind, UnpaidStatus } from "@/lib/booking/returnView";
+import { beamPaidCopy, beamPendingCopy, beamPolledReason, canRetryPayment, isPollingView, nextPolledReason, pollPlan, returnViewKind, unpaidCopy } from "@/lib/booking/returnView";
+import type { BeamPaidCopy, PolledReason, ReturnViewKind, UnpaidStatus } from "@/lib/booking/returnView";
 import { createBookingAnalytics } from "@/lib/booking/clientAnalytics";
 import { formatDisplayDateWithWeekday, formatNights } from "@/lib/booking/dates";
 import { formatThbWithCode } from "@/lib/booking/format";
@@ -1045,7 +1045,7 @@ export default function ReturnStatus({
   const [exhausted, setExhausted] = useState(false);
   const [checking, setChecking] = useState(false);
   // Beam (design S5.3): the pendingReason the poll last read for the result on screen (its plan): set by the poll only.
-  const [polledReason, setPolledReason] = useState<{ plan: PollPlan; reason: StatusResponse["pendingReason"] } | null>(null);
+  const [polledReason, setPolledReason] = useState<PolledReason | null>(null);
   const hydrated = useHydrated();
 
   // Credentials from the URL, or - after a reload once they left the address
@@ -1155,7 +1155,7 @@ export default function ReturnStatus({
       // Beam (design S5.3): still pending, but the reason may have changed (processing -> unconfirmed once the window
       // is over and the hold released): the words follow it, and this round of checks carries on (no new budget).
       const polled = res.ok ? beamPolledReason(res) : null;
-      if (polled) setPolledReason((prev) => (prev !== null && prev.plan === plan && prev.reason === polled.reason ? prev : { plan, reason: polled.reason }));
+      if (polled) setPolledReason((prev) => nextPolledReason(prev, plan, polled));
       if (Date.now() - startedAt >= plan.maxMs) {
         setExhausted(true);
         return;

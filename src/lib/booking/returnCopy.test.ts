@@ -39,10 +39,12 @@ import {
   beamPendingCopy,
   beamPolledReason,
   canRetryPayment,
+  nextPolledReason,
+  pollPlan,
   returnViewKind,
   unpaidCopy,
 } from "./returnView.ts";
-import type { PaidCopyFlags, UnpaidStatus } from "./returnView.ts";
+import type { PaidCopyFlags, PolledReason, UnpaidStatus } from "./returnView.ts";
 import { runStatus } from "./status.ts";
 import type { ProviderDepsFn } from "./stripeDeps.ts";
 import { GUEST, NOW, TOKEN_SECRET } from "./testkit.ts";
@@ -462,6 +464,32 @@ test("design S5.3, beamPolledReason: the poll carries a Beam pending answer's re
   }
 });
 
+test("design S5.3 (round 8), nextPolledReason: the words follow the reason while the page polls - a new reason under the same plan replaces it, the same plan and reason keep the kept value itself, a new plan (a new round of checks) replaces it", () => {
+  const plan = pollPlan({ paymentMode: "beam-playground" });
+  const other = pollPlan({ paymentMode: "beam-playground" });
+  assert.notEqual(plan, other, "each round of checks has its own plan object");
+  const processing: PolledReason = { plan, reason: "processing" };
+  const cases: [string, PolledReason | null, PolledReason["plan"], PolledReason["reason"], PolledReason | "prev"][] = [
+    ["nothing kept yet", null, plan, "processing", { plan, reason: "processing" }],
+    ["nothing kept yet, no reason", null, plan, undefined, { plan, reason: undefined }],
+    ["same plan, new reason (processing -> unconfirmed)", processing, plan, "unconfirmed", { plan, reason: "unconfirmed" }],
+    ["same plan, the reason gone", processing, plan, undefined, { plan, reason: undefined }],
+    ["same plan, same reason", processing, plan, "processing", "prev"],
+    ["new plan, same reason", processing, other, "processing", { plan: other, reason: "processing" }],
+    ["new plan, new reason", processing, other, "unconfirmed", { plan: other, reason: "unconfirmed" }],
+  ];
+  for (const [label, prev, p, reason, want] of cases) {
+    const got = nextPolledReason(prev, p, { reason });
+    if (want === "prev") {
+      assert.equal(got, prev, `${label}: the kept value itself (no re-render)`);
+      continue;
+    }
+    assert.deepEqual(got, want, label);
+    assert.equal(got.plan, want.plan, `${label}: the plan it was read under`);
+    assert.notEqual(got, prev, `${label}: a new value`);
+  }
+});
+
 /* ------------------------------------ confirming, attention, mismatch ------------------------------------ */
 
 test("design S5.3, confirming, needs_attention and mismatch as today on every provider (a mismatch is first checked against the link, as any failed answer): WhatsApp, never 'Try again'; the attention view shows the Cloudbeds reservation number; no Beam receipt or Stripe", async () => {
@@ -657,7 +685,7 @@ async function pageOf(answer: StatusResponse | ApiError, config: BookingConfig):
   return { html, text: textOf(html) };
 }
 
-test("design S5.3, both providers' real answers in every outcome (makeParityKit): held -> pending; paid -> the paid view with the reservation number; refunded before confirmation -> 'refunded' (no 'Try again'), and once fulfil wrote its marker Beam's attention view while Stripe still reads refunded; a late success after the release -> attention; abandoned -> cancelled with 'Try again'", async () => {
+test("design S5.3, both providers' real answers in every outcome (makeParityKit): held -> pending; paid -> the paid view with the reservation number; refunded before confirmation -> 'refunded' (no 'Try again'), for Beam also once fulfil wrote its marker (round 8); a late success after the release -> attention; abandoned -> cancelled with 'Try again'", async () => {
   for (const provider of ["stripe", "beam"] as const) {
     const fresh = (): ParityKit => makeParityKit(provider);
     const brand = provider === "beam" ? "Beam" : "Stripe";
@@ -693,8 +721,9 @@ test("design S5.3, both providers' real answers in every outcome (makeParityKit)
     assert.equal(canRetryPayment(a), false, brand);
     assert.deepEqual(unpaidCopy(a), UNPAID_COPY.refunded, brand);
 
-    // The refund seen only after fulfil wrote its marker: Beam answers the marker (paid / needs_attention: the
-    // attention view); Stripe has no done shortcut and reads the payment again (refunded). Neither offers "Try again".
+    // The refund seen only after fulfil wrote its marker: Beam answers the marker, which says the payment was refunded
+    // before it was confirmed (round 8: "refunded", never "Payment received"); Stripe has no done shortcut and reads
+    // the payment again (refunded). Neither offers "Try again".
     kit = fresh();
     const late = await kit.held();
     kit.pay(late);
@@ -702,10 +731,17 @@ test("design S5.3, both providers' real answers in every outcome (makeParityKit)
     await kit.fulfil(late);
     a = okAnswer(await kit.status(late));
     if (provider === "beam") {
-      assert.deepEqual([a.status, a.fulfilment.state, returnViewKind(a)], ["paid", "needs_attention", "attention"]);
+      assert.deepEqual([a.status, a.fulfilment, returnViewKind(a)], ["refunded", { state: "not_applicable", reservationId: null }, "unpaid"]);
+      assert.equal(a.purchase, null);
+      assert.deepEqual(unpaidCopy(a), UNPAID_COPY.refunded);
+      // The server render of an unpaid answer checks the tab's link first ("Checking your payment..."): never "Payment received".
       page = await pageOf(a, kit.config);
-      assert.ok(page.text.includes("Payment received - we'll contact you"), page.text);
+      assert.ok(!page.text.includes("Payment received") && !page.text.includes("Try again"), page.text);
       assert.doesNotMatch(page.text, NO_RECEIPT_OR_STRIPE);
+      // Answered from the marker, without a Beam call: the same words as before fulfil ran.
+      const calls = kit.providerCalls();
+      assert.equal(okAnswer(await kit.status(late)).status, "refunded");
+      assert.equal(kit.providerCalls(), calls, "no Beam call for a finished booking");
     } else {
       assert.equal(a.status, "refunded");
     }
@@ -936,7 +972,8 @@ test("design S5.3 wiring: OwnReturnPage passes a Beam answer's own flags (else t
   assert.ok(ret.includes("const beam = beamPendingCopy(result, exhausted);"), "the pending view and the live region");
   assert.equal(ret.split("beamPendingCopy(result, exhausted)").length - 1, 2);
   // The poll: a new view kind replaces the result (and starts its own checks); a Beam reason change only updates the words.
-  assert.match(ret, /if \(res\.ok && returnViewKind\(res\) !== kind\) \{\s*setResult\(res\);\s*return;\s*\}\s*(\/\/[^\n]*\n\s*)*const polled = res\.ok \? beamPolledReason\(res\) : null;\s*if \(polled\) setPolledReason\(/);
+  assert.match(ret, /if \(res\.ok && returnViewKind\(res\) !== kind\) \{\s*setResult\(res\);\s*return;\s*\}\s*(\/\/[^\n]*\n\s*)*const polled = res\.ok \? beamPolledReason\(res\) : null;\s*if \(polled\) setPolledReason\(\(prev\) => nextPolledReason\(prev, plan, polled\)\);/);
+  assert.ok(ret.includes("useState<PolledReason | null>(null);"), "the kept reason is returnView.ts's PolledReason (round 8)");
   assert.match(ret, /const shown: Result =\s*result\?\.ok && result\.status === "pending" && polledReason !== null && polledReason\.plan === plan \? \{ \.\.\.result, pendingReason: polledReason\.reason \} : result;/);
   assert.ok(ret.includes("result={shown?.ok ? shown : result}") && ret.includes("statusAnnouncement(shown, exhausted)"));
   assert.ok(ret.includes("const copy = unpaidCopy(result);") && !ret.includes("const UNPAID_COPY"), "the unpaid words come from returnView.ts");
