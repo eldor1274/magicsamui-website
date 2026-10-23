@@ -10,12 +10,28 @@ This file began as the notes of a **preview**: a direct booking page whose Beam 
 
 ## Owner checklist: Beam Stage B (plain English)
 
-Stage B tests Beam on the Vercel **Preview** of the `beam-live` branch, with Beam's **Playground** (test money) and **real** Cloudbeds reservations. Plan about an hour for the setup and a quiet day for the tests: every test booking briefly blocks a real room on Booking.com and Airbnb. Paste keys and passwords only into Vercel, Lighthouse or Cloudbeds - never into this file, a chat or an email.
+Stage B tests Beam on the Vercel **Preview** of the `beam-live` branch, with Beam's **Playground** (test money) and **real** Cloudbeds reservations. Plan about an hour for the setup and a quiet day for the tests: every test booking briefly blocks a real room on Booking.com and Airbnb. Paste keys and passwords only into Vercel, Lighthouse, Cloudbeds, the droplet's crontab or your own terminal and browser - never into this file, a chat or an email.
 
-**1. Cloudbeds: create the Beam payment type**
+**What you need:** this computer with the project folder (`magicsamui-website`) and its terminal, the Vercel, Cloudbeds and Lighthouse Playground logins, SSH access to the droplet, and the Cloudbeds booking key (the key with write scopes, `CLOUDBEDS_API_KEY_BOOKING`; Vercel can't show a Sensitive value again, so take it from where you saved it - or create a new one for the Preview as in runbook 4.B step 1). Do the steps in order: later steps need what earlier ones create.
+
+**0. GitHub: put the `beam-live` branch online under its own name**
+- In a terminal in the project folder, run `git push -u origin beam-live`.
+- Check: `git rev-parse --abbrev-ref beam-live@{upstream}` must print `origin/beam-live`.
+- **Never push it to `main`** (no `git push origin beam-live:main`, no merge, no pull request yet): production `main` changes only at go-live (runbook section 6, item 7).
+- Vercel then builds a Preview of the branch by itself (Vercel → **Deployments**, branch `beam-live`, a few minutes). Open the deployment → **Domains**: the address with `-git-beam-live-` (`https://<project>-git-beam-live-<team>.vercel.app`) is the **branch address** every later step uses. This first build has no Beam variables yet, so it may show the demo or an error page.
+
+**1. Cloudbeds: create the Beam payment type, and pick the test date**
 - Account (top right) → **Settings → Finance → Additional and Custom Payment Methods → + Add Payment Type**.
 - Name it **Beam(website)** (no spaces) and keep it active. Optional, for test money only: a second one, **BeamTest(website)**.
-- Run the read-only check script `scripts/cloudbeds-wi0-check.mjs` (or ask the developer to): its **section 6b** prints the exact value Cloudbeds gave each new type ("custom Beam method found: method value ..."). That exact value goes into `CLOUDBEDS_BEAM_PAYMENT_METHOD` in step 3 (the test type's into `CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD`). Never type the name instead: Cloudbeds chooses the value.
+- Run the read-only check script in the project folder's terminal (it only reads; it never changes anything in Cloudbeds). In Windows PowerShell, these three lines one after the other - the first asks for the booking key: paste it and press Enter, so the key never lands in the terminal's history:
+  ```
+  $env:CLOUDBEDS_API_KEY_BOOKING = Read-Host "Cloudbeds booking key"
+  $env:CLOUDBEDS_PROPERTY_ID = "235064"
+  node scripts/cloudbeds-wi0-check.mjs
+  ```
+  (in a bash terminal: `read -rsp "Cloudbeds booking key: " CLOUDBEDS_API_KEY_BOOKING; export CLOUDBEDS_API_KEY_BOOKING CLOUDBEDS_PROPERTY_ID=235064; node scripts/cloudbeds-wi0-check.mjs`). The key stays in that terminal window only (the next two bullets reuse it): close the window when you are done.
+- Its **section 6b** prints the exact value Cloudbeds gave each new type ("custom Beam method found: method value ..."). That exact value goes into `CLOUDBEDS_BEAM_PAYMENT_METHOD` in step 3 (the test type's into `CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD`). Never type the name instead: Cloudbeds chooses the value. To double-check, in the same window run `$env:CLOUDBEDS_BEAM_PAYMENT_METHOD = "<that value>"` and then `node scripts/cloudbeds-wi0-check.mjs` again: section 6b must then say `EXACT` for it.
+- **The test date:** test bookings must arrive **12 or more months ahead** (and within 18 months). In the same window, run `node scripts/cloudbeds-wi0-check.mjs <check-in date> 3` for a candidate date, e.g. `node scripts/cloudbeds-wi0-check.mjs 2027-11-10 3`, and keep a date where section 5 lists every room type as `available N (base row)`. Use it for every test booking (runbook section 5, Stage B setup).
 
 **2. Beam Lighthouse Playground: the test keys**
 - Sign in at **playground-lighthouse.beamcheckout.com** → **Developers**.
@@ -32,16 +48,17 @@ Stage B tests Beam on the Vercel **Preview** of the `beam-live` branch, with Bea
 | `BEAM_API_BASE` | the address of Beam's Playground API (section 2, the Beam table) |
 | `BEAM_MERCHANT_ID` | the Playground Merchant ID (step 2) |
 | `BEAM_API_KEY` | the Playground API key (step 2) |
-| `BEAM_WEBHOOK_HMAC_KEY` | the Playground webhook's HMAC key (step 5) |
+| `BEAM_WEBHOOK_HMAC_KEY` | the Playground webhook's HMAC key: **added in step 5**, where Lighthouse shows it |
 | `CLOUDBEDS_BEAM_PAYMENT_METHOD` | the Beam(website) value the check script printed (step 1) |
 | `CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD` | optional: the BeamTest(website) value |
 | `CLOUDBEDS_API_KEY_BOOKING` | the Cloudbeds booking key (the one with write scopes) |
-| `CLOUDBEDS_PROPERTY_ID` | the Cloudbeds property id |
+| `CLOUDBEDS_PROPERTY_ID` | the Cloudbeds property id (the number in step 1's command) |
 | `CLOUDBEDS_API_KEY` | the Cloudbeds read key, if Preview does not have it yet |
-| `CLOUDBEDS_SOURCE_ID` | the id of the "magicsamui.com own booking page" source |
+| `CLOUDBEDS_SOURCE_ID` | the id of the "magicsamui.com own booking page" source (the value Production has, runbook 4.B step 3) |
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` (or `KV_REST_API_URL`, `KV_REST_API_TOKEN`) | the Upstash database, if the Upstash integration is not connected to Preview yet |
+| `POINTS_API_URL`, `POINTS_API_SECRET` (or `CONTACT_GMAIL_USER`, `CONTACT_GMAIL_APP_PASSWORD`) | the alert mail relay, with the same values as Production, if Preview does not have them yet: without them no alert email is sent at all |
 | `BOOKING_TOKEN_SECRET` | a new random secret of 32 or more characters, for Preview only |
-| `BOOKING_SWEEP_SECRET` | a new random secret of 16 or more characters, for Preview only (the cron in step 6 uses it) |
+| `BOOKING_SWEEP_SECRET` | a new random secret of 16 or more characters (letters and digits), for Preview only (the cron in step 6 uses it) |
 | `BOOKING_TEST_GUEST_EMAIL` | your private test email address (never published) |
 | `BOOKING_TEST_ACCESS_KEY` | a random key of 16 or more characters (you unlock your test browser with it, step 7) |
 | `CLOUDBEDS_SEND_STATUS_EMAIL` | switched on, so the test address receives the Cloudbeds confirmation email |
@@ -49,30 +66,47 @@ Stage B tests Beam on the Vercel **Preview** of the `beam-live` branch, with Bea
 | `BOOKING_ENGINE` | optional: the own engine, to see it on the preview's `/booking` as well |
 
 - **Do not add** `BOOKING_CARD_FEE_PCT` (it must stay unset), `BOOKING_ALLOW_LIVE_PAYMENTS`, or any live (Production) Beam key.
-- Only for the drain test (runbook case B13): the Stripe **test** keys (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`) and `CLOUDBEDS_STRIPE_PAYMENT_METHOD`, also on Preview for `beam-live` only.
+- Only for the drain test (runbook case B13), also on Preview for `beam-live` only: the Stripe **test** keys (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`) and the Stripe payment method for test money - recommended `CLOUDBEDS_STRIPE_TEST_PAYMENT_METHOD` with a separate Cloudbeds test type (runbook 4.B step 5), so the Stripe test payment is not recorded under the real Stripe(website) method; otherwise `CLOUDBEDS_STRIPE_PAYMENT_METHOD`, and step 10 reverses that payment.
+- On the same page, check that **Automatically expose System Environment Variables** is ticked: the preview reads its own address from them (without it Beam would send you back to magicsamui.com after paying).
 - Then **redeploy** the branch: Deployments → the latest `beam-live` deployment → ⋯ → Redeploy.
 
 **4. Vercel: let Beam and the cron reach the preview**
-- **Settings → Deployment Protection → Protection Bypass for Automation**: enable it and copy the secret.
+- **Settings → Deployment Protection → Protection Bypass for Automation**: enable it and copy the secret (the **bypass secret**; steps 5-7 use it).
 
 **5. Beam Lighthouse Playground: the webhook**
 - **Developers → Webhooks → add**.
-- **URL:** the branch address of `beam-live` + `/api/beam/webhook`. The branch address is shown in Vercel (Deployments → the latest `beam-live` deployment → Domains, the one with `-git-beam-live-`), so the URL looks like `https://<project>-git-beam-live-<team>.vercel.app/api/beam/webhook`.
+- **URL:** the branch address (step 0) + `/api/beam/webhook`, so it looks like `https://<project>-git-beam-live-<team>.vercel.app/api/beam/webhook`.
 - **Events:** `payment_link.paid`, `charge.succeeded`, `charge.failed`, `refund.succeeded`, `refund.failed`, `transaction.created`.
 - **Additional header:** name `x-vercel-protection-bypass`, value = the bypass secret of step 4.
-- Save, copy the webhook's **HMAC key** into `BEAM_WEBHOOK_HMAC_KEY` (step 3) and redeploy again.
-- Quick check (or ask the developer): a test POST without a signature must answer **401 "invalid signature"**; "webhook not configured" (503) means a Beam variable or the HMAC key is missing on that deployment.
+- Save, copy the webhook's **HMAC key** into `BEAM_WEBHOOK_HMAC_KEY` (Vercel, as in step 3) and redeploy again.
+- **Quick check** once the redeploy is ready (or ask the developer). In the project folder's terminal (in Windows PowerShell type `curl.exe`, not `curl`), with your bypass secret and branch address:
+  ```
+  curl.exe -sS -i -X POST -H "x-vercel-protection-bypass: <the bypass secret>" -H "content-type: application/json" -d "{}" https://<branch address>/api/beam/webhook
+  ```
+  It must answer **401** with the text exactly **`invalid signature`** (runbook 4.H step 6). A 401 that shows a web page (Vercel's login) means the bypass header is missing or wrong: the check did not reach the booking engine. **503 "webhook not configured"** means a Beam variable or the HMAC key is missing on that deployment (redeploy after adding it). Each check counts as one rejected signature, and the third in an hour sends the email "Beam webhook: signatures are being rejected": run it once or twice only.
 
 **6. The droplet: a temporary sweeper cron** for the whole of Stage B
-- Add the one line from `docs/booking-engine.md` 4.H step 7 to the droplet's crontab (every 10 minutes it calls the preview's `/api/booking/sweep` with the Preview's `BOOKING_SWEEP_SECRET` and the bypass secret). It confirms paid bookings whose webhook was lost and releases expired holds.
+- On the droplet (SSH), run `crontab -e` and add these three lines at the end, with your two secrets in place of the `<...>` and the branch address (step 0) in the URL; the third line is the one of `docs/booking-engine.md` 4.H step 7:
+  ```
+  PREVIEW_SWEEP_SECRET=<the Preview's BOOKING_SWEEP_SECRET>
+  VERCEL_BYPASS_SECRET=<the bypass secret>
+  */10 * * * * curl -fsS -X POST -H "Authorization: Bearer $PREVIEW_SWEEP_SECRET" -H "x-vercel-protection-bypass: $VERCEL_BYPASS_SECRET" https://<branch address>/api/booking/sweep >/dev/null
+  ```
+  Every 10 minutes it calls the preview's sweeper, which confirms paid bookings whose webhook was lost and releases expired holds.
+- Check it once by hand in the droplet's shell:
+  ```
+  curl -sS -X POST -H "Authorization: Bearer <the Preview's BOOKING_SWEEP_SECRET>" -H "x-vercel-protection-bypass: <the bypass secret>" https://<branch address>/api/booking/sweep
+  ```
+  It must print `{"ok":true,"mode":"beam-playground",...}`. `unauthorized` means a wrong sweep secret, a web page (Vercel's login) a missing bypass header, `sweeper_disabled` a Preview without `BOOKING_SWEEP_SECRET` (redeploy after adding it).
 
 **7. Your test browser and phones**
-- Open the preview once on each device through a Vercel **Shareable Link** (Vercel → the deployment → Share), so Vercel lets you in and Beam's redirect after paying lands on our return page, not on the Vercel login.
-- **Unlock test bookings** in that browser (valid 12 hours): open `https://<branch address>/booking-preview`, press F12 → Console and run the unlock command of `docs/booking-engine.md` section 5 ("Unlock this browser"), with your `BOOKING_TEST_ACCESS_KEY`. On a phone, use Safari's Web Inspector from a Mac or Chrome's remote debugging from a computer, or ask the developer.
-- Test bookings are refused unless the browser is unlocked, the email is your test address and the arrival is **12 or more months ahead**.
+- Always use the **branch address**: Beam sends you back after paying to the address you booked on.
+- On each device, open once `https://<branch address>/booking-preview?x-vercel-set-bypass-cookie=true&x-vercel-protection-bypass=<the bypass secret>` (or a Vercel **Shareable Link** of the branch address: Vercel → the deployment → Share), so Vercel lets that browser in and Beam's redirect after paying lands on our return page, not on the Vercel login. The link leaves the bypass secret in that browser's history: step 11 rotates it.
+- **Unlock test bookings** in that browser (valid 12 hours): on `https://<branch address>/booking-preview`, press F12 → Console and run the unlock command of `docs/booking-engine.md` section 5 ("Unlock this browser"), with your `BOOKING_TEST_ACCESS_KEY`; it prints `{ ok: true, validForHours: 12 }`. On a phone, use Safari's Web Inspector from a Mac or Chrome's remote debugging from a computer, or ask the developer.
+- Test bookings are refused unless the browser is unlocked, the email is your test address and the arrival is on your test date (**12 or more months ahead**, step 1).
 
 **8. Click through** (the full list with what each must show is the runbook's section 5, cases B1-B20)
-- A card booking with the 3-D Secure test card **4953 2617 3050 9988** (code **123456**). Do it once with `CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD` removed (redeploy), so a payment lands under Beam(website) itself.
+- A card booking with the 3-D Secure test card **4953 2617 3050 9988** (code **123456**). If you set `CLOUDBEDS_BEAM_TEST_PAYMENT_METHOD`, do it once more with it removed (redeploy), so a payment lands under Beam(website) itself.
 - A **Thai PromptPay QR** booking, and an **e-wallet** booking if the Playground offers one.
 - A declined card (**4111 1111 1100 0025**), then a good one (**4111 1111 1111 1111**) on the same Beam page: one booking.
 - Start a booking and press **Cancel** on Beam's page.
@@ -84,13 +118,13 @@ Stage B tests Beam on the Vercel **Preview** of the `beam-live` branch, with Bea
 - **Beam Lighthouse Playground:** Payments shows the link PAID with its charge SUCCEEDED (DISABLED after Cancel, EXPIRED or DISABLED after the closed tab); Developers → Webhooks shows the deliveries answered 200.
 - **Email:** the alerts, e.g. "New direct booking ... confirmed" (their subjects start with `[beam-playground]`), with no guest names or emails in them.
 
-**10. Clean up each paid test booking** (Cloudbeds): reverse the Beam payment with a refund/adjustment entry for the same amount, remove or void the "TEST - Payment processing fee" line, then cancel the reservation. Write the reservation id and date in the Stage B log (runbook section 5).
+**10. Clean up each paid test booking** (Cloudbeds): reverse the test payment - the Beam payment, or the Stripe test payment of the drain test (B13) - with one refund/adjustment entry for the same amount (if you refunded it in Lighthouse and recorded that refund on the folio, that entry is the reversal: don't add a second), remove or void the "TEST - Payment processing fee" line (card and e-wallet bookings), then cancel the reservation. Write the reservation id and date in the Stage B log (runbook section 5).
 
 **11. Afterwards: remove the test setup**
-- Ask the developer to check the sweeper's answer: every run shows 0 open holds and 0 paid-unconfirmed.
+- Run the hand check of step 6 once more (or ask the developer): every entry of `runs` in its answer shows `"openHolds":0`, `"paidUnconfirmed":0` and `"errors":0`.
 - Vercel → Settings → Environment Variables (Preview, `beam-live`): **delete `BOOKING_TEST_ACCESS_KEY` and `BOOKING_TEST_GUEST_EMAIL`**. When you are done with the preview altogether, delete the Beam Playground variables too and disable the Playground webhook in Lighthouse (wait 7 days first if late test payments should still be reported).
-- Vercel → Settings → Deployment Protection: **rotate or disable** Protection Bypass for Automation.
-- The droplet: **remove the preview cron line**.
+- Vercel → Settings → Deployment Protection: **rotate or disable** Protection Bypass for Automation (the old secret was in the test browsers' address bars and in the cron).
+- The droplet: **remove the preview cron line** and its two value lines.
 - Each test browser: remove the unlock cookie (the `DELETE` command in runbook section 5) or let it expire after 12 hours.
 - Redeploy the branch.
 
