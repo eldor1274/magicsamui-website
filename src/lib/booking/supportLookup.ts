@@ -18,7 +18,8 @@
 //   link and its charges, through the Beam gateway's side-effect-free readLink, inside the route's deadline); older
 //   attempts answer from our own markers. Nothing is confirmed, released, disabled, refunded or alerted from here; the
 //   only writes are the two rate-limit counters (and the runtime's Beam 429 counter). No cache: a reading even 30 s old
-//   could still say "failed" while the guest's next try on the same page is already pending.
+//   could still say "failed" while the guest's next try on the same page is already pending, or "confirmed" after a
+//   refund.
 // - The answer carries booking facts only: no guest name, email address or phone number, no card digits (beam.ts
 //   drops them when a charge is read; a failureCode not in Beam's code shape is answered as null). A lookup that finds
 //   nothing says only "no recent payment attempt found", whether or not the address or number was ever used.
@@ -37,8 +38,8 @@
 // - At most SUPPORT_LOOKUP_MAX_MATCHES attempts, newest first.
 //
 // The state of each attempt (first match wins)
-// - Fulfil's done marker: confirmed (the Cloudbeds reservation is confirmed), refunded (refunded before confirmation),
-//   needs_attention. No Beam call.
+// - Fulfil's done marker: refunded (refunded before confirmation; no Beam call), else confirmed (the Cloudbeds
+//   reservation was confirmed) or needs_attention - unless the payment was refunded since (refundSince below).
 // - An attempt older than the newest SUPPORT_LOOKUP_BEAM_READS (the attempt a query's ref names is always read): paid
 //   while fulfil's paid marker is there; expired once its window, the pending grace and BEAM_PENDING_BLOCK_MS are over
 //   (a Beam reading could then say nothing else unless a late payment came, which the sweeper's late watch turns into
@@ -51,6 +52,24 @@
 //   old payment page" and is never retrySafe until it reads EXPIRED or DISABLED.
 // - retrySafe only for open, failed and expired: never while a PENDING PromptPay, wallet or 3-D Secure charge may still
 //   succeed, and never once money was taken.
+//
+// A refund after the payment was taken (refundSince): fulfil's done marker is written once and never says that the
+// owner refunded or voided the payment in Beam Lighthouse later (a 50% cancellation refund, a void), so a confirmed,
+// paid or needs_attention attempt looks further, cheapest first:
+// - The webhook's note of the refunds Beam reported SUCCEEDED on the link (payments/beamRefunds.ts keys.beamRefunds,
+//   with keys.beamPrimary telling the booking's own charge from the extra charge of a double payment). Redis only; a
+//   note that names only another charge leaves the answer as it is.
+// - Else, for a confirmed or needs_attention attempt Beam is read for (the same budget: the newest
+//   SUPPORT_LOOKUP_BEAM_READS), the link: REFUNDED or VOIDED (beamState rule 1) is a refund, of the whole payment when
+//   VOIDED or paid by a method Beam can't refund in part (everything but CARD), else of an amount not known (Beam's
+//   link never says how much, and whether a part refund already reads REFUNDED is unverified); a REFUNDED link with
+//   several successful charges (refundAmbiguous) -> needs_attention (the owner was told to check it in Lighthouse). A
+//   Beam read that fails keeps the done marker's answer.
+// - The answer: refunded, with when and how much (refund) and a reason for the guest ("This payment was refunded on Oct
+//   24, 2026. Banks can take several days to show it."; a part: "Part of this payment (THB x of THB y) was refunded
+//   ..."); cloudbedsConfirmed false (the reservation may have been cancelled: this lookup never reads Cloudbeds). A
+//   paid or needs_attention attempt turns refunded only when the whole payment was refunded (with a part kept, it is
+//   still being confirmed, or still the owner's to finish). refunded never blocks payAgainSafe.
 // - payAgainSafe (the whole answer: what the bot goes by): no returned attempt is processing, paid, needs_attention or
 //   unknown. While it is false, every open, failed and expired attempt says "don't pay again" instead (naming the
 //   attempts still being settled) and is not retrySafe: a failed card next to a PromptPay payment still pending must
@@ -60,6 +79,7 @@ import { bearerMatches } from "../bearerAuth.ts";
 import { parseBeamTime } from "./beam.ts";
 import type { BeamCharge } from "./beam.ts";
 import { getCatalogueRoom } from "./catalogue.ts";
+import { formatDisplayDate, todayInBangkok } from "./dates.ts";
 import { formatThb } from "./format.ts";
 import type { FulfilDone } from "./fulfil.ts";
 import { beamKeyOf, keyScope, keys, linkIdOf, readJson } from "./lock.ts";
@@ -68,8 +88,11 @@ import { beamGateway } from "./payments/beamGateway.ts";
 import type { BeamGateway, BeamGatewayDeps, BeamLinkRead } from "./payments/beamGateway.ts";
 import { readRecord } from "./payments/beamRecord.ts";
 import type { BeamNote, PaymentRecord } from "./payments/beamRecord.ts";
+import { readBeamRefunds } from "./payments/beamRefunds.ts";
+import type { BeamRefundEntry } from "./payments/beamRefunds.ts";
 import { BEAM_PENDING_BLOCK_MS } from "./payments/beamState.ts";
 import { lookupPhoneDigits, normaliseEmail, readSupportList, readSupportRef, supportCode } from "./payments/beamSupport.ts";
+import { BEAM_PARTIAL_REFUND_METHODS } from "./payments/beamText.ts";
 import { feePctFor, isPayMethod, payMethodOffered } from "./quote.ts";
 import { BOOKING_REF_RE } from "./ref.ts";
 import { NO_STORE, clientIp, readJsonBody } from "./routeUtils.ts";
@@ -122,7 +145,10 @@ export interface LookupMatch {
   reason: string;
   /** What the guest should do next. */
   nextStep: string;
-  /** The Cloudbeds reservation was confirmed (fulfil's done marker). */
+  /**
+   * The Cloudbeds reservation was confirmed (fulfil's done marker) and no refund of its payment is known. false once
+   * the payment was refunded, in full or in part (the reservation may have been cancelled: Cloudbeds is not read here).
+   */
   cloudbedsConfirmed: boolean;
   /**
    * Paying again (on the page, or by booking again) can't charge the guest twice for this attempt. false while the
@@ -131,6 +157,19 @@ export interface LookupMatch {
   retrySafe: boolean;
   /** Beam's payment page is still open for this attempt. */
   paymentPageOpen: boolean;
+  /** state refunded after the payment was taken (refundSince): what is known of the refund. Absent otherwise. */
+  refund?: LookupRefund;
+}
+
+/** A refund made after the payment was taken (no personal data). */
+export interface LookupRefund {
+  /** true: part of the payment was refunded (a 50% cancellation refund); false: all of it; null: not known. */
+  partial: boolean | null;
+  /** The amount refunded in satang, and as shown ("2,025.00"); null when not known. */
+  amountSatang: number | null;
+  amount: string | null;
+  /** When it was refunded (ISO), when known. */
+  refundedAt: string | null;
 }
 
 export interface LookupAnswer {
@@ -497,10 +536,15 @@ async function describe(c: Candidate, ctx: LookupContext, live: boolean): Promis
 
   if (!live && !finished) return describeStored(c, ctx, record);
 
-  // Beam is read unless the done marker settles it and the record gives the facts (a finished booking needs no Beam call).
+  // A payment fulfil settled (not refunded before confirmation): a refund the webhook noted since needs no Beam call.
+  const settled = finished !== null && finished.refunded !== true;
+  const noted = settled ? await notedRefunds(kv, c.linkId) : null;
+
+  // Beam is read unless the done marker settles it, the record gives the facts and the webhook's note tells whether it
+  // was refunded since (a finished booking with nothing noted is read for a refund, within the same budget).
   let read: BeamLinkRead | null = null;
   let readFailed = false;
-  if (live && (!finished || !record)) {
+  if (live && (!finished || !record || (settled && noted === null))) {
     try {
       read = await gw.readLink(key);
     } catch {
@@ -519,9 +563,9 @@ async function describe(c: Candidate, ctx: LookupContext, live: boolean): Promis
   };
 
   if (finished) {
-    if (finished.state === "confirmed") return matchOf(f, "confirmed", WORDS.confirmed, { cloudbedsConfirmed: true });
-    if (finished.refunded === true) return matchOf(f, "refunded", WORDS.refunded);
-    return matchOf(f, "needs_attention", WORDS.needsAttention);
+    if (finished.state === "needs_attention" && finished.refunded === true) return matchOf(f, "refunded", WORDS.refunded);
+    const since = noted !== null ? refundNoted(noted, f.totalSatang) : read && !readFailed ? refundOnLink(read, c.ref, record, beam.beam.merchantId) : null;
+    return afterPayment(f, finished.state, since);
   }
   if (!read || readFailed) return matchOf(f, "unknown", WORDS.unknown);
 
@@ -540,7 +584,10 @@ async function describe(c: Candidate, ctx: LookupContext, live: boolean): Promis
       } catch {
         return matchOf(f, "unknown", WORDS.unknown);
       }
-      return released ? matchOf(f, "needs_attention", WORDS.paidAfterRelease) : matchOf(f, "paid", WORDS.paid);
+      if (released) return matchOf(f, "needs_attention", WORDS.paidAfterRelease);
+      // Refunded in full since Beam's link was read PAID (the webhook's note; whether a part refund moves the link is unverified).
+      const paidNoted = await notedRefunds(kv, c.linkId);
+      return afterPayment(f, "paid", paidNoted !== null ? refundNoted(paidNoted, f.totalSatang) : null);
     }
     case "refunded":
       return matchOf(f, "refunded", WORDS.refunded);
@@ -590,9 +637,115 @@ async function describeStored(c: Candidate, ctx: LookupContext, record: PaymentR
   } catch {
     return matchOf(f, "unknown", WORDS.unknown);
   }
-  if (paidMarker) return matchOf(f, "paid", WORDS.paid);
+  if (paidMarker) {
+    const noted = await notedRefunds(ctx.beam.kv, c.linkId);
+    return afterPayment(f, "paid", noted !== null ? refundNoted(noted, f.totalSatang) : null);
+  }
   const settledAtMs = record.expiresAt + ctx.beam.beam.pendingGraceMinutes * 60_000 + BEAM_PENDING_BLOCK_MS;
   return ctx.nowMs >= settledAtMs ? matchOf(f, "expired", WORDS.closedEarlier) : matchOf(f, "unknown", WORDS.notChecked);
+}
+
+/* -------------------------------------- a refund since the payment -------------------------------------- */
+
+/** The webhook's note of a link's refunds, split by whose charge they refunded. */
+interface NotedRefunds {
+  /** Refunds of the booking's own charge (keys.beamPrimary; every noted one when it is not stored). */
+  own: BeamRefundEntry[];
+  /** Refunds of another charge of the link only (the extra charge of a double payment). */
+  others: number;
+}
+
+/** A refund since the payment was taken, as far as it is known (refundSince in the header). */
+type RefundSince =
+  /** The booking's own payment: all of it (whole true), a part (false) or not known (null); the amount and time when known. */
+  | { kind: "refund"; whole: boolean | null; amountSatang: number | null; atMs: number | null }
+  /** Only another charge of the link was refunded: the booking's payment stands. */
+  | { kind: "other_charge" }
+  /** Beam's link reads REFUNDED or VOIDED with several successful charges: which of them is not known. */
+  | { kind: "ambiguous" };
+
+/** The refunds the webhook noted on the link; null when none is noted, or the note can't be read (then Beam is asked). */
+async function notedRefunds(kv: BeamGatewayDeps["kv"], linkId: string): Promise<NotedRefunds | null> {
+  let refunds: BeamRefundEntry[];
+  let primary: string | null;
+  try {
+    [refunds, primary] = await Promise.all([readBeamRefunds(kv, linkId), kv.get(keys.beamPrimary(linkId))]);
+  } catch {
+    return null;
+  }
+  if (refunds.length === 0) return null;
+  const own = refunds.filter((r) => primary === null || r.chargeId === "" || r.chargeId === primary);
+  return { own, others: refunds.length - own.length };
+}
+
+/** What the note says of the booking's own payment, against the amount it paid (null: not known). */
+function refundNoted(noted: NotedRefunds, totalSatang: number | null): RefundSince {
+  if (noted.own.length === 0) return { kind: "other_charge" };
+  let sum: number | null = 0;
+  for (const r of noted.own) sum = sum === null || r.amountSatang === null ? null : sum + r.amountSatang;
+  return {
+    kind: "refund",
+    whole: sum !== null && totalSatang !== null ? sum >= totalSatang : null,
+    amountSatang: sum,
+    atMs: Math.max(...noted.own.map((r) => r.at)),
+  };
+}
+
+/** What Beam's link says of a refund (no note of the webhook's): REFUNDED or VOIDED, or ambiguous; null for anything else. */
+function refundOnLink(read: BeamLinkRead, ref: string, record: PaymentRecord | null, merchantId: string): RefundSince | null {
+  if (read.state.refundAmbiguous) return { kind: "ambiguous" };
+  if (read.state.state !== "refunded" || disagrees(read, ref, record, merchantId)) return null;
+  const method = read.state.primary?.paymentMethod?.paymentMethodType;
+  // A void always takes back the whole payment, and Beam refunds only cards in part (beamText.ts).
+  const whole = read.link?.status === "VOIDED" || (typeof method === "string" && method !== "" && !BEAM_PARTIAL_REFUND_METHODS.has(method)) ? true : null;
+  return { kind: "refund", whole, amountSatang: whole ? read.state.amountSatang : null, atMs: null };
+}
+
+/**
+ * The answer of a payment that was taken (confirmed, paid, needs_attention), given what is known of a refund since.
+ * Confirmed: any refund of its payment -> refunded (a part: "partly refunded" words), several charges with a refund
+ * Beam can't place -> needs_attention. Paid and needs_attention: refunded only once the whole payment was refunded.
+ */
+function afterPayment(f: Facts, state: "confirmed" | "paid" | "needs_attention", since: RefundSince | null): LookupMatch {
+  const plain =
+    state === "confirmed"
+      ? matchOf(f, "confirmed", WORDS.confirmed, { cloudbedsConfirmed: true })
+      : state === "paid"
+        ? matchOf(f, "paid", WORDS.paid)
+        : matchOf(f, "needs_attention", WORDS.needsAttention);
+  if (since === null || since.kind === "other_charge") return plain;
+  if (since.kind === "ambiguous") return state === "confirmed" ? matchOf(f, "needs_attention", WORDS.refundCheck) : plain;
+  if (state !== "confirmed" && since.whole !== true) return plain;
+  const refund: LookupRefund = {
+    partial: since.whole === null ? null : !since.whole,
+    amountSatang: since.amountSatang,
+    amount: since.amountSatang !== null ? formatThb(since.amountSatang) : null,
+    refundedAt: since.atMs !== null ? new Date(since.atMs).toISOString() : null,
+  };
+  return matchOf(f, "refunded", refundWords(since, f.totalSatang), { refund });
+}
+
+/** "Oct 24, 2026": the day on the property's calendar (Asia/Bangkok). */
+function refundDay(ms: number): string {
+  return formatDisplayDate(todayInBangkok(new Date(ms)));
+}
+
+/** The reason and next step of a refund since the payment was taken: all of it, a part, or an amount not known. */
+export function refundWords(since: { whole: boolean | null; amountSatang: number | null; atMs: number | null }, totalSatang: number | null): { reason: string; nextStep: string } {
+  const on = since.atMs !== null ? ` on ${refundDay(since.atMs)}` : "";
+  const banks = "Banks can take several days to show it.";
+  if (since.whole === true) {
+    return { reason: `This payment was refunded${on}. ${banks}`, nextStep: "Nothing else to do for this payment. Message us here with any questions." };
+  }
+  const questions = "Message us here with any questions about the refund or your booking.";
+  if (since.whole === false && since.amountSatang !== null && totalSatang !== null) {
+    return { reason: `Part of this payment (THB ${formatThb(since.amountSatang)} of THB ${formatThb(totalSatang)}) was refunded${on}. ${banks}`, nextStep: questions };
+  }
+  if (since.amountSatang !== null) return { reason: `THB ${formatThb(since.amountSatang)} of this payment was refunded${on}. ${banks}`, nextStep: questions };
+  return {
+    reason: `This payment was refunded${on}, in full or in part. ${banks}`,
+    nextStep: "Message us here if you'd like to know the amount, or with any questions about your booking.",
+  };
 }
 
 /* ------------------------------------------------ the words ------------------------------------------------ */
@@ -642,6 +795,10 @@ const WORDS = {
   },
   needsAttention: {
     reason: "Your payment needs a quick manual check by our team.",
+    nextStep: `${DONT_PAY_AGAIN} Our team will contact you shortly.`,
+  },
+  refundCheck: {
+    reason: "A refund was made on this booking's payments, and our team needs to check it by hand.",
     nextStep: `${DONT_PAY_AGAIN} Our team will contact you shortly.`,
   },
   paidAfterRelease: {

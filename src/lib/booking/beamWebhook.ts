@@ -30,7 +30,9 @@
 //   refund's referenceId (an MSV ref: its pointer and record when they still exist). The owner's alert is keyed
 //   refund:{refundId}:{status}: SUCCEEDED -> info 'Beam refund done for booking {ref} (THB x)' with the folio
 //   steps of its case (round 8: an extra charge of a duplicate payment and a payment fulfil never recorded have
-//   nothing to record on the folio; refundedChargeRecord); FAILED -> CRITICAL with the bank-transfer fallback (gap review 17): the guest is still owed money and
+//   nothing to record on the folio; refundedChargeRecord), after the refund is noted on its link for the bot's
+//   payment lookup (payments/beamRefunds.ts keys.beamRefunds: ids, amount, time; a note that can't be written yet
+//   -> 503, Beam retries); FAILED -> CRITICAL with the bank-transfer fallback (gap review 17): the guest is still owed money and
 //   this answer is 200 (Beam does not retry), so the alert is stored and re-sent by the sweeper until a mail goes
 //   out (round 5); PENDING -> nothing yet. Only a deps.alert that throws (never the production alerter, which
 //   stores a critical alert first and reports a failed send as false) answers 503.
@@ -41,7 +43,7 @@
 // - Nothing from the body is logged but ids, statuses and amounts: the charge body's customer block and card
 //   digits are never read.
 
-import { beamErrorInfo, getRefund, isBeamNotFound, listPaymentLinkCharges, verifyBeamSignature } from "./beam.ts";
+import { beamErrorInfo, getRefund, isBeamNotFound, listPaymentLinkCharges, parseBeamTime, verifyBeamSignature } from "./beam.ts";
 import type { BeamCallOptions, BeamRefund } from "./beam.ts";
 import { redactForLog } from "./cloudbedsWrite.ts";
 import { alertFulfilPaymentFailure, fulfilPayment, markPaymentPaid, releasePayment } from "./fulfil.ts";
@@ -51,10 +53,12 @@ import { BEAM_ID_PATTERN, isBeamLinkId } from "./payments/beamIds.ts";
 import { beamGateway } from "./payments/beamGateway.ts";
 import type { BeamChargeIndexEntry, BeamGateway, BeamGatewayDeps } from "./payments/beamGateway.ts";
 import { readRecord } from "./payments/beamRecord.ts";
+import { noteBeamRefund } from "./payments/beamRefunds.ts";
 import { beamMethodName } from "./payments/beamText.ts";
 import type { GatewayPayment, PaymentMeta } from "./payments/gateway.ts";
 import { satangToBahtString } from "./quote.ts";
 import { isBookingRef } from "./ref.ts";
+import { nowOf } from "./stripeDeps.ts";
 
 export interface BeamWebhookResult {
   status: number;
@@ -495,6 +499,20 @@ async function handleRefund(ctx: Ctx, refundId: string): Promise<BeamWebhookResu
     } catch (e) {
       deps.log("beam_webhook_redis_failed", { kind: "refund", refundId, error: errorText(e) });
       return { status: 503, body: "refund could not be mapped - retry" };
+    }
+    // Noted before the owner is told, so the bot's payment lookup answers a refund after confirmation (in full or
+    // in part) from our store. A note not written yet is Beam's retry to make: the alert is keyed, so it goes out once.
+    let noted: "noted" | "known" | "busy";
+    try {
+      noted = await noteBeamRefund(deps.kv, booking.linkId, { refundId, chargeId: refund.chargeId, amount: refund.amount, at: parseBeamTime(refund.createdAt) ?? nowOf(deps) });
+    } catch (e) {
+      deps.log("beam_webhook_redis_failed", { kind: "refund", refundId, error: errorText(e) });
+      return { status: 503, body: "refund could not be recorded - retry" };
+    }
+    if (noted === "busy") {
+      // Another delivery is adding a refund of the same link right now.
+      deps.log("beam_refund_note_busy", { refundId, linkId: booking.linkId });
+      return { status: 503, body: "refund could not be recorded - retry" };
     }
   }
   try {

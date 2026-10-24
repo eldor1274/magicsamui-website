@@ -7,7 +7,8 @@
 // one payment, 5 concurrent deliveries, a replay, in_progress, Cloudbeds down, Redis or Beam failing, a missing
 // record, open / processing / expired / refunded links, a second charge after the booking is done; the event
 // kind taken from the body whatever the header says; refunds (the real status re-read, the charge index 40 days
-// later, the referenceId fallback, another mode's charge); transactions (logged once, chargebacks CRITICAL);
+// later, the referenceId fallback, another mode's charge, the refund noted on its link for the bot's payment lookup);
+// transactions (logged once, chargebacks CRITICAL);
 // no card digits or guest details in any log, alert or Redis write.
 
 import { test } from "node:test";
@@ -21,10 +22,11 @@ import { BEAM_BAD_SIGNATURE_ALERT_THRESHOLD, BEAM_TXN_TTL_SECONDS, beamWebhookEv
 import type { BeamWebhookResult } from "./beamWebhook.ts";
 import { createMemoryKv } from "./kv.ts";
 import type { KvStore } from "./kv.ts";
-import { keyScope, keys } from "./lock.ts";
+import { BEAM_RECORD_TTL_SECONDS, keyScope, keys } from "./lock.ts";
 import { beamSignature } from "./mock/fakeBeam.ts";
 import type { FakeBeamSignedEvent } from "./mock/fakeBeam.ts";
 import type { BeamChargeIndexEntry, BeamGatewayDeps } from "./payments/beamGateway.ts";
+import { readBeamRefunds } from "./payments/beamRefunds.ts";
 import { satangToBahtString } from "./quote.ts";
 import { runSweep } from "./sweep.ts";
 import { NOW, recordingKv } from "./testkit.ts";
@@ -618,6 +620,64 @@ test("refund.succeeded by case (round 8): the extra charge of a duplicate paymen
   assert.equal(withSubject(kit5, /^Beam refund done/).length, 0);
   assert.deepEqual(await deliver(kit5, kit5.fakeBeam.signedEvent("refund.succeeded", r5)), { status: 200, body: "refund succeeded" });
   assert.equal(withSubject(kit5, /^Beam refund done/).length, 1);
+});
+
+test("refund.succeeded notes the refund on its link for the bot's payment lookup (ids, amount, time; 708 days) before the owner is told; a replay notes nothing; a busy or failing note -> 503", async () => {
+  const now = { ms: NOW };
+  const kv = recordingKv(createMemoryKv(() => now.ms));
+  const kit = makeBeamKit({ kv, now });
+  const { h, chargeId } = await confirmedBooking(kit);
+  kit.now.ms += DAY;
+  const half = Math.round(h.quote.dueNowSatang / 2);
+  const first = kit.fakeBeam.refund(chargeId, half);
+  const firstAt = kit.now.ms;
+  const from = kv.writes.length;
+  assert.deepEqual(await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", first)), { status: 200, body: "refund succeeded" });
+  assert.deepEqual(await readBeamRefunds(kv, h.linkId), [{ refundId: first, chargeId, amountSatang: half, at: firstAt }]);
+  const noteWrites = kv.writes.slice(from).filter((w) => w.key === keys.beamRefunds(h.linkId));
+  assert.deepEqual(noteWrites.map((w) => [w.op, w.ttl]), [["set", BEAM_RECORD_TTL_SECONDS]], "kept as long as the charge index");
+  const noteAt = kv.writes.findIndex((w, i) => i >= from && w.key === keys.beamRefunds(h.linkId));
+  const alertAt = kv.writes.findIndex((w, i) => i >= from && w.key === keys.alerted(SCOPE, `refund:${first}:SUCCEEDED`));
+  assert.ok(noteAt >= 0 && alertAt > noteAt, "noted before the owner's alert is claimed");
+  assert.equal(await kv.get(keys.beamRefundsLock(h.linkId)), null, "the lock is released");
+  for (const w of noteWrites) assert.equal(cardDigitsShown(w.value ?? "", "1111"), false);
+  assert.doesNotMatch(noteWrites[0].value ?? "", /@|guest/i, "no personal data, no refund reason");
+
+  // A replay (Beam's retry): nothing new noted, the owner told once.
+  const replayFrom = kv.writes.length;
+  assert.deepEqual(await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", first)), { status: 200, body: "refund succeeded" });
+  assert.equal(kv.writes.slice(replayFrom).filter((w) => w.key === keys.beamRefunds(h.linkId)).length, 0);
+  assert.equal(withSubject(kit, /^Beam refund done/).length, 1);
+
+  // The rest refunded the next day. Another delivery holds the note's lock: 503 and nothing told; Beam retries.
+  kit.now.ms += DAY;
+  const rest = kit.fakeBeam.refund(chargeId);
+  assert.ok(await kv.setNx(keys.beamRefundsLock(h.linkId), "another-delivery", 30));
+  assert.deepEqual(await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", rest)), { status: 503, body: "refund could not be recorded - retry" });
+  assert.equal(logged(kit, "beam_refund_note_busy").length, 1);
+  assert.equal(withSubject(kit, /^Beam refund done/).length, 1);
+  await kv.del(keys.beamRefundsLock(h.linkId));
+  // Redis fails writing the note: 503, nothing told, the lock released.
+  const failing: BeamGatewayDeps = {
+    ...kit.deps,
+    kv: { ...kv, set: (key, value, ttl) => (key === keys.beamRefunds(h.linkId) ? Promise.reject(new Error("simulated Redis failure")) : kv.set(key, value, ttl)) },
+  };
+  assert.deepEqual(await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", rest), failing), { status: 503, body: "refund could not be recorded - retry" });
+  assert.equal(withSubject(kit, /^Beam refund done/).length, 1);
+  assert.equal(await kv.get(keys.beamRefundsLock(h.linkId)), null);
+  // Beam's retry: noted after the first, and the owner told.
+  assert.deepEqual(await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", rest)), { status: 200, body: "refund succeeded" });
+  assert.deepEqual(
+    (await readBeamRefunds(kv, h.linkId)).map((r) => [r.refundId, r.amountSatang, r.at]),
+    [[first, half, firstAt], [rest, h.quote.dueNowSatang - half, kit.now.ms]],
+  );
+  assert.equal(withSubject(kit, /^Beam refund done/).length, 2);
+  // A FAILED refund is never noted.
+  const kit2 = makeBeamKit();
+  const b = await confirmedBooking(kit2);
+  const failedRefund = kit2.fakeBeam.refund(b.chargeId, undefined, { status: "FAILED" });
+  assert.deepEqual(await deliver(kit2, kit2.fakeBeam.signedEvent("refund.failed", failedRefund)), { status: 200, body: "refund failed" });
+  assert.deepEqual(await readBeamRefunds(kit2.deps.kv, b.h.linkId), []);
 });
 
 test("a signed refund.failed body sent with the header refund.succeeded: no 'done' alert, the FAILED CRITICAL, the disagreement logged", async () => {

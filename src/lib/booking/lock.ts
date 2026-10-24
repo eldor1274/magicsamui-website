@@ -156,6 +156,14 @@ export const keys = {
   beamSupportContact: (scope: string, kind: "email" | "phone", hash: string) => `msv:${scope}:beam:support:${kind}:${hash}`,
   /** The payment lookup's fixed-window request counters: per keyed client IP code, and 'all'. */
   beamSupportRate: (scope: string, who: string) => `msv:${scope}:beam:support:rate:${who}`,
+  /**
+   * The refunds the Beam webhook saw SUCCEED on a link (JSON BeamRefundsNote, payments/beamRefunds.ts: refund and
+   * charge ids, amounts, times; BEAM_RECORD_TTL_SECONDS), so the payment lookup tells a refund after confirmation
+   * without a Beam call, partial ones included.
+   */
+  beamRefunds: (linkId: string) => `msv:beam:refunds:${linkId}`,
+  /** The short lock the webhook takes while it adds a refund to keys.beamRefunds (two refunds of one link never lose one). */
+  beamRefundsLock: (linkId: string) => `msv:beam:lock:refunds:${linkId}`,
 };
 
 /**

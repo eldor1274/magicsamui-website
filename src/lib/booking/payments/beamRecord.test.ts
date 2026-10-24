@@ -161,7 +161,7 @@ test("every Stripe key name, TTL and hold suffix is byte-identical; the Beam key
     [
       "beamPayment", "beamCharge", "beamPrimary", "beamLinksOpen", "beamLinksWatch", "beamReported", "beamTxn", "beamBadSignatures",
       "beamRateLimited", "beamDisableFail", "beamReadFailures", "beamPageFail", "beamPaused", "beamDeepScan", "beamSweepFailures",
-      "beamLinksPending", "beamLinksWatchRead", "beamSupportRef", "beamSupportContact", "beamSupportRate",
+      "beamLinksPending", "beamLinksWatchRead", "beamSupportRef", "beamSupportContact", "beamSupportRate", "beamRefunds", "beamRefundsLock",
     ],
   );
   assert.equal(LOCK_TTL_SECONDS, 120);
@@ -172,6 +172,8 @@ test("every Stripe key name, TTL and hold suffix is byte-identical; the Beam key
 test("every Beam key carries 'beam:' right after 'msv:' or the mode scope, and none can be a Stripe key", () => {
   assert.equal(keys.beamPayment(LINK_ID), "msv:beam:pay:rGtqz6DafS");
   assert.equal(keys.beamCharge(CHARGE_ID), "msv:beam:charge:ch_3Ns8XkLmQ2");
+  assert.equal(keys.beamRefunds(LINK_ID), "msv:beam:refunds:rGtqz6DafS");
+  assert.equal(keys.beamRefundsLock(LINK_ID), "msv:beam:lock:refunds:rGtqz6DafS");
   assert.equal(keys.beamLinksOpen("beam-live"), "msv:beam-live:beam:links:open");
   assert.equal(keys.beamLinksWatch("beam-live"), "msv:beam-live:beam:links:watch");
   assert.equal(keys.beamReadFailures("beam-live"), "msv:beam-live:beam:readfail");
@@ -188,6 +190,8 @@ test("every Beam key carries 'beam:' right after 'msv:' or the mode scope, and n
       keys.beamPayment(LINK_ID),
       keys.beamCharge(CHARGE_ID),
       keys.beamPrimary(LINK_ID),
+      keys.beamRefunds(LINK_ID),
+      keys.beamRefundsLock(LINK_ID),
       keys.beamLinksOpen(scope),
       keys.beamLinksWatch(scope),
       ...(["dup-charge", "record-missing", "unknown-payment", "foreign-link", "refund-ambiguous", "scan-refused", "merchant-switch"] as const).map((kind) => keys.beamReported(scope, kind, LINK_ID)),

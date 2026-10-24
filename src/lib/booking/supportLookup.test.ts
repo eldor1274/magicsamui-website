@@ -7,7 +7,9 @@
 // instance, rejected tokens counted), no Beam config, the per-IP and global rate limits, the body limits; a lookup by
 // ref, phone (however the number is written) and email + ref, and an email alone (a count only, details withheld);
 // every state (open, processing, unconfirmed, paid, confirmed, expired, cancelled, refunded, failed, needs_attention,
-// unknown); the failureCode words and shape; payAgainSafe (an attempt still settling blocks paying again on the others,
+// unknown); refunded after it was confirmed (voided, a 50% card refund, the rest later, the extra charge of a double
+// payment, a needs_attention refunded in full: from the webhook's note with no Beam call, else from Beam's link within
+// the Beam budget); the failureCode words and shape; payAgainSafe (an attempt still settling blocks paying again on the others,
 // other bookings' finished attempts never do); an old page Beam has not closed; "don't pay again" while a charge is
 // pending; at most 5 attempts, newest first, Beam read for the newest 3 only; the 30-day retention of the index entries;
 // the index is Beam only (a Stripe checkout writes none of it, a Stripe ref answers notBeam) and per payment mode; a
@@ -18,11 +20,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BEAM_LIVE_ENV, BEAM_TEST_ENV, beamCheckout, beamHeld, cardDigitsShown, makeBeamKit, makeParityKit } from "./beamTestkit.ts";
 import type { BeamKit } from "./beamTestkit.ts";
+import { handleBeamWebhook } from "./beamWebhook.ts";
 import { getCatalogueRoom } from "./catalogue.ts";
+import { formatThb } from "./format.ts";
 import { fulfilPayment } from "./fulfil.ts";
 import { createMemoryKv } from "./kv.ts";
 import type { KvStore } from "./kv.ts";
 import { DONE_TTL_SECONDS, beamKeyOf, keyScope, keys } from "./lock.ts";
+import type { FakeBeamSignedEvent } from "./mock/fakeBeam.ts";
 import { readRecord, writeRecord } from "./payments/beamRecord.ts";
 import type { PaymentRecord } from "./payments/beamRecord.ts";
 import { BEAM_PENDING_BLOCK_MS } from "./payments/beamState.ts";
@@ -51,6 +56,7 @@ import {
   handlePaymentLookup,
   lookupInstanceState,
   parseLookupQuery,
+  refundWords,
 } from "./supportLookup.ts";
 import type { FailureOffer, LookupAnswer, LookupMatch, PaymentLookupDeps } from "./supportLookup.ts";
 import { FAR_CHECKIN, FAR_CHECKOUT, GUEST, NOW, TOKEN_SECRET, TEST_EMAIL, recordingKv } from "./testkit.ts";
@@ -391,7 +397,7 @@ test("processing: a charge waiting for the bank or wallet - don't pay again (ret
   assert.equal(dead.retrySafe, true);
 });
 
-test("paid (being confirmed), then confirmed from the done marker with no Beam call", async () => {
+test("paid (being confirmed), then confirmed from the done marker; Beam read only for a refund since (the link and its charges)", async () => {
   const kit = makeBeamKit();
   const h = await beamHeld(kit);
   kit.fakeBeam.pay(h.linkId, "CARD");
@@ -405,8 +411,13 @@ test("paid (being confirmed), then confirmed from the done marker with no Beam c
   assert.equal(outcome.state, "confirmed");
   const calls = kit.fakeBeam.calls.length;
   const done = await only(kit, { email: TEST_EMAIL, ref: h.ref });
-  assert.equal(kit.fakeBeam.calls.length, calls, "a finished booking needs no Beam call");
+  assert.deepEqual(
+    kit.fakeBeam.calls.slice(calls).map((c) => `${c.method} ${c.path.split("?")[0]}`),
+    [`GET /api/v1/payment-links/${h.linkId}`, "GET /api/v1/charges"],
+    "nothing noted by the webhook: the link and its charges are read once, for a refund since (no other Beam call)",
+  );
   assert.equal(done.state, "confirmed");
+  assert.equal(done.refund, undefined);
   assert.equal(done.cloudbedsConfirmed, true);
   assert.equal(done.retrySafe, false);
   assert.equal(done.reason, "Your payment was received and your booking is confirmed.");
@@ -492,6 +503,191 @@ test("refunded: read from Beam, and from the done marker of a booking refunded b
   const calls = kit.fakeBeam.calls.length;
   assert.equal((await only(kit, { ref: h.ref })).state, "refunded");
   assert.equal(kit.fakeBeam.calls.length, calls);
+});
+
+/* ------------------------------------- refunded after it was confirmed ------------------------------------- */
+
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+
+/** A Beam webhook delivery, as Beam sends it (the webhook notes a SUCCEEDED refund on its link). */
+async function deliver(kit: BeamKit, ev: FakeBeamSignedEvent): Promise<void> {
+  const res = await handleBeamWebhook(ev.raw, ev.headers, kit.deps, kit.config.beamWebhookHmacKey);
+  assert.equal(res.status, 200, res.body);
+}
+
+/** A Beam booking paid with `method` and confirmed by fulfil; the charge that paid it. */
+async function confirmedBeam(kit: BeamKit, payMethod: "card_ewallet" | "promptpay", method: string): Promise<{ h: Awaited<ReturnType<typeof beamHeld>>; chargeId: string }> {
+  const h = await beamHeld(kit, payMethod);
+  const charge = kit.fakeBeam.pay(h.linkId, method);
+  assert.equal((await fulfilPayment(h.key, kit.deps, kit.gw)).state, "confirmed");
+  return { h, chargeId: charge.chargeId };
+}
+
+/** The Beam requests since `from`, as "METHOD /path". */
+const beamCallsSince = (kit: BeamKit, from: number) => kit.fakeBeam.calls.slice(from).map((c) => `${c.method} ${c.path.split("?")[0]}`);
+
+test("confirmed, then voided in Lighthouse (the PromptPay booking of 24 Oct 2026): refunded - from Beam's link until the webhook notes it, then with no Beam call", async () => {
+  const kit = makeBeamKit();
+  const { h, chargeId } = await confirmedBeam(kit, "promptpay", "QR_PROMPT_PAY");
+  assert.equal((await only(kit, { ref: h.ref })).state, "confirmed");
+  kit.now.ms += 2 * HOUR;
+  const refundId = kit.fakeBeam.refund(chargeId, undefined, { asVoid: true });
+  assert.equal(kit.fakeBeam.link(h.linkId).status, "VOIDED");
+
+  // Nothing noted yet (voided before this release, or the webhook still being retried): Beam's link says it.
+  let from = kit.fakeBeam.calls.length;
+  const fromLink = await only(kit, { ref: h.ref });
+  assert.deepEqual(beamCallsSince(kit, from), [`GET /api/v1/payment-links/${h.linkId}`, "GET /api/v1/charges"], "within the lookup's Beam budget");
+  assert.deepEqual([fromLink.state, fromLink.cloudbedsConfirmed, fromLink.retrySafe, fromLink.paymentPageOpen], ["refunded", false, false, false]);
+  assert.equal(fromLink.reason, "This payment was refunded. Banks can take several days to show it.");
+  assert.equal(fromLink.nextStep, "Nothing else to do for this payment. Message us here with any questions.");
+  assert.deepEqual(fromLink.refund, { partial: false, amountSatang: h.quote.dueNowSatang, amount: formatThb(h.quote.dueNowSatang), refundedAt: null }, "a void takes back all of it");
+
+  // The webhook's refund.succeeded notes it: the answer needs no Beam call any more, and the day is known.
+  await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", refundId));
+  from = kit.fakeBeam.calls.length;
+  const a = await lookup(kit, { ref: h.ref });
+  assert.deepEqual(beamCallsSince(kit, from), [], "the webhook's note suffices: no Beam call");
+  const m = a.matches[0];
+  assert.equal(m.state, "refunded");
+  assert.equal(m.reason, "This payment was refunded on Oct 5, 2026. Banks can take several days to show it.");
+  assert.deepEqual(m.refund, { partial: false, amountSatang: h.quote.dueNowSatang, amount: formatThb(h.quote.dueNowSatang), refundedAt: new Date(kit.now.ms).toISOString() });
+  assert.equal(m.cloudbedsConfirmed, false);
+  assert.equal(a.payAgainSafe, true, "a refunded booking never blocks paying again");
+  assert.deepEqual([m.checkIn, m.checkOut, m.totalSatang, m.payMethod], [FAR_CHECKIN, FAR_CHECKOUT, h.quote.dueNowSatang, "promptpay"]);
+  assert.ok(kit.logs.some((l) => l.message === "support_lookup" && JSON.stringify(l.data?.states) === '["refunded"]'));
+  assertNoPii(JSON.stringify(a) + kit.logText(), "voided");
+});
+
+test("confirmed, then a 50% card refund (a cancellation): partly refunded from the webhook's note; Beam's link alone can't say how much", async () => {
+  const kit = makeBeamKit();
+  const { h, chargeId } = await confirmedBeam(kit, "card_ewallet", "CARD");
+  const total = h.quote.dueNowSatang;
+  const half = Math.round(total / 2);
+  kit.now.ms += DAY;
+  const first = kit.fakeBeam.refund(chargeId, half);
+  const firstAt = kit.now.ms;
+
+  // Beam's link alone (it reads REFUNDED after any refund, by the fake's default): a card refund of an amount not known.
+  const fromLink = await only(kit, { ref: h.ref });
+  assert.equal(fromLink.state, "refunded");
+  assert.equal(fromLink.reason, "This payment was refunded, in full or in part. Banks can take several days to show it.");
+  assert.equal(fromLink.nextStep, "Message us here if you'd like to know the amount, or with any questions about your booking.");
+  assert.deepEqual(fromLink.refund, { partial: null, amountSatang: null, amount: null, refundedAt: null });
+  assert.equal(fromLink.cloudbedsConfirmed, false);
+
+  // The webhook's note: partly refunded, how much and when, with no Beam call.
+  await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", first));
+  let from = kit.fakeBeam.calls.length;
+  const part = await only(kit, { email: TEST_EMAIL, ref: h.ref });
+  assert.deepEqual(beamCallsSince(kit, from), []);
+  assert.equal(part.state, "refunded");
+  assert.equal(part.reason, `Part of this payment (THB ${formatThb(half)} of THB ${formatThb(total)}) was refunded on Oct 6, 2026. Banks can take several days to show it.`);
+  assert.equal(part.nextStep, "Message us here with any questions about the refund or your booking.");
+  assert.deepEqual(part.refund, { partial: true, amountSatang: half, amount: formatThb(half), refundedAt: new Date(firstAt).toISOString() });
+  assert.equal(part.cloudbedsConfirmed, false);
+  assert.equal(part.retrySafe, false);
+
+  // The rest refunded a day later: all of it, on the later day.
+  kit.now.ms += DAY;
+  const rest = kit.fakeBeam.refund(chargeId);
+  await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", rest));
+  await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", first)); // Beam's retry of the first: noted once
+  const all = await only(kit, { ref: h.ref });
+  assert.equal(all.reason, "This payment was refunded on Oct 7, 2026. Banks can take several days to show it.");
+  assert.deepEqual(all.refund, { partial: false, amountSatang: total, amount: formatThb(total), refundedAt: new Date(kit.now.ms).toISOString() });
+
+  // A Beam that keeps the link PAID after a part refund (refundLinkStatus all_charges_fully_refunded, unverified):
+  // without the note the lookup can't see it (confirmed); the webhook's note tells it.
+  const kit2 = makeBeamKit({ beam: { refundLinkStatus: "all_charges_fully_refunded" } });
+  const b = await confirmedBeam(kit2, "card_ewallet", "CARD");
+  const half2 = Math.round(b.h.quote.dueNowSatang / 2);
+  const r2 = kit2.fakeBeam.refund(b.chargeId, half2);
+  assert.equal(kit2.fakeBeam.link(b.h.linkId).status, "PAID");
+  assert.equal((await only(kit2, { ref: b.h.ref })).state, "confirmed");
+  await deliver(kit2, kit2.fakeBeam.signedEvent("refund.succeeded", r2));
+  from = kit2.fakeBeam.calls.length;
+  const p2 = await only(kit2, { ref: b.h.ref });
+  assert.deepEqual(beamCallsSince(kit2, from), []);
+  assert.deepEqual([p2.state, p2.refund?.partial, p2.refund?.amountSatang], ["refunded", true, half2]);
+  assertNoPii(JSON.stringify([fromLink, part, all, p2]) + kit.logText() + kit2.logText(), "part refund");
+});
+
+test("confirmed and not refunded stays confirmed; an attempt past the Beam budget answers from our store alone, the webhook's note included (no Beam call)", async () => {
+  const kit = makeBeamKit();
+  const { h, chargeId } = await confirmedBeam(kit, "card_ewallet", "CARD");
+  const template = await readRecord(kit.deps.kv, h.linkId);
+  assert.ok(template);
+  // Three newer attempts of the same guest (links Beam does not know), so the confirmed one is past the newest 3.
+  const phoneCode = supportCode(TOKEN_SECRET, "phone", "66952466011");
+  for (let i = 0; i < SUPPORT_LOOKUP_BEAM_READS; i++) {
+    const at = NOW + (i + 1) * 60_000;
+    const record: PaymentRecord = { ...template, linkId: `LnkNewer${i}`, ref: `MSV-20261005-NW${"CDE"[i]}${"CDE"[i]}`, createdAt: at, expiresAt: at + 30 * 60_000 };
+    await writeRecord(kit.deps.kv, record);
+    const entry = supportEntry(record.ref, record.linkId, at, ["garden-suite"]);
+    assert.ok(entry);
+    await writeSupportIndex(kit.deps.kv, { mode: kit.config.paymentMode, entry, emailCode: null, phoneCodes: [phoneCode] }, NOW);
+  }
+  kit.now.ms += 5 * 60_000;
+  const linkRead = (from: number) => beamCallsSince(kit, from).filter((c) => c.endsWith(`/payment-links/${h.linkId}`));
+  let from = kit.fakeBeam.calls.length;
+  const a = await lookup(kit, { phone: "+66952466011" });
+  const mine = a.matches.find((m) => m.ref === h.ref);
+  assert.deepEqual([mine?.state, mine?.cloudbedsConfirmed, mine?.refund], ["confirmed", true, undefined]);
+  assert.deepEqual(linkRead(from), [], "past the newest 3: not read");
+
+  // Refunded in full since (the webhook's note): refunded, still with no Beam call for it.
+  const refundId = kit.fakeBeam.refund(chargeId);
+  await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", refundId));
+  from = kit.fakeBeam.calls.length;
+  const b = await lookup(kit, { phone: "+66952466011" });
+  const after = b.matches.find((m) => m.ref === h.ref);
+  assert.deepEqual([after?.state, after?.refund?.partial, after?.cloudbedsConfirmed], ["refunded", false, false]);
+  assert.deepEqual(linkRead(from), []);
+});
+
+test("a double payment whose extra charge was refunded: confirmed once the webhook notes which charge it was; until then the owner's check (needs_attention)", async () => {
+  const kit = makeBeamKit();
+  const { h } = await confirmedBeam(kit, "card_ewallet", "CARD");
+  kit.now.ms += 10 * 60_000;
+  const extra = kit.fakeBeam.secondCharge(h.linkId, "CARD");
+  await deliver(kit, kit.fakeBeam.signedEvent("charge.succeeded", extra.chargeId));
+  const refundId = kit.fakeBeam.refund(extra.chargeId);
+  assert.equal(kit.fakeBeam.link(h.linkId).status, "REFUNDED", "Beam's link can't say which charge");
+  const unsure = await only(kit, { ref: h.ref });
+  assert.deepEqual([unsure.state, unsure.reason], ["needs_attention", "A refund was made on this booking's payments, and our team needs to check it by hand."]);
+  assert.match(unsure.nextStep, /^Please don't pay again\./);
+  await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", refundId));
+  const from = kit.fakeBeam.calls.length;
+  const m = await only(kit, { ref: h.ref });
+  assert.deepEqual([m.state, m.cloudbedsConfirmed, m.refund], ["confirmed", true, undefined], "the booking's own payment stands");
+  assert.deepEqual(beamCallsSince(kit, from), []);
+});
+
+test("needs_attention (paid after its hold ended) turns refunded only once the whole payment is known refunded", async () => {
+  const kit = makeBeamKit();
+  const late = await beamHeld(kit);
+  const charge = kit.fakeBeam.pay(late.linkId, "CARD");
+  await kit.deps.kv.set(keys.fulfilDone(late.key), JSON.stringify({ state: "needs_attention", reservationId: late.reservationId, ref: late.ref, totalSatang: late.quote.dueNowSatang, reason: "x", at: NOW }), DONE_TTL_SECONDS);
+  assert.equal((await only(kit, { ref: late.ref })).state, "needs_attention");
+  const refundId = kit.fakeBeam.refund(charge.chargeId);
+  // Beam's link reads REFUNDED, but a card can be refunded in part: still the owner's to finish until the note says all.
+  assert.equal((await only(kit, { ref: late.ref })).state, "needs_attention");
+  await deliver(kit, kit.fakeBeam.signedEvent("refund.succeeded", refundId));
+  const m = await only(kit, { ref: late.ref });
+  assert.deepEqual([m.state, m.refund?.partial, m.reason], ["refunded", false, "This payment was refunded on Oct 5, 2026. Banks can take several days to show it."]);
+});
+
+test("refundWords: all of it, a part, an amount alone, nothing known; the day on the property's calendar", () => {
+  const at = Date.parse("2026-10-24T18:30:00Z"); // 01:30 on Oct 25 in Bangkok
+  assert.deepEqual(refundWords({ whole: true, amountSatang: 405_000, atMs: at }, 405_000), {
+    reason: "This payment was refunded on Oct 25, 2026. Banks can take several days to show it.",
+    nextStep: "Nothing else to do for this payment. Message us here with any questions.",
+  });
+  assert.equal(refundWords({ whole: false, amountSatang: 202_500, atMs: null }, 405_000).reason, "Part of this payment (THB 2,025.00 of THB 4,050.00) was refunded. Banks can take several days to show it.");
+  assert.equal(refundWords({ whole: null, amountSatang: 202_500, atMs: null }, null).reason, "THB 2,025.00 of this payment was refunded. Banks can take several days to show it.");
+  assert.equal(refundWords({ whole: null, amountSatang: null, atMs: at }, 405_000).reason, "This payment was refunded on Oct 25, 2026, in full or in part. Banks can take several days to show it.");
 });
 
 test("failed: the latest charge's failureCode in plain words, the next step for an open and a closed page", async () => {
