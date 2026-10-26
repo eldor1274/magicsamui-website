@@ -214,7 +214,7 @@ export const BEAM_STATEMENT_DESCRIPTOR = "magicsuitesandvillas";
  */
 export function beamStatementNote(result: Pick<StatusResponse, "paymentMode" | "booking">): string | null {
   if (result.paymentMode !== "beam-live" || result.booking.payMethod !== "card_ewallet") return null;
-  return `Your card statement will show the charge as "${BEAM_STATEMENT_DESCRIPTOR}".`;
+  return `If you paid by card, your card statement will show the charge as "${BEAM_STATEMENT_DESCRIPTOR}".`;
 }
 
 /**

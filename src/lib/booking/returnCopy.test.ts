@@ -379,7 +379,7 @@ test("design S5.3, beamPaidCopy: null for Stripe and the demo; Beam's words for 
   }
 });
 
-const STATEMENT_LINE = 'Your card statement will show the charge as "magicsuitesandvillas".';
+const STATEMENT_LINE = 'If you paid by card, your card statement will show the charge as "magicsuitesandvillas".';
 
 test("Beam's statement descriptor (Beam's written answer, 26 Oct 2026): one line under the paid view's lead for a beam-live card or e-wallet booking, with and without the Cloudbeds email; never for PromptPay, a token without the method, beam-playground, Stripe or the demo", async () => {
   assert.equal(BEAM_STATEMENT_DESCRIPTOR, "magicsuitesandvillas");
