@@ -844,7 +844,7 @@ test("runCheckout on Beam: a page priced for the other method group gets the usu
 test("runCheckout on Beam: a stay above Beam's maximum charge is refused (422) after the re-quote and before any Cloudbeds write, KV write or Beam call", async () => {
   const now = { ms: NOW };
   const kv = recordingKv(createMemoryKv(() => now.ms));
-  // 30 nights at 40,000 baht: THB 1,236,000 with the 3% fee, above BEAM_MAX_CHARGE_SATANG (THB 999,999.99).
+  // 30 nights at 40,000 baht: THB 1,236,000 with the 3% fee, above BEAM_MAX_CHARGE_SATANG (THB 200,000.00).
   const kit = makeBeamKit({ cb: { roomTypes: { ...ROOM_TYPES, "462958": { ...ROOM_TYPES["462958"], rate: 40_000 } } }, kv, now });
   const stay = { checkIn: FAR_CHECKIN, checkOut: addDays(FAR_CHECKIN, 30) };
   const quote = await beamServerQuote(kit, beamRequest(HONEYMOON, stay));
@@ -867,6 +867,51 @@ test("runCheckout on Beam: a stay above Beam's maximum charge is refused (422) a
   assert.deepEqual(kv.writes, [], "no KV write");
   assert.equal(kit.fakeBeam.calls.length, 0, "no Beam call");
   assert.ok(logged(kit, "checkout_refused_over_max_charge").some((l) => l.data?.amount === quote.dueNowSatang));
+});
+
+test("runCheckout on Beam at Beam's limit of THB 200,000.00 per transaction (the fee included): THB 199,999.99 is held and linked, THB 200,000.01 is refused (422) with nothing held, written or sent - by card and by PromptPay", async () => {
+  // One night in the Honeymoon Suite at `rate` baht; `due` is what the guest's method group would be charged.
+  const cases: { payMethod: PayMethod; rate: number; due: number; ok: boolean }[] = [
+    { payMethod: "promptpay", rate: 199_999.99, due: 19_999_999, ok: true },
+    { payMethod: "promptpay", rate: 200_000, due: 20_000_000, ok: true },
+    { payMethod: "promptpay", rate: 200_000.01, due: 20_000_001, ok: false },
+    // 194,174.75 + 3% (5,825.24) = 199,999.99; 194,174.77 + 3% = 200,000.01.
+    { payMethod: "card_ewallet", rate: 194_174.75, due: 19_999_999, ok: true },
+    { payMethod: "card_ewallet", rate: 194_174.77, due: 20_000_001, ok: false },
+    // The fee is what takes it over: THB 195,000 is refused by card (200,850.00) and paid by PromptPay.
+    { payMethod: "card_ewallet", rate: 195_000, due: 20_085_000, ok: false },
+    { payMethod: "promptpay", rate: 195_000, due: 19_500_000, ok: true },
+  ];
+  for (const c of cases) {
+    const label = `${c.payMethod} THB ${c.rate}`;
+    const now = { ms: NOW };
+    const kv = recordingKv(createMemoryKv(() => now.ms));
+    const kit = makeBeamKit({ cb: { roomTypes: { ...ROOM_TYPES, "462958": { ...ROOM_TYPES["462958"], rate: c.rate } } }, kv, now });
+    const stay = { checkIn: FAR_CHECKIN, checkOut: addDays(FAR_CHECKIN, 1), payMethod: c.payMethod };
+    const quote = await beamServerQuote(kit, beamRequest(HONEYMOON, stay));
+    assert.equal(quote.dueNowSatang, c.due, label);
+    assert.equal(quote.dueNowSatang, quote.totalSatang, `${label}: paid in full`);
+    const res = await runCheckout({ ...beamRequest(HONEYMOON, stay), expectedTotalSatang: quote.totalSatang, expectedDueNowSatang: quote.dueNowSatang }, kit.checkoutDeps());
+    if (c.ok) {
+      assert.equal(res.status, 200, `${label}: ${JSON.stringify(res.body)}`);
+      assert.equal(kit.fakeCb.reservations.size, 1, `${label}: held`);
+      assert.equal((linkPosts(kit)[0].body as BeamCreatePaymentLinkRequest).order.netAmount, c.due, `${label}: the link's amount`);
+      continue;
+    }
+    assert.deepEqual(res, {
+      status: 422,
+      body: {
+        ok: false,
+        error: "payment_unavailable",
+        message: "A stay of this size can't be paid online in one payment. Nothing has been reserved or charged - please message us on WhatsApp and we'll book it for you.",
+      },
+    }, label);
+    assert.deepEqual(cbWrites(kit), [], `${label}: no Cloudbeds write`);
+    assert.equal(kit.fakeCb.reservations.size, 0, `${label}: nothing held`);
+    assert.deepEqual(kv.writes, [], `${label}: no KV write`);
+    assert.equal(kit.fakeBeam.calls.length, 0, `${label}: no Beam call`);
+    assert.ok(logged(kit, "checkout_refused_over_max_charge").some((l) => l.data?.amount === c.due), label);
+  }
 });
 
 test("runCheckout on Beam: DIRECT sells Cloudbeds' Direct rate (held on its roomRateID with the promo code), the link for its total; an unknown code is ignored (base rate), never refused", async () => {

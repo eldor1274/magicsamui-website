@@ -63,7 +63,7 @@ import {
 import { ADDONS, FREE_PICKUP_MIN_NIGHTS, HOUSE_POLICIES, RATE_PLANS, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { fetchStatus, recallLinkToken } from "@/lib/booking/apiClient";
 import { isHoldFirstMode, isLiveMode, providerOf } from "@/lib/booking/payments/provider";
-import { beamPaidCopy, beamPendingCopy, beamPolledReason, canRetryPayment, isPollingView, nextPolledReason, pollPlan, returnViewKind, unpaidCopy } from "@/lib/booking/returnView";
+import { beamPaidCopy, beamPendingCopy, beamPolledReason, beamStatementNote, canRetryPayment, isPollingView, nextPolledReason, pollPlan, returnViewKind, unpaidCopy } from "@/lib/booking/returnView";
 import type { BeamPaidCopy, PolledReason, ReturnViewKind, UnpaidStatus } from "@/lib/booking/returnView";
 import { createBookingAnalytics } from "@/lib/booking/clientAnalytics";
 import { formatDisplayDateWithWeekday, formatNights } from "@/lib/booking/dates";
@@ -619,6 +619,8 @@ function BeamPaidView({
   const { booking } = result;
   // Hold-first (from the mode): the reservation is confirmed in Cloudbeds, under this number.
   const reservationId = isHoldFirstMode(result.paymentMode) ? result.fulfilment.reservationId : null;
+  // beam-live, card or e-wallet: the name on the guest's card statement (returnView.ts beamStatementNote).
+  const statementNote = beamStatementNote(result);
   return (
     <div className="space-y-5">
       <StatusCard
@@ -630,6 +632,7 @@ function BeamPaidView({
       >
         {/* The guest's email address is never printed here (this is the page the purchase event fires on). */}
         <p>{copy.lead}</p>
+        {statementNote && <p className="mt-2 text-sm">{statementNote}</p>}
         <div className="mt-5">
           <ReferenceBox bookingRef={booking.ref} />
           <ReservationNumber reservationId={reservationId} />

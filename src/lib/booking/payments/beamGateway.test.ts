@@ -28,7 +28,7 @@ import { beamGateway } from "./beamGateway.ts";
 import type { BeamChargeIndexEntry } from "./beamGateway.ts";
 import { buildBeamNote, readRecord, writeRecord } from "./beamRecord.ts";
 import { BEAM_EXPIRY_SKEW_MS } from "./beamState.ts";
-import { BEAM_GATEWAY_TEXT, beamGatewayText } from "./beamText.ts";
+import { BEAM_GATEWAY_TEXT, BEAM_PARTIAL_REFUND_METHODS, BEAM_REFUNDABLE_METHODS, beamFullRefundHow, beamGatewayText } from "./beamText.ts";
 import type { CartItemInput } from "../types.ts";
 import type { GatewayPayment, GatewayReceipt } from "./gateway.ts";
 import { STRIPE_GATEWAY_TEXT } from "./stripeGateway.ts";
@@ -38,6 +38,10 @@ const MIN = 60_000;
 const PAST_ALERT_WINDOW_MS = ALERT_WINDOW_SECONDS * 1000 + MIN;
 const GRACE_MS = 20 * MIN;
 const money = (satang: number) => `THB ${satangToBahtString(satang)}`;
+/** A full refund in Lighthouse (Beam's written answer, 26 Oct 2026: Void on the payment day before 8 PM, else Refund). */
+const LIGHTHOUSE = (chargeId: string) =>
+  `the full amount in Beam Lighthouse (Payments > charge ${chargeId}: Void on the day of the payment before 8 PM, with no Beam fee; later Refund, and Beam's fee still applies)`;
+const CARD_DAYS = "A card refund takes 7-14 business days to reach the guest.";
 const res = (kit: BeamKit, id: string) => {
   const r = kit.fakeCb.reservations.get(id);
   assert.ok(r, `no reservation ${id}`);
@@ -204,11 +208,16 @@ test("paid by card: one postPayment 'Beam(website)', the fee line, the PAID note
   assert.equal(kit.fakeCb.balance(h.reservationId), 0);
   const paidNote = r.notes.find((n) => n.includes("PAID via"));
   assert.ok(paidNote?.startsWith(
-    `TEST MODE - NOT REAL MONEY. PAID via Beam ${card.chargeId} (card, ${money(h.quote.totalSatang)}). Refund path: Beam Lighthouse (full or 50% refunds of the card payment) for online booking ${h.ref} - do NOT cancel.`,
+    `TEST MODE - NOT REAL MONEY. PAID via Beam ${card.chargeId} (card, ${money(h.quote.totalSatang)}). Refund path: Beam Lighthouse (full or 50% refunds of the card payment; a full refund on the day of the payment before 8 PM is a Void, with no Beam fee) for online booking ${h.ref} - do NOT cancel.`,
   ), paidNote);
   const booked = withSubject(kit, /^New direct booking/);
   assert.equal(booked.length, 1);
-  assert.ok(booked[0].lines.includes("If the guest cancels: Beam Lighthouse (full or 50% refunds of the card payment)."), booked[0].lines.join("\n"));
+  assert.ok(
+    booked[0].lines.includes(
+      "If the guest cancels: Beam Lighthouse (full or 50% refunds of the card payment; a full refund on the day of the payment before 8 PM is a Void, with no Beam fee). A card refund takes 7-14 business days to reach the guest.",
+    ),
+    booked[0].lines.join("\n"),
+  );
   // The primary is stored set-once; the charge is indexed to its booking; every fulfil marker lives 708 days.
   assert.equal(await kit.deps.kv.get(keys.beamPrimary(h.linkId)), card.chargeId);
   assert.deepEqual(await readJson<BeamChargeIndexEntry>(kit.deps.kv, keys.beamCharge(card.chargeId)), {
@@ -245,7 +254,7 @@ test("paid by PromptPay: no fee line, the folio balances, the refund path is a f
   assert.equal(kit.fakeCb.balance(h.reservationId), 0);
   assert.ok(
     r.notes.some((n) =>
-      n.includes(`PAID via Beam ${qr.chargeId} (PromptPay, ${money(h.quote.totalSatang)}). Refund path: Beam Lighthouse for a full refund; a 50% refund by bank transfer (Beam refunds PromptPay only in full) for online booking`),
+      n.includes(`PAID via Beam ${qr.chargeId} (PromptPay, ${money(h.quote.totalSatang)}). Refund path: Beam Lighthouse for a full refund (on the day of the payment before 8 PM a Void, with no Beam fee); a 50% refund by bank transfer (Beam refunds PromptPay only in full) for online booking`),
     ),
     r.notes.join("\n"),
   );
@@ -502,7 +511,7 @@ test("two successful charges before confirmation: the first is recorded, one 'ch
   assert.equal(dup[0].subject, `URGENT: guest charged twice for booking ${h.ref}`);
   assert.deepEqual(dup[0].lines, [
     `Beam payment link ${h.linkId} (booking ${h.ref}, Cloudbeds reservation ${h.reservationId}) has 2 successful charges. ${first.chargeId} (card, ${money(first.amount)}) is the one recorded in Cloudbeds; ${second.chargeId} (card, ${money(second.amount)}) is an extra charge.`,
-    `Refund ${second.chargeId} in full in Beam Lighthouse (bank transfer for LINE Pay, TrueMoney or ShopeePay). Do NOT record it in Cloudbeds and do not cancel the booking.`,
+    `Pay the extra charge ${second.chargeId} back: ${LIGHTHOUSE(second.chargeId)}. ${CARD_DAYS} Do NOT record it in Cloudbeds and do not cancel the booking.`,
   ]);
   for (const c of [first, second]) assert.equal((await readJson<BeamChargeIndexEntry>(kit.deps.kv, keys.beamCharge(c.chargeId)))?.ref, h.ref);
 });
@@ -611,13 +620,13 @@ test("the release guard: a QR attempt the charge list had not shown yet appears 
 
 /* ------------------------- a late success on a cancelled hold (decision 3) ------------------------- */
 
-const LIGHTHOUSE = (chargeId: string) => `the full amount in Beam Lighthouse (Payments > charge ${chargeId} > Refund). Nothing is refunded automatically`;
 const BANK = (name: string) => `the full amount by bank transfer: Beam can't refund ${name}. Nothing is refunded automatically`;
+/** Beam's written answer (26 Oct 2026): only cards and PromptPay are refunded in Lighthouse; every e-wallet by bank transfer. */
 const METHODS = [
-  { type: "CARD", group: "card_ewallet", refund: LIGHTHOUSE },
-  { type: "QR_PROMPT_PAY", group: "promptpay", refund: LIGHTHOUSE },
-  { type: "ALIPAY", group: "card_ewallet", refund: LIGHTHOUSE },
-  { type: "WECHAT_PAY", group: "card_ewallet", refund: LIGHTHOUSE },
+  { type: "CARD", group: "card_ewallet", refund: (id: string) => `${LIGHTHOUSE(id)}. ${CARD_DAYS} Nothing is refunded automatically` },
+  { type: "QR_PROMPT_PAY", group: "promptpay", refund: (id: string) => `${LIGHTHOUSE(id)}. Nothing is refunded automatically` },
+  { type: "ALIPAY", group: "card_ewallet", refund: () => BANK("Alipay") },
+  { type: "WECHAT_PAY", group: "card_ewallet", refund: () => BANK("WeChat Pay") },
   { type: "LINE_PAY", group: "card_ewallet", refund: () => BANK("LINE Pay") },
   { type: "TRUE_MONEY", group: "card_ewallet", refund: () => BANK("TrueMoney") },
   { type: "SHOPEE_PAY", group: "card_ewallet", refund: () => BANK("ShopeePay") },
@@ -870,7 +879,7 @@ const receipts: GatewayReceipt[] = [
     primaryId: "ch_TestCharge000000000000000000",
     description: `Beam link rGtqz6DafS charge ch_TestCharge000000000000000000 (${methodType})`,
     methodType,
-    refundable: ["CARD", "CARD_INSTALLMENTS", "QR_PROMPT_PAY", "ALIPAY", "WECHAT_PAY"].includes(methodType),
+    refundable: ["CARD", "CARD_INSTALLMENTS", "QR_PROMPT_PAY"].includes(methodType),
     partialRefundable: methodType === "CARD",
   })),
   { primaryId: null, description: "Beam link rGtqz6DafS charge pending (method pending)" },
@@ -928,7 +937,7 @@ test("texts: no Beam text names Stripe; the Beam fee items, labels and env names
     note: "TEST MODE - NOT REAL MONEY. Test fee line.",
   });
   assert.deepEqual(BEAM_GATEWAY_TEXT.sessionLabel, { long: "payment link", short: "link" });
-  assert.equal(BEAM_GATEWAY_TEXT.refundWhere, "in full in Beam Lighthouse (nothing is refunded automatically)");
+  assert.equal(BEAM_GATEWAY_TEXT.refundWhere, "in full in Beam Lighthouse, or by bank transfer for an e-wallet payment (nothing is refunded automatically)");
   assert.equal(BEAM_GATEWAY_TEXT.webhookRetryHint, "Beam webhook retries");
   assert.equal(BEAM_GATEWAY_TEXT.mockMethod, "mock-beam");
   assert.equal(BEAM_GATEWAY_TEXT.methodEnvVar, "CLOUDBEDS_BEAM_PAYMENT_METHOD");
@@ -940,9 +949,44 @@ test("texts: no Beam text names Stripe; the Beam fee items, labels and env names
   );
   assert.equal(
     BEAM_GATEWAY_TEXT.paidVia(receipts[0], "THB 9,270.00"),
-    "via Beam ch_TestCharge000000000000000000 (card, THB 9,270.00). Refund path: Beam Lighthouse (full or 50% refunds of the card payment)",
+    "via Beam ch_TestCharge000000000000000000 (card, THB 9,270.00). Refund path: Beam Lighthouse (full or 50% refunds of the card payment; a full refund on the day of the payment before 8 PM is a Void, with no Beam fee)",
   );
-  assert.ok(BEAM_GATEWAY_TEXT.paidVia(receipts[receipts.length - 1], "THB 1.00").startsWith("via Beam charge id pending (method pending, THB 1.00). Refund path: check the charge's method in Beam Lighthouse"));
+  assert.equal(
+    BEAM_GATEWAY_TEXT.paidVia(receipts[receipts.length - 1], "THB 1.00"),
+    "via Beam charge id pending (method pending, THB 1.00). Refund path: check the charge's method in Beam Lighthouse - cards are refunded there in full or 50%, PromptPay in full there and 50% by bank transfer, e-wallets (Alipay, WeChat Pay, LINE Pay, TrueMoney or ShopeePay) by bank transfer only",
+  );
+});
+
+test("texts, Beam's written answer (26 Oct 2026): only cards and PromptPay are refunded in Lighthouse (a Void on the payment day before 8 PM, no Beam fee; later a Refund, Beam's fee applies); every e-wallet by bank transfer; a card's 7-14 business days", () => {
+  const CHARGE = "ch_TestCharge000000000000000000";
+  const of = (methodType: string) => receipts.find((r) => r.methodType === methodType) as GatewayReceipt;
+  assert.deepEqual([...BEAM_REFUNDABLE_METHODS].sort(), ["CARD", "CARD_INSTALLMENTS", "QR_PROMPT_PAY"]);
+  assert.deepEqual([...BEAM_PARTIAL_REFUND_METHODS], ["CARD"]);
+  const wallets: [string, string][] = [["ALIPAY", "Alipay"], ["WECHAT_PAY", "WeChat Pay"], ["LINE_PAY", "LINE Pay"], ["TRUE_MONEY", "TrueMoney"], ["SHOPEE_PAY", "ShopeePay"]];
+  for (const [type, name] of wallets) {
+    const r = of(type);
+    assert.equal(BEAM_GATEWAY_TEXT.paidVia(r, "THB 9,270.00"), `via Beam ${CHARGE} (${name}, THB 9,270.00). Refund path: bank transfer only (Beam can't refund ${name})`, type);
+    assert.equal(BEAM_GATEWAY_TEXT.bookedExtra?.(r), `If the guest cancels: bank transfer only (Beam can't refund ${name}).`, type);
+    assert.equal(BEAM_GATEWAY_TEXT.refundHow?.(r), `the full amount by bank transfer: Beam can't refund ${name}. Nothing is refunded automatically`, type);
+    assert.equal(beamFullRefundHow(type, CHARGE), `the full amount by bank transfer: Beam can't refund ${name}`, type);
+  }
+  assert.equal(
+    BEAM_GATEWAY_TEXT.bookedExtra?.(of("CARD")),
+    "If the guest cancels: Beam Lighthouse (full or 50% refunds of the card payment; a full refund on the day of the payment before 8 PM is a Void, with no Beam fee). A card refund takes 7-14 business days to reach the guest.",
+  );
+  assert.equal(
+    BEAM_GATEWAY_TEXT.bookedExtra?.(of("QR_PROMPT_PAY")),
+    "If the guest cancels: Beam Lighthouse for a full refund (on the day of the payment before 8 PM a Void, with no Beam fee); a 50% refund by bank transfer (Beam refunds PromptPay only in full).",
+  );
+  assert.equal(BEAM_GATEWAY_TEXT.refundHow?.(of("CARD")), `${LIGHTHOUSE(CHARGE)}. ${CARD_DAYS} Nothing is refunded automatically`);
+  assert.equal(BEAM_GATEWAY_TEXT.refundHow?.(of("CARD_INSTALLMENTS")), `${LIGHTHOUSE(CHARGE)}. ${CARD_DAYS} Nothing is refunded automatically`);
+  assert.equal(BEAM_GATEWAY_TEXT.refundHow?.(of("QR_PROMPT_PAY")), `${LIGHTHOUSE(CHARGE)}. Nothing is refunded automatically`);
+  assert.equal(
+    BEAM_GATEWAY_TEXT.refundHow?.(receipts[receipts.length - 1]),
+    "the full amount in Beam Lighthouse (Payments > charge of this booking: Void on the day of the payment before 8 PM, with no Beam fee; later Refund, and Beam's fee still applies), or by bank transfer if it was paid with an e-wallet (Alipay, WeChat Pay, LINE Pay, TrueMoney or ShopeePay: Beam can't refund those). Nothing is refunded automatically",
+  );
+  // No Beam text ever sends an e-wallet refund to Lighthouse.
+  for (const t of beamTexts()) assert.doesNotMatch(t, /Alipay and WeChat Pay in full|PromptPay, Alipay and WeChat Pay/, t);
 });
 
 test("texts: the Stripe gateway's words are unchanged and set none of the Beam hooks", () => {
@@ -1053,7 +1097,7 @@ test("a late CARD_INSTALLMENTS success on a released hold: refundable in Beam Li
   assert.ok(out.state === "needs_attention", JSON.stringify(out));
   assert.equal(
     out.reason,
-    `The guest PAID but the Cloudbeds hold is CANCELLED. Re-instate or re-book the guest in Cloudbeds (if the unit is still free) or refund ${LIGHTHOUSE(late.chargeId)}.`,
+    `The guest PAID but the Cloudbeds hold is CANCELLED. Re-instate or re-book the guest in Cloudbeds (if the unit is still free) or refund ${LIGHTHOUSE(late.chargeId)}. ${CARD_DAYS} Nothing is refunded automatically.`,
   );
 });
 

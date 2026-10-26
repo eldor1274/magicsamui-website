@@ -532,7 +532,7 @@ test("refund.succeeded: the info alert keyed refund:{id}:SUCCEEDED with the foli
   assert.equal(done[0].severity, "info");
   assert.equal(done[0].subject, `Beam refund done for booking ${h.ref} (${money(h.quote.totalSatang)})`);
   assert.deepEqual(done[0].lines, [
-    `Beam refunded ${money(h.quote.totalSatang)} of charge ${chargeId} (card), refund ${refundId} (Beam accepted it; the guest's bank may take days).`,
+    `Beam refunded ${money(h.quote.totalSatang)} of charge ${chargeId} (card), refund ${refundId} (Beam accepted it; a card refund takes 7-14 business days to reach the guest).`,
     `Record it in Cloudbeds by hand: a negative adjustment on reservation ${h.reservationId}; cancel the reservation if the stay is cancelled; retract (full refund) or restate (partial refund) the Google Ads conversion (docs section 8).`,
   ]);
   assert.ok(await kit.deps.kv.get(keys.alerted(SCOPE, `refund:${refundId}:SUCCEEDED`)), "keyed refund:{refundId}:{status}");
@@ -826,7 +826,7 @@ test("a chargeback -> CRITICAL 'URGENT: chargeback on Beam payment for booking {
   assert.equal(urgent.length, 1);
   assert.equal(urgent[0].subject, `URGENT: chargeback on Beam payment for booking ${h.ref}`);
   assert.deepEqual(urgent[0].lines, [
-    `Beam recorded a CHARGEBACK of ${money(h.quote.totalSatang)} on charge ${chargeId} (booking ${h.ref}, Cloudbeds reservation ${h.reservationId}). Collect the booking evidence (agreed terms version, PAID note, guest messages) and answer Beam's dispute process: docs section 8.`,
+    `Beam recorded a CHARGEBACK of ${money(h.quote.totalSatang)} on charge ${chargeId} (booking ${h.ref}, Cloudbeds reservation ${h.reservationId}). Beam asks for proof by email only: reply to Beam's email with the booking evidence (the Cloudbeds reservation and folio, the booking confirmation, the guest's messages, the check-in record and ID, the house rules and terms agreed - their version is in the PAID note), the sooner the better: docs section 8.`,
   ]);
   assert.equal(logged(kit, "beam_transaction").at(-1)?.data?.type, "CHARGEBACK");
 

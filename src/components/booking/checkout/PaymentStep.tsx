@@ -40,8 +40,10 @@ import type { GuestDetails } from "@/lib/booking/guest";
 import {
   CHOOSE_METHOD_HINT,
   DEMO_COPY_CONFIG,
+  OVER_MAX_CHARGE_MESSAGE,
   PROMPTPAY_HINT,
   noFeeAlternative,
+  overMaxChargeNote,
   payMethodFeeLabel,
   payMethodOptions,
   paymentMethodLabels,
@@ -522,6 +524,9 @@ export default function PaymentStep({
   const chosenMethod = methodOptions.find((o) => o.method === payMethod)?.method ?? null;
   const needsMethod = methodOptions.length > 0 && chosenMethod === null;
   const methodNote = config && methodOptions.length > 0 ? noFeeAlternative(config, chosenMethod) : null;
+  // Beam: a stay above Beam's limit of one online payment (THB 200,000, the fee included) is refused at Pay before
+  // anything is held; the page says so first: for the chosen method, and before a choice for any offered method.
+  const overLimitNote = config && methodOptions.length > 0 ? overMaxChargeNote(config, quote, chosenMethod) : null;
   const methodHintId = `${PAY_METHOD_GROUP_ID}-hint`;
 
   function showAmount() {
@@ -746,6 +751,19 @@ export default function PaymentStep({
                 <p className="flex items-start gap-2 rounded-(--bk-radius-control) bg-(--bk-surface-muted) p-3 text-xs text-(--bk-text)">
                   <QrCode size={16} aria-hidden="true" className="mt-px shrink-0 text-(--bk-text-muted)" />
                   {PROMPTPAY_HINT}
+                </p>
+              )}
+              {overLimitNote && (
+                <p
+                  className={`${chosenMethod === "promptpay" ? "mt-2 " : ""}flex items-start gap-2 rounded-(--bk-radius-control) border border-(--bk-banner-border) bg-(--bk-warning-soft) p-3 text-xs text-(--bk-text)`}
+                >
+                  <CircleAlert size={16} aria-hidden="true" className="mt-px shrink-0 text-(--bk-warning)" />
+                  <span>
+                    {overLimitNote}{" "}
+                    <a href={whatsappHref(OVER_MAX_CHARGE_MESSAGE)} target="_blank" rel="noopener noreferrer" className="font-medium underline underline-offset-2">
+                      WhatsApp us
+                    </a>
+                  </span>
                 </p>
               )}
             </div>

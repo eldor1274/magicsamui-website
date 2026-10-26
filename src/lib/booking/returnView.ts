@@ -203,6 +203,20 @@ export function beamPaidCopy(mode: PaymentMode, flags: PaidCopyFlags): BeamPaidC
   };
 }
 
+/** The name Beam puts on card statements (and PromptPay slips) for our merchant account: Beam's written answer, 26 Oct 2026. */
+export const BEAM_STATEMENT_DESCRIPTOR = "magicsuitesandvillas";
+
+/**
+ * The one line Beam's paid view adds under its lead for a card or e-wallet booking (the token's payMethod
+ * card_ewallet) in beam-live: how the charge shows on the guest's card statement, so it is not taken for an unknown
+ * charge (fewer disputes). null for PromptPay (the guest sees the name on the bank's slip while paying), for a token
+ * without the method group, in beam-playground (test cards: nothing reaches a statement), and for Stripe and the demo.
+ */
+export function beamStatementNote(result: Pick<StatusResponse, "paymentMode" | "booking">): string | null {
+  if (result.paymentMode !== "beam-live" || result.booking.payMethod !== "card_ewallet") return null;
+  return `Your card statement will show the charge as "${BEAM_STATEMENT_DESCRIPTOR}".`;
+}
+
 /**
  * A poll answer's pendingReason for the pending view's words while the view stays "pending" (design S5.3): Beam only
  * (the reason may change while the page polls, e.g. processing -> unconfirmed once the window is over and the hold

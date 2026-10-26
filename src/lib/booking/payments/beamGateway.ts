@@ -113,7 +113,7 @@ import { readRecord, recordToMeta, verifyBeamNote } from "./beamRecord.ts";
 import type { BeamNote, PaymentRecord } from "./beamRecord.ts";
 import { BEAM_EXPIRY_SKEW_MS, beamPaymentState } from "./beamState.ts";
 import type { BeamPaymentState } from "./beamState.ts";
-import { BEAM_PARTIAL_REFUND_METHODS, BEAM_REFUNDABLE_METHODS, beamGatewayText, beamMethodName } from "./beamText.ts";
+import { BEAM_PARTIAL_REFUND_METHODS, BEAM_REFUNDABLE_METHODS, beamFullRefundHow, beamGatewayText, beamMethodName } from "./beamText.ts";
 import type { GatewayPayment, GatewayReceipt, GatewayState, PaymentGateway, PaymentMeta, RecentPayment, SweepLinkCounts } from "./gateway.ts";
 
 const DAY_MS = 86_400_000;
@@ -408,7 +408,7 @@ export function beamGateway(deps: BeamGatewayDeps): BeamGateway {
         `URGENT: guest charged twice for booking ${meta.ref}`,
         [
           `Beam payment link ${linkId} (booking ${meta.ref}, Cloudbeds reservation ${meta.reservationId}) has ${count} successful charges. ${primaryText} is the one recorded in Cloudbeds; ${extraId} (${beamMethodName(methodTypeOf(extra))}, ${money(extra.amount)}) is an extra charge.`,
-          `Refund ${extraId} in full in Beam Lighthouse (bank transfer for LINE Pay, TrueMoney or ShopeePay). Do NOT record it in Cloudbeds and do not cancel the booking.`,
+          `Pay the extra charge ${extraId} back: ${beamFullRefundHow(methodTypeOf(extra), extraId)}. Do NOT record it in Cloudbeds and do not cancel the booking.`,
         ],
         { key: `dup-charge:${extraId}`, severity: "critical" },
       );

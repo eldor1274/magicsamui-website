@@ -11,8 +11,9 @@
 // hold, and no receipt promise. Stripe and the demo keep theirs exactly.
 
 import { formatThbWithCode } from "./format.ts";
-import { pageOffersMethodChoice, pagePayMethod, pagePayMethods } from "./quote.ts";
-import type { CardBrand, PayMethod, PaymentMethodBadge, PaymentMode, PaymentProvider, PublicBookingConfig } from "./types.ts";
+import { BEAM_MAX_CHARGE_SATANG } from "./payments/provider.ts";
+import { feeSatangAt, pageOffersMethodChoice, pagePayMethod, pagePayMethods } from "./quote.ts";
+import type { CardBrand, PayMethod, PaymentMethodBadge, PaymentMode, PaymentProvider, PublicBookingConfig, Quote } from "./types.ts";
 
 /** Plain-text badge labels (no brand artwork). */
 export type PaymentMethodLabel =
@@ -306,6 +307,37 @@ export function noFeeAlternative(config: MethodCopyConfig, payMethod: unknown): 
   if (!pageOffersMethodChoice(config) || config.paymentStatus === "locked" || pagePayMethod(config, payMethod) !== null) return null;
   const f = beamPayFacts(config);
   return f.cardFeePct > 0 && f.promptPayFeePct === 0 ? "No fee with Thai PromptPay QR" : null;
+}
+
+/** The WhatsApp message the payment step's over-the-limit note opens (no personal data). */
+export const OVER_MAX_CHARGE_MESSAGE = "Hi, I'd like to book a stay on magicsamui.com that is above the online payment limit - can you help?";
+
+/**
+ * The payment step's early word for a stay above Beam's limit of one online payment (BEAM_MAX_CHARGE_SATANG: THB
+ * 200,000.00 per transaction, the fee included; Beam's written answer of 26 Oct 2026). The checkout refuses such a
+ * payment before anything is held (checkout.ts OVER_MAX_CHARGE: message us on WhatsApp), so the page says it first.
+ * Each offered method is priced as the server prices it (the fee base + its fee: Beam bookings are paid in full), and a
+ * room line above the limit is over for every method (the checkout's second test). null on every Stripe and demo page,
+ * on a locked Beam page, and while the chosen method - before a choice, every offered method - is within the limit.
+ * The page links WhatsApp right after it.
+ */
+export function overMaxChargeNote(config: MethodCopyConfig, quote: Pick<Quote, "feeBaseSatang" | "lines">, payMethod: unknown): string | null {
+  if (!pageOffersMethodChoice(config) || config.paymentStatus === "locked") return null;
+  const options = payMethodOptions(config);
+  const lineOver = quote.lines.some((l) => l.roomSatang > BEAM_MAX_CHARGE_SATANG);
+  const over = options.filter((o) => lineOver || quote.feeBaseSatang + feeSatangAt(quote, o.feePct) > BEAM_MAX_CHARGE_SATANG);
+  if (over.length === 0) return null;
+  const chosen = pagePayMethod(config, payMethod);
+  if (chosen !== null && !over.some((o) => o.method === chosen)) return null;
+  const limit = `Online payments are limited to ${formatThbWithCode(BEAM_MAX_CHARGE_SATANG)} per payment (including the fee)`;
+  const within = options.filter((o) => !over.includes(o));
+  if (within.length === 0) return `${limit}, so this stay can't be paid online. Message us on WhatsApp and we'll book it for you.`;
+  const f = beamPayFacts(config);
+  const words = (o: PayMethodOption) => (o.method === "promptpay" ? "Thai PromptPay QR" : cardGroupWords(f));
+  return (
+    `${limit}, so this stay can't be paid by ${joinList(over.map(words), "or")}. ` +
+    `You can pay with ${joinList(within.map(words), "or")}, or message us on WhatsApp and we'll book it for you.`
+  );
 }
 
 /**

@@ -282,15 +282,37 @@ test("card_ewallet link carries only card + eWallets; promptpay only the QR", ()
   assert.equal(qr.order.netAmount, 2_400_000);
 });
 
-test("group link: the note is never clipped and the amount is capped at BEAM_MAX_CHARGE_SATANG", () => {
-  assert.equal(BEAM_MAX_CHARGE_SATANG, 99_999_999);
+/** A one-room quote whose fee base is `feeBase` satang, priced at `pct` (consistent fee fields, paid in full). */
+function quoteOf(feeBase: number, pct: number): Quote {
+  const fee = percentOf(feeBase, pct);
+  const line = { ...quote.lines[0], roomSatang: feeBase };
+  return { ...quote, lines: [line], roomsSubtotalSatang: feeBase, feeBaseSatang: feeBase, cardFeePct: pct, cardFeeSatang: fee, totalSatang: feeBase + fee, dueNowSatang: feeBase + fee };
+}
+
+test("group link: the note is never clipped and the amount is capped at BEAM_MAX_CHARGE_SATANG (Beam's THB 200,000.00 per transaction, the fee included)", () => {
+  assert.equal(BEAM_MAX_CHARGE_SATANG, 20_000_000, "Beam's written answer of 26 Oct 2026: THB 200,000 per transaction");
   const long = { ...groupInput(twoRooms, "card_ewallet"), internalNote: "n".repeat(501) };
   assert.throws(() => buildPaymentLinkRequest(long), RangeError);
   const exact = { ...groupInput(twoRooms, "card_ewallet"), internalNote: "n".repeat(500) };
   assert.equal(buildPaymentLinkRequest(exact).order.internalNote.length, 500);
-  const huge = { ...twoRooms, dueNowSatang: BEAM_MAX_CHARGE_SATANG + 1, totalSatang: BEAM_MAX_CHARGE_SATANG + 1 };
-  assert.throws(() => buildPaymentLinkRequest(groupInput(huge, "card_ewallet")), RangeError);
   assert.throws(() => buildPaymentLinkRequest(groupInput({ ...twoRooms, dueNowSatang: 99 }, "promptpay")), RangeError);
+
+  const tooMuch = (e: unknown) => e instanceof RangeError && e.message === "Beam netAmount must be at most 20000000 satang";
+  // PromptPay (no fee): THB 199,999.99 and exactly THB 200,000.00 are sent; THB 200,000.01 never reaches Beam.
+  for (const due of [19_999_999, 20_000_000]) assert.equal(buildPaymentLinkRequest(groupInput(quoteOf(due, 0), "promptpay")).order.netAmount, due);
+  assert.throws(() => buildPaymentLinkRequest(groupInput(quoteOf(20_000_001, 0), "promptpay")), tooMuch);
+  // Card or e-wallet: the fee-inclusive amount is what counts. 194,174.75 + 3% = 199,999.99; 194,174.77 + 3% = 200,000.01.
+  const under = quoteOf(19_417_475, 3);
+  const over = quoteOf(19_417_477, 3);
+  assert.equal(under.dueNowSatang, 19_999_999);
+  assert.equal(over.dueNowSatang, 20_000_001);
+  assert.equal(buildPaymentLinkRequest(groupInput(under, "card_ewallet")).order.netAmount, 19_999_999);
+  assert.throws(() => buildPaymentLinkRequest(groupInput(over, "card_ewallet")), tooMuch);
+  // A fee base within the limit whose 3% fee takes it over: refused (the same stay by PromptPay is sent).
+  assert.throws(() => buildPaymentLinkRequest(groupInput(quoteOf(19_500_000, 3), "card_ewallet")), tooMuch);
+  assert.equal(buildPaymentLinkRequest(groupInput(quoteOf(19_500_000, 0), "promptpay")).order.netAmount, 19_500_000);
+  // The legacy body (no group) is capped too.
+  assert.throws(() => buildPaymentLinkRequest(linkInput(quoteOf(20_000_001, 5))), tooMuch);
 });
 
 test("group link: the quote's fee must be the fee of the link's method group (owner decision 1), else RangeError", () => {

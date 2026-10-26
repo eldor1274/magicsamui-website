@@ -54,7 +54,7 @@ import { beamGateway } from "./payments/beamGateway.ts";
 import type { BeamChargeIndexEntry, BeamGateway, BeamGatewayDeps } from "./payments/beamGateway.ts";
 import { readRecord } from "./payments/beamRecord.ts";
 import { noteBeamRefund } from "./payments/beamRefunds.ts";
-import { beamMethodName } from "./payments/beamText.ts";
+import { BEAM_CARD_REFUND_TIME, beamMethodName } from "./payments/beamText.ts";
 import type { GatewayPayment, PaymentMeta } from "./payments/gateway.ts";
 import { satangToBahtString } from "./quote.ts";
 import { isBookingRef } from "./ref.ts";
@@ -518,10 +518,12 @@ async function handleRefund(ctx: Ctx, refundId: string): Promise<BeamWebhookResu
   try {
     if (refund.status === "SUCCEEDED") {
       const method = await methodOfCharge(ctx, booking.linkId, refund.chargeId);
+      // A card refund reaches the guest in 7-14 business days (Beam's written answer, 26 Oct 2026).
+      const timing = method === "card" || method === "card instalments" ? BEAM_CARD_REFUND_TIME : "the guest's bank may take days";
       await deps.alert(
         `Beam refund done for booking ${booking.ref} (${amount})`,
         [
-          `Beam refunded ${amount} of charge ${chargeId} (${method}), refund ${refundId} (Beam accepted it; the guest's bank may take days).`,
+          `Beam refunded ${amount} of charge ${chargeId} (${method}), refund ${refundId} (Beam accepted it; ${timing}).`,
           refundFolioLine(recorded, reservation),
         ],
         { key: `refund:${refundId}:SUCCEEDED`, severity: "info" },
@@ -563,7 +565,7 @@ async function alertChargeback(ctx: Ctx, transactionId: string, body: Record<str
     await deps.alert(
       "URGENT: chargeback on a Beam payment",
       [
-        `Beam recorded a CHARGEBACK of ${amount} (transaction ${transactionId}${sourceId ? `, payment link ${sourceId}` : ""}) that matches no booking of ours (the owner's own Lighthouse link, or our record of it is gone). Find the payment in Beam Lighthouse and answer Beam's dispute process: docs section 8.`,
+        `Beam recorded a CHARGEBACK of ${amount} (transaction ${transactionId}${sourceId ? `, payment link ${sourceId}` : ""}) that matches no booking of ours (the owner's own Lighthouse link, or our record of it is gone). Find the payment in Beam Lighthouse and reply to Beam's dispute email with the evidence, the sooner the better: docs section 8.`,
       ],
       { key: `beam-chargeback:${transactionId}`, severity: "critical" },
     );
@@ -576,7 +578,7 @@ async function alertChargeback(ctx: Ctx, transactionId: string, body: Record<str
   await deps.alert(
     `URGENT: chargeback on Beam payment for booking ${booking.ref}`,
     [
-      `Beam recorded a CHARGEBACK of ${amount} on ${charge} (${where}). Collect the booking evidence (agreed terms version, PAID note, guest messages) and answer Beam's dispute process: docs section 8.`,
+      `Beam recorded a CHARGEBACK of ${amount} on ${charge} (${where}). Beam asks for proof by email only: reply to Beam's email with the booking evidence (the Cloudbeds reservation and folio, the booking confirmation, the guest's messages, the check-in record and ID, the house rules and terms agreed - their version is in the PAID note), the sooner the better: docs section 8.`,
     ],
     { key: `beam-chargeback:${transactionId}`, severity: "critical" },
   );

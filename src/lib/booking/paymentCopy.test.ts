@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
+import { site } from "../../data/site.ts";
 import { buildOffers } from "./availability.ts";
 import { BEAM_LIVE_ENV, BEAM_LIVE_STOPPED_ENV, BEAM_TEST_ENV, makeBeamKit } from "./beamTestkit.ts";
 import { createBookingAnalytics } from "./clientAnalytics.ts";
@@ -24,10 +25,12 @@ import { demoInventory } from "./demoProvider.ts";
 import {
   CHOOSE_METHOD_HINT,
   DEMO_COPY_CONFIG,
+  OVER_MAX_CHARGE_MESSAGE,
   PROMPTPAY_HINT,
   beamSecurePayment,
   feeLineHidden,
   noFeeAlternative,
+  overMaxChargeNote,
   payMethodFeeLabel,
   payMethodOptions,
   paymentMethodLabels,
@@ -736,6 +739,77 @@ test("the payment step on Beam (design S5.2): a required choice with no default,
     const html = render(cfg, null, { error: refusal });
     assert.match(html, /Something in your reservation needs a look/, name);
     assert.doesNotMatch(html, /Choose how to pay/, name);
+  }
+});
+
+/* -------------------- Beam's limit of one online payment (THB 200,000, 26 Oct 2026) -------------------- */
+
+/** A quote's fee base and room line at `feeBase` satang (all overMaxChargeNote reads), with an optional larger room line (a promo). */
+const limitQuote = (feeBase: number, roomSatang = feeBase) => ({ feeBaseSatang: feeBase, lines: [{ roomSatang }] as Quote["lines"] });
+const LIMIT = "Online payments are limited to THB 200,000.00 per payment (including the fee)";
+const OVER_ALL = `${LIMIT}, so this stay can't be paid online. Message us on WhatsApp and we'll book it for you.`;
+const OVER_CARD = (card: string) => `${LIMIT}, so this stay can't be paid by ${card}. You can pay with Thai PromptPay QR, or message us on WhatsApp and we'll book it for you.`;
+
+test("overMaxChargeNote: the payment step's early word for a stay above Beam's THB 200,000 per payment, per method and fee-inclusive; never on a Stripe, demo or locked page", () => {
+  const c = beamPage();
+  // 194,174.75 + 3% = 199,999.99 (every method within); 194,174.77 + 3% = 200,000.01 (card over, PromptPay within).
+  for (const m of [null, "card_ewallet", "promptpay"] as const) assert.equal(overMaxChargeNote(c, limitQuote(19_417_475), m), null, `${m}: within`);
+  assert.equal(overMaxChargeNote(c, limitQuote(19_417_477), null), OVER_CARD("card or e-wallet"), "before a choice: said at once");
+  assert.equal(overMaxChargeNote(c, limitQuote(19_417_477), "card_ewallet"), OVER_CARD("card or e-wallet"));
+  assert.equal(overMaxChargeNote(c, limitQuote(19_417_477), "promptpay"), null, "PromptPay chosen and within: nothing");
+  // Exactly THB 200,000.00 by PromptPay is within; one satang more is over for every method.
+  assert.equal(overMaxChargeNote(c, limitQuote(20_000_000), "promptpay"), null);
+  for (const m of [null, "card_ewallet", "promptpay"] as const) assert.equal(overMaxChargeNote(c, limitQuote(20_000_001), m), OVER_ALL, `${m}: over for all`);
+  // A room line above the limit (a promo brings the fee base under it): over for every method, as the checkout refuses it.
+  for (const m of [null, "card_ewallet", "promptpay"] as const) assert.equal(overMaxChargeNote(c, limitQuote(15_000_000, 20_000_001), m), OVER_ALL, `${m}: a room line`);
+  // The switches: no PromptPay -> nothing else to offer; no e-wallets -> "card"; a PromptPay fee prices PromptPay too.
+  assert.equal(overMaxChargeNote(beamPage({ BEAM_PROMPTPAY: "off" }), limitQuote(19_417_477), null), OVER_ALL);
+  assert.equal(overMaxChargeNote(beamPage({ BEAM_EWALLETS: "off" }), limitQuote(19_417_477), "card_ewallet"), OVER_CARD("card"));
+  assert.equal(overMaxChargeNote(beamPage({ BEAM_PROMPTPAY_FEE_PCT: "3" }), limitQuote(19_417_477), "promptpay"), OVER_ALL);
+  assert.equal(overMaxChargeNote(beamLivePage(), limitQuote(19_417_477), null), OVER_CARD("card or e-wallet"), "beam-live");
+  // A stored method the page no longer offers counts as no choice.
+  assert.equal(overMaxChargeNote(beamPage({ BEAM_PROMPTPAY: "off" }), limitQuote(19_417_475), "promptpay"), null);
+  // Never on a locked Beam page (no choice is offered there), nor on any Stripe or demo page, whatever the amount.
+  assert.equal(overMaxChargeNote(config(BEAM_LIVE_STOPPED_ENV), limitQuote(30_000_000), null), null);
+  for (const [name, env] of Object.entries(STRIPE_DEMO_ENVS)) {
+    for (const m of [null, "card_ewallet", "promptpay"] as const) assert.equal(overMaxChargeNote(config(env), limitQuote(150_000_000), m), null, `${name} ${m}`);
+  }
+});
+
+test("the payment step shows Beam's limit early: the note and a WhatsApp link in the method choice's live region for a stay over it, nothing within it; never on a Stripe or demo page", async () => {
+  const { state: st, PaymentStep } = await loadComponents();
+  const noop = () => undefined;
+  /** The payment step with the fixture's stay at `bumpSatang` more per night, priced as the page prices it. */
+  const render = (cfg: PublicBookingConfig, payMethod: PayMethod | null, bumpSatang: number) => {
+    const s = paymentState(st, cfg);
+    const data = availabilityFor(cfg, bumpSatang);
+    const quote = st.selectQuote({ ...s, results: { ...s.results, data }, payMethod });
+    assert.ok(quote);
+    const props = { quote, cart: s.cart, guest: s.guest, checkIn: data.search.checkIn, checkOut: data.search.checkOut, paymentMode: cfg.paymentMode, paymentStatus: cfg.paymentStatus, submitting: false, error: null, onPay: noop, onEditGuest: noop, onEditRooms: noop, config: cfg, payMethod, onPayMethodChange: noop };
+    return { quote, html: strip(renderToStaticMarkup(createElement(PaymentStep, props))) };
+  };
+  const c = beamPage();
+  // Three nights at about THB 72,000: THB 216,000+ by card (3%) and by PromptPay - over for both.
+  const big = render(c, "promptpay", 7_000_000);
+  assert.ok(big.quote.dueNowSatang > 20_000_000);
+  assert.ok(big.html.includes(esc(OVER_ALL)), big.html);
+  assert.match(big.html, /<div aria-live="polite"><p[^>]*>(?:(?!<\/p>).)*Scan the QR(?:(?!<\/div>).)*Online payments are limited to THB 200,000\.00/, "after PromptPay's hint, in the live region");
+  assert.ok(big.html.includes(`href="${esc(`${site.whatsapp}?text=${encodeURIComponent(OVER_MAX_CHARGE_MESSAGE)}`)}" target="_blank" rel="noopener noreferrer"`), "a WhatsApp link with the limit message");
+  // Before a choice: the card total is over, PromptPay within -> the note names PromptPay.
+  // A fee base of about THB 197,000 (3 nights): THB 202,910 or so by card, within the limit by PromptPay.
+  const perNight = Math.round((19_700_000 - render(c, "promptpay", 0).quote.feeBaseSatang) / 3);
+  const mid = render(c, null, perNight);
+  assert.ok(mid.quote.dueNowSatang > 20_000_000, `card total ${mid.quote.dueNowSatang}`);
+  assert.ok(mid.quote.feeBaseSatang <= 20_000_000, `PromptPay total ${mid.quote.feeBaseSatang}`);
+  assert.ok(mid.html.includes(esc(OVER_CARD("card or e-wallet"))), mid.html);
+  assert.ok(!render(c, "promptpay", perNight).html.includes(esc(LIMIT)), "PromptPay chosen and within: no note");
+  // The fixture's own stay: no note, the live region empty before a choice (as before).
+  const small = render(c, null, 0);
+  assert.ok(!small.html.includes(esc(LIMIT)));
+  assert.match(small.html, /<div aria-live="polite"><\/div><\/fieldset>/);
+  // Stripe and the demo: never a note, whatever the amount.
+  for (const [name, env] of Object.entries(STRIPE_DEMO_ENVS)) {
+    for (const m of [null, "promptpay"] as const) assert.ok(!render(config(env), m, 7_000_000).html.includes("Online payments are limited"), `${name} ${m}`);
   }
 });
 

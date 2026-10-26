@@ -23,6 +23,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { formatDisplayDate } from "./dates.ts";
 import { BEAM_ID_PATTERN, isBeamLinkId } from "./payments/beamIds.ts";
+import { BEAM_MAX_CHARGE_SATANG } from "./payments/provider.ts";
 import { MIN_CHARGE_SATANG, percentOf } from "./quote.ts";
 import type { BeamCredentials } from "./config.ts";
 import type { PayMethod, PaymentStatus, Quote } from "./types.ts";
@@ -39,10 +40,10 @@ export type BeamPaymentLinkStatus = "ACTIVE" | "PAID" | "EXPIRED" | "DISABLED" |
 export type BeamMethodGroup = PayMethod;
 
 /**
- * The largest netAmount we send to Beam. PLACEHOLDER until Beam answers our
- * question 6 (maximum netAmount per link and per method); it equals Stripe's.
+ * The largest netAmount we send to Beam: THB 200,000.00 per transaction (Beam's written answer, 26 Oct 2026; the
+ * isomorphic payments/provider.ts holds it so the booking page reads the same number).
  */
-export const BEAM_MAX_CHARGE_SATANG = 99_999_999;
+export { BEAM_MAX_CHARGE_SATANG };
 
 export interface BeamOrderItem {
   itemName: string;
@@ -404,6 +405,11 @@ export function buildPaymentLinkRequest(input: PaymentLinkInput): BeamCreatePaym
   if (!Number.isInteger(netAmount) || netAmount < MIN_CHARGE_SATANG) {
     throw new RangeError(`Beam netAmount must be an integer >= ${MIN_CHARGE_SATANG} satang`);
   }
+  // Beam's per-transaction limit (THB 200,000.00, the fee included), for every link: runCheckout refuses a larger stay
+  // before anything is held, so this is the last line of defence, never the guest's answer.
+  if (netAmount > BEAM_MAX_CHARGE_SATANG) {
+    throw new RangeError(`Beam netAmount must be at most ${BEAM_MAX_CHARGE_SATANG} satang`);
+  }
   const guests = quote.lines.reduce((s, l) => s + l.adults, 0);
   const rooms = quote.lines.map((l) => l.roomName).join(" + ");
   const dates = `${formatDisplayDate(quote.checkIn)} - ${formatDisplayDate(quote.checkOut)}`;
@@ -448,9 +454,6 @@ export function buildPaymentLinkRequest(input: PaymentLinkInput): BeamCreatePaym
     };
   }
 
-  if (netAmount > BEAM_MAX_CHARGE_SATANG) {
-    throw new RangeError(`Beam netAmount must be at most ${BEAM_MAX_CHARGE_SATANG} satang`);
-  }
   if (typeof input.internalNote !== "string" || input.internalNote.length > 500) {
     // Never clipped: a clipped signed note would no longer verify.
     throw new RangeError("Beam internalNote must be a string of at most 500 characters");

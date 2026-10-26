@@ -229,7 +229,11 @@ const BANGKOK_OFFSET_MS = 7 * 3_600_000;
 const DEFAULT_LIMIT = 20;
 const CHARGE_SOURCES = ["PAYMENT_LINK", "STORE_LINK", "QR_PROMPT_PAY_LINK", "API", "BOLT"];
 const DEFAULT_CARD: FakeBeamCardDetails = { brand: "VISA", last4: "1111", countryAlpha2: "TH" };
-/** Methods Beam can refund through its API; partial refunds only on CARD. */
+/**
+ * Methods the API spec lets Beam refund; partial refunds only on CARD. Beam's written answer (26 Oct 2026) narrows it
+ * to cards and the PromptPay QR, so staff are told to pay every e-wallet back by bank transfer (payments/beamText.ts);
+ * the fake keeps the spec's set, so a refund Beam ever reports on an Alipay or WeChat Pay charge is still covered.
+ */
 const REFUNDABLE_METHODS = new Set(["CARD", "CARD_INSTALLMENTS", "QR_PROMPT_PAY", "ALIPAY", "WECHAT_PAY"]);
 
 /** The linkSettings group each payment method type belongs to. */

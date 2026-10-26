@@ -32,12 +32,14 @@ import { createFakeCloudbeds } from "./mock/fakeCloudbeds.ts";
 import {
   BEAM_CONFIRMATION_EMAIL_TEXT,
   BEAM_PAID_LEAD,
+  BEAM_STATEMENT_DESCRIPTOR,
   BEAM_UNPAID_COPY,
   STRIPE_UNPAID_COPY,
   UNPAID_COPY,
   beamPaidCopy,
   beamPendingCopy,
   beamPolledReason,
+  beamStatementNote,
   canRetryPayment,
   nextPolledReason,
   pollPlan,
@@ -374,6 +376,41 @@ test("design S5.3, beamPaidCopy: null for Stripe and the demo; Beam's words for 
         assert.doesNotMatch(Object.values(beamPaidCopy(mode, { sendsConfirmationEmail: email, cloudbedsWrites: writes }) ?? {}).join(" "), NO_RECEIPT_OR_STRIPE);
       }
     }
+  }
+});
+
+const STATEMENT_LINE = 'Your card statement will show the charge as "magicsuitesandvillas".';
+
+test("Beam's statement descriptor (Beam's written answer, 26 Oct 2026): one line under the paid view's lead for a beam-live card or e-wallet booking, with and without the Cloudbeds email; never for PromptPay, a token without the method, beam-playground, Stripe or the demo", async () => {
+  assert.equal(BEAM_STATEMENT_DESCRIPTOR, "magicsuitesandvillas");
+  for (const mode of ALL_MODES) {
+    for (const payMethod of [undefined, "card_ewallet", "promptpay"] as const) {
+      const booking: BookingSummary = { ...bookingOf(mode) };
+      if (payMethod) booking.payMethod = payMethod;
+      else delete booking.payMethod;
+      const want = mode === "beam-live" && payMethod === "card_ewallet" ? STATEMENT_LINE : null;
+      assert.equal(beamStatementNote({ paymentMode: mode, booking }), want, `${mode} ${payMethod}`);
+      for (const email of [false, true]) {
+        const label = `${mode} ${payMethod ?? "no method"} email=${email}`;
+        const c = chunks(await render(propsFor(answerOf(mode, "paid", confirmedFor(mode), {}, booking), mode, { sendsConfirmationEmail: email, cloudbedsWrites: "live" })));
+        if (want) {
+          assert.equal(c[4], STATEMENT_LINE, `${label}: right under the lead (${c[3]})`);
+          assert.equal(c.filter((x) => x === STATEMENT_LINE).length, 1, label);
+        } else {
+          assert.ok(!c.join(" ").includes("magicsuitesandvillas"), `${label}: no statement line`);
+        }
+      }
+    }
+  }
+  // Only the paid view: never while the payment is being confirmed, needs a person, is pending or unpaid.
+  const live = (status: PaymentStatus, fulfilment: FulfilmentView) => answerOf("beam-live", status, fulfilment);
+  for (const answer of [
+    live("paid", { state: "confirming", reservationId: null }),
+    live("paid", { state: "needs_attention", reservationId: RESERVATION_ID }),
+    live("pending", { state: "awaiting_payment", reservationId: null }),
+    live("expired", { state: "released", reservationId: null }),
+  ]) {
+    assert.ok(!(await render(propsFor(answer, "beam-live", { cloudbedsWrites: "live" }))).includes("magicsuitesandvillas"), `${answer.status} ${answer.fulfilment.state}`);
   }
 });
 

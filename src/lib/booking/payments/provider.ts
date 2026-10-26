@@ -54,6 +54,15 @@ export function defaultCardFeePct(provider: PaymentProvider): number {
   return DEFAULT_FEE_PCT_BY_PROVIDER[provider];
 }
 
+/**
+ * The largest single Beam payment, in satang: THB 200,000.00 per transaction for online checkout (Beam's written
+ * answer, 26 Oct 2026). It is compared with the fee-inclusive amount charged (quote.dueNowSatang: Beam bookings are
+ * paid in full). runCheckout refuses a larger stay before anything is held (OVER_MAX_CHARGE: message us on WhatsApp),
+ * buildPaymentLinkRequest refuses such a link again, and the payment step says so before Pay (paymentCopy.ts
+ * overMaxChargeNote). Here, in the isomorphic module, so the booking page reads the same number; beam.ts re-exports it.
+ */
+export const BEAM_MAX_CHARGE_SATANG = 20_000_000;
+
 /** The card brands the Beam pages name (Beam design S3.1): its card group is all on or all off, these are the ones we show. */
 export const BEAM_CARD_BRANDS: readonly CardBrand[] = ["visa", "mastercard", "jcb", "amex"];
 

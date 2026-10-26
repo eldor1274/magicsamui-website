@@ -273,8 +273,9 @@ export async function runCheckout(rawBody: unknown, deps: CheckoutDeps): Promise
     if (!core || !guest || (provider === "beam" && !req.payMethod)) {
       return fail(503, { error: "payment_unavailable", message: PAYMENT_NOT_AVAILABLE });
     }
-    // The provider's largest single charge (Stripe: 8 digits; Beam: BEAM_MAX_CHARGE_SATANG). Checked BEFORE any
-    // Cloudbeds write: a long stay in a large villa must never create a hold that the provider will then refuse.
+    // The provider's largest single charge (Stripe: 8 digits; Beam: BEAM_MAX_CHARGE_SATANG, THB 200,000.00 per
+    // transaction), compared with the amount charged: dueNowSatang, the fee of the guest's method included. Checked
+    // BEFORE any Cloudbeds write: a long stay in a large villa must never create a hold that the provider will then refuse.
     const maxChargeSatang = provider === "beam" ? BEAM_MAX_CHARGE_SATANG : STRIPE_MAX_CHARGE_SATANG;
     if (quote.dueNowSatang > maxChargeSatang || quote.lines.some((l) => l.roomSatang > maxChargeSatang)) {
       deps.log?.("checkout_refused_over_max_charge", { amount: quote.dueNowSatang });

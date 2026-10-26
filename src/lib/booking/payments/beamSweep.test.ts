@@ -80,7 +80,9 @@ const expiryOf = (kit: BeamKit, linkId: string) => {
 };
 const lateReason = (refund: string) =>
   `The guest PAID but the Cloudbeds hold is CANCELLED. Re-instate or re-book the guest in Cloudbeds (if the unit is still free) or refund ${refund}.`;
-const LIGHTHOUSE = (chargeId: string) => `the full amount in Beam Lighthouse (Payments > charge ${chargeId} > Refund). Nothing is refunded automatically`;
+/** The full refund of a late payment in Lighthouse (Beam's written answer, 26 Oct 2026); `card`: with a card refund's 7-14 business days. */
+const LIGHTHOUSE = (chargeId: string, card = false) =>
+  `the full amount in Beam Lighthouse (Payments > charge ${chargeId}: Void on the day of the payment before 8 PM, with no Beam fee; later Refund, and Beam's fee still applies).${card ? " A card refund takes 7-14 business days to reach the guest." : ""} Nothing is refunded automatically`;
 
 /** Redis lost the link's PaymentRecord, its links-open and late-watch entries and the hold record: only Beam and Cloudbeds know it. */
 async function loseEverything(kit: BeamKit, h: BeamHeld): Promise<void> {
@@ -244,7 +246,7 @@ test("a late success after the link left links-open AND Redis lost its record: t
     assert.equal(urgent.length, 1, method);
     assert.equal(
       urgent[0].lines[0],
-      lateReason(method === "CARD" ? LIGHTHOUSE(late.chargeId) : "the full amount by bank transfer: Beam can't refund TrueMoney. Nothing is refunded automatically"),
+      lateReason(method === "CARD" ? LIGHTHOUSE(late.chargeId, true) : "the full amount by bank transfer: Beam can't refund TrueMoney. Nothing is refunded automatically"),
       method,
     );
     assert.equal(withSubject(kit, /^Beam payment record missing/).length, 1, `${method}: the note stood in for the record`);
@@ -1358,7 +1360,9 @@ function assertLateCritical(kit: BeamKit, h: BeamHeld, chargeId: string, label: 
   const urgent = critical(kit);
   assert.equal(urgent.length, 1, label);
   assert.equal(urgent[0].subject, `URGENT: paid booking ${h.ref} needs attention`, label);
-  assert.equal(urgent[0].lines[0], lateReason(LIGHTHOUSE(chargeId)), label);
+  // A card's refund also names its 7-14 business days (Beam's written answer, 26 Oct 2026).
+  const card = kit.fakeBeam.charges.get(chargeId)?.paymentMethodType === "CARD";
+  assert.equal(urgent[0].lines[0], lateReason(LIGHTHOUSE(chargeId, card)), label);
 }
 
 for (const days of [4, 6]) {

@@ -3,10 +3,13 @@
 //
 // - The PAID note says the charge, the method and its refund path (gap review 4), so staff find the money in
 //   Beam Lighthouse and know how a cancellation is paid back without opening Lighthouse first.
-// - Refund paths follow the owner's decisions (21 Oct 2026) and the Beam API facts: Beam refunds only CARD,
-//   CARD_INSTALLMENTS, QR_PROMPT_PAY, ALIPAY and WECHAT_PAY, and only CARD in part. A payment that succeeds after
-//   its hold was released is re-booked or refunded IN FULL by the owner, never automatically (decision 3); a 50%
-//   cancellation refund of anything Beam cannot refund in part goes by bank transfer (decision 4).
+// - Refund paths follow the owner's decisions (21 Oct 2026) and Beam's written answer (26 Oct 2026): voids and refunds
+//   are supported only for card and QR (PromptPay) payments - every e-wallet (Alipay, WeChat Pay, LINE Pay, TrueMoney,
+//   ShopeePay) is paid back by bank transfer - and only CARD in part. In Lighthouse a full refund on the day of the
+//   payment before 8 PM is a Void (no Beam fee); later it is a Refund and Beam's fee still applies; a card refund
+//   reaches the guest in 7-14 business days. A payment that succeeds after its hold was released is re-booked or
+//   refunded IN FULL by the owner, never automatically (decision 3); a 50% cancellation refund of anything Beam cannot
+//   refund in part goes by bank transfer (decision 4).
 // - No text names Stripe (beamGateway.test.ts pins it), and the Cloudbeds fee item has its own Beam ids: Cloudbeds
 //   keeps the name and note an appItemID is first used with, and Stripe's note says "paid via Stripe".
 // - Nothing here carries personal data: charge and link ids, method names, amounts and booking refs only.
@@ -18,8 +21,26 @@ import type { FeeItem, GatewayAlert, GatewayPayment, GatewayReceipt, GatewayText
 /** The fee line's name, as alerts quote it (the test item's name carries a "TEST - " prefix). */
 export const BEAM_FEE_ITEM_NAME = "Payment processing fee";
 
-/** The Beam payment method types Beam can refund (API and Lighthouse); every other type goes by bank transfer. */
-export const BEAM_REFUNDABLE_METHODS: ReadonlySet<string> = new Set(["CARD", "CARD_INSTALLMENTS", "QR_PROMPT_PAY", "ALIPAY", "WECHAT_PAY"]);
+/**
+ * The Beam payment method types Beam can refund (Lighthouse and API): cards and the PromptPay QR only (Beam's written
+ * answer, 26 Oct 2026; card instalments are card payments). Every other type - every e-wallet included - goes by bank
+ * transfer.
+ */
+export const BEAM_REFUNDABLE_METHODS: ReadonlySet<string> = new Set(["CARD", "CARD_INSTALLMENTS", "QR_PROMPT_PAY"]);
+
+/** The e-wallets, as staff read them: every one is paid back by bank transfer (Beam can't refund them). */
+const E_WALLETS = "Alipay, WeChat Pay, LINE Pay, TrueMoney or ShopeePay";
+
+/** A full refund in Lighthouse: Void on the day of the payment before 8 PM (no Beam fee), else Refund (Beam's fee still applies). */
+const VOID_OR_REFUND = "Void on the day of the payment before 8 PM, with no Beam fee; later Refund, and Beam's fee still applies";
+
+/** How long a card refund takes to reach the guest (Beam's written answer, 26 Oct 2026), mid-sentence; the "Beam refund done" alert quotes it too. */
+export const BEAM_CARD_REFUND_TIME = "a card refund takes 7-14 business days to reach the guest";
+/** The same as the start of a sentence (no final period). */
+const CARD_REFUND = `A${BEAM_CARD_REFUND_TIME.slice(1)}`;
+
+/** Card payments (a card's refund timing applies). */
+const CARD_METHODS: ReadonlySet<string> = new Set(["CARD", "CARD_INSTALLMENTS"]);
 
 /** The Beam payment method types Beam can refund in part (a 50% cancellation refund). */
 export const BEAM_PARTIAL_REFUND_METHODS: ReadonlySet<string> = new Set(["CARD"]);
@@ -49,15 +70,22 @@ export function beamMethodName(methodType: string | undefined): string {
   return raw === "" ? "method pending" : raw;
 }
 
-/** Where a cancellation refund of this payment goes (owner decision 4): Lighthouse, bank transfer, or both. */
+/**
+ * Where a cancellation refund of this payment goes (owner decision 4): Lighthouse, bank transfer, or both. A full
+ * refund in Lighthouse on the day of the payment before 8 PM is a Void, with no Beam fee.
+ */
 function refundLine(receipt: GatewayReceipt): string {
   const name = beamMethodName(receipt.methodType);
   if (receipt.refundable === false) return `bank transfer only (Beam can't refund ${name})`;
-  if (receipt.partialRefundable === true) return `Beam Lighthouse (full or 50% refunds of the ${name} payment)`;
-  if (receipt.refundable === true) return `Beam Lighthouse for a full refund; a 50% refund by bank transfer (Beam refunds ${name} only in full)`;
+  if (receipt.partialRefundable === true) {
+    return `Beam Lighthouse (full or 50% refunds of the ${name} payment; a full refund on the day of the payment before 8 PM is a Void, with no Beam fee)`;
+  }
+  if (receipt.refundable === true) {
+    return `Beam Lighthouse for a full refund (on the day of the payment before 8 PM a Void, with no Beam fee); a 50% refund by bank transfer (Beam refunds ${name} only in full)`;
+  }
   return (
-    "check the charge's method in Beam Lighthouse - cards are refunded there in full or 50%; PromptPay, Alipay and WeChat Pay in full there " +
-    "and 50% by bank transfer; LINE Pay, TrueMoney and ShopeePay by bank transfer only"
+    "check the charge's method in Beam Lighthouse - cards are refunded there in full or 50%, PromptPay in full there and 50% by bank " +
+    `transfer, e-wallets (${E_WALLETS}) by bank transfer only`
   );
 }
 
@@ -66,15 +94,22 @@ function refundLine(receipt: GatewayReceipt): string {
  * needs_attention reasons, which add the final period.
  */
 function refundHow(receipt: GatewayReceipt): string {
-  const name = beamMethodName(receipt.methodType);
-  if (receipt.refundable === false) return `the full amount by bank transfer: Beam can't refund ${name}. Nothing is refunded automatically`;
-  if (receipt.refundable === true) {
-    return `the full amount in Beam Lighthouse (Payments > charge ${receipt.primaryId ?? "of this booking"} > Refund). Nothing is refunded automatically`;
+  return `${beamFullRefundHow(receipt.methodType, receipt.primaryId)}. Nothing is refunded automatically`;
+}
+
+/**
+ * How to give a whole Beam charge back, by its method (no final period): in Beam Lighthouse for a card or PromptPay
+ * (Void on the day of the payment before 8 PM, no Beam fee; later Refund, Beam's fee still applies; a card's 7-14
+ * business days), by bank transfer for anything Beam can't refund (every e-wallet), and both ways named while the
+ * method is not known. refundHow and the duplicate-charge alert (beamGateway.ts) use it.
+ */
+export function beamFullRefundHow(methodType: string | undefined, chargeId: string | null): string {
+  const lighthouse = `the full amount in Beam Lighthouse (Payments > charge ${chargeId ?? "of this booking"}: ${VOID_OR_REFUND})`;
+  if (methodType === undefined || methodType === "") {
+    return `${lighthouse}, or by bank transfer if it was paid with an e-wallet (${E_WALLETS}: Beam can't refund those)`;
   }
-  return (
-    `the full amount in Beam Lighthouse (Payments > charge ${receipt.primaryId ?? "of this booking"} > Refund), or by bank transfer if it was paid ` +
-    "with LINE Pay, TrueMoney or ShopeePay (Beam can't refund those). Nothing is refunded automatically"
-  );
+  if (!BEAM_REFUNDABLE_METHODS.has(methodType)) return `the full amount by bank transfer: Beam can't refund ${beamMethodName(methodType)}`;
+  return CARD_METHODS.has(methodType) ? `${lighthouse}. ${CARD_REFUND}` : lighthouse;
 }
 
 /** The fee line's Cloudbeds item: beam-live and the test modes each have their own (new ids, never Stripe's). */
@@ -121,7 +156,7 @@ export function beamGatewayText(beam: Pick<BeamSettings, "pendingGraceMinutes">)
       `via Beam ${receipt.primaryId ?? "charge id pending"} (${beamMethodName(receipt.methodType)}, ${amount}). Refund path: ${refundLine(receipt)}`,
     paymentDescription: (receipt, ref) => `${receipt.description} ref ${ref}`,
     sessionLabel: { long: "payment link", short: "link" },
-    refundWhere: "in full in Beam Lighthouse (nothing is refunded automatically)",
+    refundWhere: "in full in Beam Lighthouse, or by bank transfer for an e-wallet payment (nothing is refunded automatically)",
     refundHow,
     // = config.ts BEAM_PAYMENT_METHOD_SOURCE (beamGateway.test.ts checks the two agree).
     methodEnvVar: "CLOUDBEDS_BEAM_PAYMENT_METHOD",
@@ -131,7 +166,8 @@ export function beamGatewayText(beam: Pick<BeamSettings, "pendingGraceMinutes">)
     releaseNoteText: beamReleaseNoteText,
     webhookRetryHint: "Beam webhook retries",
     mockMethod: "mock-beam",
-    bookedExtra: (receipt) => `If the guest cancels: ${refundLine(receipt)}.`,
+    bookedExtra: (receipt) =>
+      `If the guest cancels: ${refundLine(receipt)}.${receipt.methodType !== undefined && CARD_METHODS.has(receipt.methodType) ? ` ${CARD_REFUND}.` : ""}`,
     // A booking without a fee (PromptPay, owner decision 1) has no fee line on the folio.
     noFeeNote: (receipt) => (receipt.methodType ? `no fee: ${beamMethodName(receipt.methodType)}` : "no fee"),
     pendingReleasedAlert: (payment: GatewayPayment, reservationId: string): GatewayAlert => {
@@ -140,7 +176,7 @@ export function beamGatewayText(beam: Pick<BeamSettings, "pendingGraceMinutes">)
         subject: `Beam payment still pending: hold ${reservationId} released (booking ${ref})`,
         lines: [
           `A ${beamMethodName(payment.receipt.methodType)} payment on Beam link ${payment.paymentId} was still waiting for the bank's confirmation ${graceMinutes} minutes after the payment window closed, so the Cloudbeds hold was released and the unit is back on sale.`,
-          "If it succeeds later you get an URGENT alert: re-book the guest if the unit is still free, otherwise refund the full amount in Beam Lighthouse (by bank transfer for LINE Pay, TrueMoney or ShopeePay).",
+          `If it succeeds later you get an URGENT alert: re-book the guest if the unit is still free, otherwise refund the full amount in Beam Lighthouse (by bank transfer for an e-wallet: ${E_WALLETS}).`,
         ],
         key: `beam-pending-released:${payment.paymentId}`,
         severity: "warning",
