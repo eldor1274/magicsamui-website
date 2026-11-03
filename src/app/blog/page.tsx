@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
-import { getAllBlogPosts } from "@/data/blog";
+import { formatPostDate, getBlogPostsByRecency } from "@/data/blog";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/blog" },
@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 };
 
 export default function BlogIndexPage() {
-  const posts = getAllBlogPosts();
+  const posts = getBlogPostsByRecency();
 
   return (
     <div className="mx-auto max-w-6xl px-5 py-16">
@@ -41,6 +41,10 @@ export default function BlogIndexPage() {
             <div className="flex flex-1 flex-col gap-2 p-5">
               <h2 className="font-serif text-lg leading-snug text-ink">{post.title}</h2>
               <p className="text-sm text-ink-soft line-clamp-3">{post.description}</p>
+              <p className="mt-auto pt-2 text-xs text-ink-soft">
+                {post.datePublished === post.dateModified ? "Published " : "Updated "}
+                <time dateTime={post.dateModified}>{formatPostDate(post.dateModified)}</time>
+              </p>
             </div>
           </Link>
         ))}

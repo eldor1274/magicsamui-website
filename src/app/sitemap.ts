@@ -26,19 +26,13 @@ export default function sitemap(): MetadataRoute.Sitemap {
     "/zh",
     "/es",
     "/th",
-  ].map((route) => ({
-    url: `${base}${route}`,
-    lastModified: new Date(),
-  }));
+  ].map((route) => ({ url: `${base}${route}` }));
 
-  const roomRoutes = rooms.map((room) => ({
-    url: `${base}/rooms/${room.slug}`,
-    lastModified: new Date(),
-  }));
+  const roomRoutes = rooms.map((room) => ({ url: `${base}/rooms/${room.slug}` }));
 
   const blogRoutes = getAllBlogPosts().map((post) => ({
     url: `${base}/blog/${post.slug}`,
-    lastModified: new Date(),
+    lastModified: post.dateModified,
   }));
 
   return [...staticRoutes, ...roomRoutes, ...blogRoutes];

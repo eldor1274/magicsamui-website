@@ -113,12 +113,16 @@ export function blogPostJsonLd(post: {
   title: string;
   description: string;
   heroImage: string | null;
+  datePublished?: string;
+  dateModified: string;
 }) {
   return {
     "@context": "https://schema.org",
     "@type": "BlogPosting",
     headline: post.title,
     description: post.description,
+    ...(post.datePublished ? { datePublished: post.datePublished } : {}),
+    dateModified: post.dateModified,
     url: `${BASE}/blog/${post.slug}`,
     mainEntityOfPage: `${BASE}/blog/${post.slug}`,
     ...(post.heroImage ? { image: `${BASE}${post.heroImage}` } : {}),

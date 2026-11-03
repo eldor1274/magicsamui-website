@@ -19,7 +19,31 @@ export interface BlogPost {
   title: string;
   description: string;
   heroImage: string | null;
+  /**
+   * ISO date (YYYY-MM-DD) the post first went live on magicsamui.com (most posts: 2024-05-01 on the old
+   * WordPress site). Omitted when the original date could not be recovered — never guess it.
+   */
+  datePublished?: string;
+  /** ISO date (YYYY-MM-DD) of the last content refresh (2026-07-31 = the rewrite for the new site); bump it whenever facts are updated. */
+  dateModified: string;
   blocks: BlogBlock[];
+}
+
+/** Most recently refreshed first, alphabetical within the same date. */
+export function getBlogPostsByRecency(): BlogPost[] {
+  return [...getAllBlogPosts()].sort(
+    (a, b) => b.dateModified.localeCompare(a.dateModified) || a.title.localeCompare(b.title),
+  );
+}
+
+/** "31 July 2026" — fixed English/UTC so server and client never disagree. */
+export function formatPostDate(iso: string): string {
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
 }
 
 const BLOG_DIR = path.join(process.cwd(), "src/data/blog-posts");

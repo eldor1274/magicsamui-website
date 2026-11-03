@@ -5,7 +5,7 @@ import BlogContent from "@/components/BlogContent";
 import BlogCta from "@/components/BlogCta";
 import JsonLd from "@/components/JsonLd";
 import RelatedPosts from "@/components/RelatedPosts";
-import { getAllBlogPosts, getBlogPostBySlug, getRelatedPosts } from "@/data/blog";
+import { formatPostDate, getAllBlogPosts, getBlogPostBySlug, getRelatedPosts } from "@/data/blog";
 import { blogPostJsonLd, breadcrumbJsonLd } from "@/lib/structuredData";
 
 export function generateStaticParams() {
@@ -25,6 +25,9 @@ export async function generateMetadata({
     description: post.description,
     alternates: { canonical: `/blog/${post.slug}` },
     openGraph: {
+      type: "article",
+      ...(post.datePublished ? { publishedTime: post.datePublished } : {}),
+      modifiedTime: post.dateModified,
       title: post.title,
       description: post.description,
       ...(post.heroImage
@@ -55,6 +58,19 @@ export default async function BlogPostPage({
         ])}
       />
       <h1 className="font-serif text-3xl leading-tight text-ink sm:text-4xl">{post.title}</h1>
+      <p className="mt-3 text-sm text-ink-soft">
+        {post.datePublished && (
+          <>
+            Published <time dateTime={post.datePublished}>{formatPostDate(post.datePublished)}</time>
+          </>
+        )}
+        {post.dateModified !== post.datePublished && (
+          <>
+            {post.datePublished ? " · Updated " : "Updated "}
+            <time dateTime={post.dateModified}>{formatPostDate(post.dateModified)}</time>
+          </>
+        )}
+      </p>
       {post.description && <p className="mt-4 text-lg text-ink-soft">{post.description}</p>}
 
       {post.heroImage && (

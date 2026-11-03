@@ -24,7 +24,7 @@ import ReviewsSection from "@/components/ReviewsSection";
 import RoomCard from "@/components/RoomCard";
 import { getRoomBySlug, rooms, type Room } from "@/data/rooms";
 import { reviewStats } from "@/data/reviews";
-import { getAllBlogPosts } from "@/data/blog";
+import { getBlogPostsByRecency } from "@/data/blog";
 import { LANG_ALTERNATES, OWN_ENGINE_PERK } from "@/data/landings";
 import { site } from "@/data/site";
 import { isBookableSlug, sharedUnits } from "@/lib/booking/catalogue";
@@ -156,7 +156,7 @@ function OwnHomeSearch() {
 }
 
 export default function Home() {
-  const latestPosts = getAllBlogPosts().slice(0, 3);
+  const latestPosts = getBlogPostsByRecency().slice(0, 3);
   // Own engine: the search bar sits inside the bottom of the hero video from md up, like the booking page's
   // bar over its photo (the hero text moves up to make room); on phones it stays just under the hero.
   const ownEngine = resolveBookingEngine() === "own";
