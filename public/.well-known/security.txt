@@ -1,0 +1,9 @@
+# Magic Suites & Villas - Pakwan Samui Limited Partnership, Koh Samui, Thailand
+# How to report a security problem in magicsamui.com or our direct booking pages.
+# Human-readable version and ground rules: see Policy below.
+
+Contact: mailto:info@magicsamui.com
+Expires: 2027-11-09T00:00:00.000Z
+Preferred-Languages: en, th
+Canonical: https://magicsamui.com/.well-known/security.txt
+Policy: https://magicsamui.com/security

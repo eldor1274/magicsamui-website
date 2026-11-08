@@ -116,6 +116,10 @@ export default function Footer() {
           ·{" "}
           <Link href="/legal" className="hover:text-pool">
             Legal
+          </Link>{" "}
+          ·{" "}
+          <Link href="/security" className="hover:text-pool">
+            Security
           </Link>
         </p>
       </div>
