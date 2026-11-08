@@ -3,15 +3,21 @@
 import { useEffect, useRef, useState } from "react";
 
 // On-device scroll recorder for /booking, active ONLY when the URL carries
-// ?diag=1. Built because the "page shakes while scrolling" report from Eldor's
+// ?diag=<key>, where <key> is the server's SCROLL_DIAG_KEY (api/scroll-diag).
+// The key travels in the owner's URL, never in this bundle, so a stranger
+// can't post reports. Built because the "page shakes while scrolling" report from Eldor's
 // iPhone does not reproduce in desktop WebKit or Chromium: a real finger, the
 // collapsing Safari toolbar and iOS compositing cannot be emulated. The phone
 // records what actually moves and emails it to us (api/scroll-diag).
 // Normal visitors never load any of this: the effect returns before touching
 // the DOM when the parameter is absent.
 
-const KEY = "ms-diag-2026";
 const MAX_ROWS = 1800;
+
+/** The key the owner opened the page with (?diag=<key>); checked by api/scroll-diag. */
+function diagKey(): string {
+  return new URLSearchParams(window.location.search).get("diag") ?? "";
+}
 
 // Each switch turns off one suspect, so the phone itself can show which one
 // stops the shake. Rules live here, not in globals.css, so production styling
@@ -294,7 +300,7 @@ export default function ScrollDiag() {
       const res = await fetch("/api/scroll-diag", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: KEY, summary: readout, report: { ...rec.current, endedAtMs: stamp() } }),
+        body: JSON.stringify({ key: diagKey(), summary: readout, report: { ...rec.current, endedAtMs: stamp() } }),
       });
       setSent(res.ok ? "sent, thank you" : `failed (${res.status})`);
     } catch {

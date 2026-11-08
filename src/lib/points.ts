@@ -202,8 +202,10 @@ export function lookup(
   const account = accounts.get(key);
   if (!account) return null;
 
+  // No surname, no answer: the phone number alone must never reveal a balance,
+  // or this becomes a public "who stayed here" lookup (the route checks too).
   const given = normName(lastName);
-  if (!given) return account;
+  if (!given) return null;
 
   const matches = account.stays.some((s) => {
     const surname = normName(s.lastName);

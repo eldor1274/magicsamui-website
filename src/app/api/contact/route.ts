@@ -63,7 +63,8 @@ export async function POST(request: Request) {
   const sent = await sendSiteMail({
     to: site.email,
     replyTo: contact.includes("@") ? contact : undefined,
-    subject: `Website inquiry from ${name}`,
+    // Header line: line breaks stripped so a name can never inject extra mail headers.
+    subject: `Website inquiry from ${name.replace(/[\r\n]+/g, " ").trim()}`,
     text: `Name: ${name}\nPhone/Email: ${contact}\n\n${message}`,
   });
   if (!sent) {

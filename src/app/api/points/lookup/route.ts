@@ -41,9 +41,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
 
-  if (!phone.trim()) {
+  // Both are required here AND in lookup(): a phone number alone must never
+  // return a balance (see the note at the top).
+  if (!phone.trim() || !lastName.trim()) {
     return NextResponse.json(
-      { error: "Enter the phone number you booked with." },
+      { error: "Enter the phone number and the surname you booked with." },
       { status: 400 }
     );
   }
