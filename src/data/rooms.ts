@@ -348,7 +348,7 @@ export const rooms: Room[] = [
       "Supermarkets, ATMs, bars and restaurants are available along the main road.",
       "Free Wi-Fi and HDMI-enabled TVs are available — log in via your settings on arrival.",
       FREE_TRANSFER_NOTE,
-      "Breakfast is provided on the first day courtesy of the host, at no additional charge (for stays over one night).",
+      "Breakfast is available on request at 1,000 THB per person per day: omelette, dairy, pickles, coffee or tea and juice.",
     ],
     heroImage: { src: "/images/honeymoon-suite/hm-living-room-private-pool.jpg", alt: "Honeymoon Suite living room with private pool and sea view" },
     cardVideo: "/videos/honeymoon-card.mp4",
