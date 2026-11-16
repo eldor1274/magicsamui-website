@@ -8,7 +8,7 @@
 
 import Image from "next/image";
 import type { ReactNode } from "react";
-import { Coffee, MessageCircle } from "lucide-react";
+import { MessageCircle } from "lucide-react";
 import { site } from "@/data/site";
 import { BREAKFAST_ITEMS, BREAKFAST_PHOTO, BREAKFAST_POLICY, BREAKFAST_SATANG_PER_GUEST_PER_NIGHT } from "@/lib/booking/catalogue";
 import { formatStayRange } from "@/lib/booking/dates";
@@ -85,18 +85,20 @@ export default function BreakfastCard({
       className={`overflow-hidden rounded-(--bk-radius-card) bg-(--bk-surface) text-(--bk-text) shadow-(--bk-shadow-card)${className ? ` ${className}` : ""}`}
     >
       <div className="grid gap-4 p-3 sm:grid-cols-[minmax(0,44%)_minmax(0,1fr)] sm:p-4">
-        <div className="relative aspect-[4/3] overflow-hidden rounded-(--bk-radius-control) bg-(--bk-surface-sunken)">
+        {/* Portrait (4:5) on phones, so the plate and the mug both fit; beside the text it fills the column height (min 16rem). */}
+        <div className="relative aspect-[4/5] overflow-hidden rounded-(--bk-radius-control) bg-(--bk-surface-sunken) sm:aspect-auto sm:min-h-64">
           <Image
             src={BREAKFAST_PHOTO.src}
             alt={BREAKFAST_PHOTO.alt}
             fill
             sizes="(min-width: 1024px) 300px, (min-width: 640px) 44vw, 100vw"
             className="object-cover"
+            style={{ objectPosition: BREAKFAST_PHOTO.position }}
           />
         </div>
 
         <div className="flex min-w-0 flex-col">
-          {eyebrow && <p className="text-xs font-semibold uppercase tracking-[0.2em] text-(--bk-eyebrow)">{eyebrow}</p>}
+          {eyebrow && <p className="text-xs font-semibold uppercase tracking-[0.2em] text-(--bk-link)">{eyebrow}</p>}
           <Heading id={headingId} className={`bk-heading text-lg leading-snug sm:text-xl${eyebrow ? " mt-1" : ""}`}>
             {title}
           </Heading>
@@ -107,7 +109,6 @@ export default function BreakfastCard({
           <ul aria-label="What breakfast includes" className="mt-3 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm font-medium">
             {BREAKFAST_ITEMS.map((item, i) => (
               <li key={item} className="inline-flex items-center gap-1.5">
-                {i === 0 && <Coffee size={15} aria-hidden="true" className="shrink-0 text-(--bk-accent)" />}
                 {item}
                 {/* Trailing, so a wrapped line never starts with a separator. */}
                 {i < BREAKFAST_ITEMS.length - 1 && (

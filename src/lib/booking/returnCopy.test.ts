@@ -1088,7 +1088,8 @@ test("breakfast on request wiring: the booking page shows the card under the roo
   const app = read("BookingApp.tsx");
   assert.match(app, /afterRooms=\{\s*addonsEnabled \? undefined : \(\s*<BreakfastCard whatsappMessage=\{breakfastWhatsAppMessage\(\{ checkIn: stayIn, checkOut: stayOut \}\)\} \/>\s*\)\s*\}/);
   assert.equal(app.split("<BreakfastCard").length - 1, 1, "one card on the booking page");
-  assert.match(read("results/ResultsList.tsx"), /\{afterRooms\}\s*<HousePolicies \/>/);
+  // Above "Good to know", and only while something can be booked (not on "Fully booked").
+  assert.match(read("results/ResultsList.tsx"), /\{\(available\.length > 0 \|\| enquiry\.length > 0\) && afterRooms\}\s*<HousePolicies \/>/);
   const card = read("breakfast/BreakfastCard.tsx");
   for (const use of ["formatThbWhole(BREAKFAST_SATANG_PER_GUEST_PER_NIGHT)", "BREAKFAST_POLICY.slice(0, 2)", "BREAKFAST_ITEMS.map(", "src={BREAKFAST_PHOTO.src}", "alt={BREAKFAST_PHOTO.alt}", "whatsappHref("]) {
     assert.ok(card.includes(use), use);

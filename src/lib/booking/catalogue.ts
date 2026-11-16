@@ -228,7 +228,12 @@ export const BREAKFAST_POLICY = [
  * breakfast photo, replace public/images/breakfast/breakfast.jpg (any size or shape: the card crops it to
  * fit) and describe the new photo in `alt`. Until then that file is a copy of BREAKFAST_IMAGE's photo.
  */
-export const BREAKFAST_PHOTO = { src: "/images/breakfast/breakfast.jpg", alt: "The dining table at the villa, set for a meal" };
+export const BREAKFAST_PHOTO = {
+  src: "/images/breakfast/breakfast.jpg",
+  alt: "A breakfast plate with eggs, a hash brown, cheese, pickles, tomatoes and avocado toast, and a hot drink in a mug",
+  /** The photo is portrait; keep the plate and the mug in view when the card crops it. */
+  position: "60% 80%",
+};
 
 /** What breakfast at the villa includes (the breakfast card; llms.txt and the Garden Suite notes say the same). */
 export const BREAKFAST_ITEMS: readonly string[] = ["Omelette", "Dairy", "Pickles", "Coffee or tea", "Juice"];

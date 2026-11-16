@@ -223,7 +223,8 @@ export default function ResultsList({
         )}
       </div>
 
-      {afterRooms}
+      {/* Not when nothing can be booked (fully booked): its message assumes a stay is being booked. */}
+      {(available.length > 0 || enquiry.length > 0) && afterRooms}
 
       <HousePolicies />
     </div>
