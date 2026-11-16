@@ -26,6 +26,7 @@ import { attemptMayStillBePaid, clearAttempt, readAttempt, rememberAttempt } fro
 import NoticeBar from "./NoticeBar";
 import PreviewBanner from "./PreviewBanner";
 import StepHeader from "./StepHeader";
+import BreakfastCard, { breakfastWhatsAppMessage } from "./breakfast/BreakfastCard";
 import AddonsStep from "./checkout/AddonsStep";
 import GuestDetailsStep from "./checkout/GuestDetailsStep";
 import PaymentStep, { focusPayMethodChoice, isPaymentPaused } from "./checkout/PaymentStep";
@@ -867,6 +868,12 @@ export default function BookingApp({
                       onAdd={actions.addRoom}
                       onRetry={() => actions.search()}
                       onChangeDates={() => actions.goToStep("search")}
+                      // Add-ons off (the live hold-first modes): breakfast can't be added online, so it is offered on request.
+                      afterRooms={
+                        addonsEnabled ? undefined : (
+                          <BreakfastCard whatsappMessage={breakfastWhatsAppMessage({ checkIn: stayIn, checkOut: stayOut })} />
+                        )
+                      }
                     />
                   </>
                 )}

@@ -8,6 +8,8 @@
 // (beamTestkit.ts makeParityKit, makeBeamKit) are rendered from their real status answers, and the return page's server
 // check (returnPageStatus.ts returnPageCheck) is run on the real runtime deps: a Beam answer carries the flags of the
 // Beam config that answered it, also after a BOOKING_PAYMENT_PROVIDER typo, where the public config is the locked one.
+// Last, breakfast on request (owner, 16 Nov 2026): the paid view's "Add breakfast to your stay" card in the hold-first
+// modes, and the booking page's card under the rooms while add-ons are off.
 
 import { test } from "node:test";
 import type { TestContext } from "node:test";
@@ -19,9 +21,10 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import { buildOffers } from "./availability.ts";
-import { BEAM_API_KEY, BEAM_HMAC_KEY_B64, BEAM_MERCHANT_ID, beamRunCheckout, makeBeamKit, makeParityKit } from "./beamTestkit.ts";
+import { site } from "../../data/site.ts";
+import { BEAM_API_KEY, BEAM_HMAC_KEY_B64, BEAM_LIVE_ENV, BEAM_MERCHANT_ID, BEAM_TEST_ENV, beamRunCheckout, makeBeamKit, makeParityKit } from "./beamTestkit.ts";
 import type { BeamKit, ParityKit } from "./beamTestkit.ts";
-import { POLICY_VERSION } from "./catalogue.ts";
+import { BREAKFAST_ITEMS, BREAKFAST_PHOTO, BREAKFAST_POLICY, POLICY_VERSION } from "./catalogue.ts";
 import { BEAM_PLAYGROUND_BASE, getPublicBookingConfig } from "./config.ts";
 import type { BookingConfig, Env } from "./config.ts";
 import { addDays } from "./dates.ts";
@@ -49,7 +52,7 @@ import {
 import type { PaidCopyFlags, PolledReason, UnpaidStatus } from "./returnView.ts";
 import { runStatus } from "./status.ts";
 import type { ProviderDepsFn } from "./stripeDeps.ts";
-import { GUEST, NOW, TOKEN_SECRET } from "./testkit.ts";
+import { GUEST, NOW, STRIPE_LIVE_ENV, STRIPE_TEST_ENV, TOKEN_SECRET } from "./testkit.ts";
 import { createBookingToken, verifyBookingToken } from "./token.ts";
 import type { ApiError, BookingSummary, CartItemInput, CheckoutSuccess, FulfilmentView, PaymentMode, PaymentStatus, Quote, StatusResponse } from "./types.ts";
 
@@ -92,6 +95,13 @@ function hookReturnPage(): void {
       if (specifier === "next/server") return nextResolve("next/server.js", context);
       // next/link is CommonJS whose module.exports is the component itself (as Next's bundler hands it on).
       if (specifier === "next/link") return nextResolve("next/link.js", context);
+      // The paid view's breakfast card imports next/image, CommonJS whose component is its default's default when Node
+      // imports it: a module that hands on that component (as Next's bundler does; paymentCopy.test.ts does the same).
+      if (specifier === "next/image") {
+        const real = import.meta.resolve("next/image.js");
+        const image = `import m from ${JSON.stringify(real)}; export default m.default ?? m;`;
+        return { url: `data:text/javascript,${encodeURIComponent(image)}`, shortCircuit: true };
+      }
       if (specifier.startsWith("@/")) return probe(new URL(`../../${specifier.slice(2)}`, import.meta.url)) ?? nextResolve(specifier, context);
       const parent = context.parentURL;
       if (specifier.startsWith(".") && parent?.startsWith("file:") && fileURLToPath(parent).startsWith(src)) {
@@ -1014,4 +1024,76 @@ test("design S5.3 wiring: OwnReturnPage passes a Beam answer's own flags (else t
   assert.match(ret, /const shown: Result =\s*result\?\.ok && result\.status === "pending" && polledReason !== null && polledReason\.plan === plan \? \{ \.\.\.result, pendingReason: polledReason\.reason \} : result;/);
   assert.ok(ret.includes("result={shown?.ok ? shown : result}") && ret.includes("statusAnnouncement(shown, exhausted)"));
   assert.ok(ret.includes("const copy = unpaidCopy(result);") && !ret.includes("const UNPAID_COPY"), "the unpaid words come from returnView.ts");
+});
+
+/* ------------------------------------- breakfast on request (16 Nov 2026) ------------------------------------- */
+
+const ADD_BREAKFAST = "Add breakfast to your stay";
+/** Text as renderToStaticMarkup escapes it. */
+const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#x27;");
+
+test("breakfast on request (owner, 16 Nov 2026): the paid view of every Stripe and Beam mode ends with 'Add breakfast to your stay' - the photo, what it includes, 1,000 THB per person per day, the breakfast policy, paid at the villa, and 'Order breakfast on WhatsApp' with the booking reference; never in the demo (its add-ons step sells breakfast), on a booking that has breakfast, or on any other view", async () => {
+  assert.deepEqual(BREAKFAST_ITEMS, ["Omelette", "Dairy", "Pickles", "Coffee or tea", "Juice"]);
+  const message = `Hi, I'd like to add breakfast at the villa (1,000 THB per person per day) to my booking ${REF} (Nov 10, 2027 to Nov 13, 2027). Could you send me the menu?`;
+  for (const mode of ALL_MODES) {
+    for (const email of [false, true]) {
+      const label = `${mode} email=${email}`;
+      const html = await render(propsFor(answerOf(mode, "paid", confirmedFor(mode)), mode, { sendsConfirmationEmail: email, cloudbedsWrites: "live" }));
+      const text = textOf(html);
+      if (mode === "demo") {
+        assert.ok(!text.includes(ADD_BREAKFAST) && !text.includes("Order breakfast on WhatsApp"), `${label}: no breakfast card`);
+        continue;
+      }
+      const c = chunks(html);
+      assert.ok(c.indexOf(ADD_BREAKFAST) > c.indexOf("Back to the website"), `${label}: after "What happens next" and its actions`);
+      assert.match(html, /<h2 id="return-breakfast-title"[^>]*>Add breakfast to your stay<\/h2>/, `${label}: a section heading`);
+      assert.match(html, /<article aria-labelledby="return-breakfast-title" class="[^"]*print:hidden/, `${label}: labelled, left off the print`);
+      assert.ok(text.includes("Breakfast at the villa - on request"), label);
+      assert.ok(html.includes(`<img alt="${esc(BREAKFAST_PHOTO.alt)}"`) && html.includes(encodeURIComponent(BREAKFAST_PHOTO.src)), `${label}: the photo and its alt text`);
+      assert.match(html, /<ul aria-label="What breakfast includes"/, label);
+      for (const item of BREAKFAST_ITEMS) {
+        assert.ok(new RegExp(`<li[^>]*>(<svg[\\s\\S]*?</svg>)?${item}(<span aria-hidden="true"[^>]*>·</span>)?</li>`).test(html), `${label}: ${item}, one list item`);
+      }
+      assert.ok(text.includes("1,000 THB per person per day"), `${label}: the price`);
+      for (const section of BREAKFAST_POLICY) assert.ok(text.includes(`${section.heading} ${section.body}`), `${label}: ${section.heading}`);
+      assert.ok(text.includes("Paid at the villa or arranged with us on WhatsApp (+66 95 246 6011)."), `${label}: how it is paid`);
+      const at = html.indexOf("Order breakfast on WhatsApp");
+      const tag = /^<a href="([^"]*)" target="_blank" rel="noopener noreferrer"/.exec(html.slice(html.lastIndexOf("<a ", at)));
+      assert.ok(tag, `${label}: the WhatsApp button`);
+      assert.equal(decode(tag[1]), `${site.whatsapp}?text=${encodeURIComponent(message)}`, `${label}: the prefilled message`);
+      if (isBeam(mode)) assert.doesNotMatch(text, NO_RECEIPT_OR_STRIPE, `${label}: no receipt, no Stripe`);
+    }
+  }
+  // A booking that already has breakfast (never in the hold-first modes, which sell the Standard Rate only): no card.
+  const withBreakfast = bookingOf("stripe-live", { items: [{ slug: "honeymoon-suite", ratePlanId: "breakfast", adults: 2, addonIds: [] }] });
+  assert.ok(!textOf(await render(propsFor(answerOf("stripe-live", "paid", CONFIRMED, {}, withBreakfast), "stripe-live"))).includes(ADD_BREAKFAST));
+  // The other views of every Stripe and Beam mode: none.
+  const others: [PaymentStatus, FulfilmentView][] = [
+    ["pending", { state: "awaiting_payment", reservationId: null }],
+    ["paid", { state: "confirming", reservationId: null }],
+    ["paid", { state: "needs_attention", reservationId: RESERVATION_ID }],
+    ["expired", { state: "released", reservationId: null }],
+    ["refunded", { state: "released", reservationId: null }],
+  ];
+  for (const mode of [...STRIPE_MODES, ...BEAM_MODES]) {
+    for (const [status, fulfilment] of others) {
+      const text = textOf(await render(propsFor(answerOf(mode, status, fulfilment), mode)));
+      assert.ok(!text.includes(ADD_BREAKFAST) && !text.includes("Order breakfast on WhatsApp"), `${mode} ${status}/${fulfilment.state}: no breakfast card`);
+    }
+  }
+});
+
+test("breakfast on request wiring: the booking page shows the card under the rooms (above 'Good to know') only while add-ons are off - every Stripe and Beam mode, live included - so the demo's add-ons step is unchanged; the card takes its price, items, photo and ordering rule from the catalogue, and the photo file exists", () => {
+  const read = (path: string) => readFileSync(new URL(`../../components/booking/${path}`, import.meta.url), "utf8");
+  const app = read("BookingApp.tsx");
+  assert.match(app, /afterRooms=\{\s*addonsEnabled \? undefined : \(\s*<BreakfastCard whatsappMessage=\{breakfastWhatsAppMessage\(\{ checkIn: stayIn, checkOut: stayOut \}\)\} \/>\s*\)\s*\}/);
+  assert.equal(app.split("<BreakfastCard").length - 1, 1, "one card on the booking page");
+  assert.match(read("results/ResultsList.tsx"), /\{afterRooms\}\s*<HousePolicies \/>/);
+  const card = read("breakfast/BreakfastCard.tsx");
+  for (const use of ["formatThbWhole(BREAKFAST_SATANG_PER_GUEST_PER_NIGHT)", "BREAKFAST_POLICY.slice(0, 2)", "BREAKFAST_ITEMS.map(", "src={BREAKFAST_PHOTO.src}", "alt={BREAKFAST_PHOTO.alt}", "whatsappHref("]) {
+    assert.ok(card.includes(use), use);
+  }
+  assert.ok(existsSync(new URL(`../../../public${BREAKFAST_PHOTO.src}`, import.meta.url)), `public${BREAKFAST_PHOTO.src}`);
+  for (const env of [STRIPE_LIVE_ENV, STRIPE_TEST_ENV, BEAM_LIVE_ENV, BEAM_TEST_ENV]) assert.equal(getPublicBookingConfig(env).addonsEnabled, false);
+  assert.equal(getPublicBookingConfig({}).addonsEnabled, true, "the demo keeps its add-ons step (and no card)");
 });

@@ -10,6 +10,7 @@
 // policies close the list. Keep ResultsListProps stable.
 
 import { useId, useState } from "react";
+import type { ReactNode } from "react";
 import { AlertTriangle, CalendarX2, ChevronDown, Loader2, MessageCircle, RotateCcw } from "lucide-react";
 import { site } from "@/data/site";
 import { HOUSE_POLICIES, getCatalogueRoom } from "@/lib/booking/catalogue";
@@ -39,6 +40,8 @@ export interface ResultsListProps {
   onRetry: () => void;
   /** Opens the date picker / scrolls to the search bar. */
   onChangeDates: () => void;
+  /** Shown under the rooms, above "Good to know", once results are listed (e.g. the breakfast card). */
+  afterRooms?: ReactNode;
 }
 
 function whatsappHref(text: string): string {
@@ -56,6 +59,7 @@ export default function ResultsList({
   onAdd,
   onRetry,
   onChangeDates,
+  afterRooms,
 }: ResultsListProps) {
   const [showSoldOut, setShowSoldOut] = useState(false);
   const soldOutId = useId();
@@ -218,6 +222,8 @@ export default function ResultsList({
           </div>
         )}
       </div>
+
+      {afterRooms}
 
       <HousePolicies />
     </div>

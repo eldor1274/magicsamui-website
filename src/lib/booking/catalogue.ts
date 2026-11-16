@@ -223,6 +223,16 @@ export const BREAKFAST_POLICY = [
   },
 ];
 
+/**
+ * The photo on the breakfast card (components/booking/breakfast/BreakfastCard). To show the owner's own
+ * breakfast photo, replace public/images/breakfast/breakfast.jpg (any size or shape: the card crops it to
+ * fit) and describe the new photo in `alt`. Until then that file is a copy of BREAKFAST_IMAGE's photo.
+ */
+export const BREAKFAST_PHOTO = { src: "/images/breakfast/breakfast.jpg", alt: "The dining table at the villa, set for a meal" };
+
+/** What breakfast at the villa includes (the breakfast card; llms.txt and the Garden Suite notes say the same). */
+export const BREAKFAST_ITEMS: readonly string[] = ["Omelette", "Dairy", "Pickles", "Coffee or tea", "Juice"];
+
 export const RATE_PLANS: Record<RatePlanId, RatePlanInfo> = {
   standard: {
     id: "standard",

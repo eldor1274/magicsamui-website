@@ -595,7 +595,7 @@ export const rooms: Room[] = [
       "Guests can use the parking",
     ],
     notes: [
-      "A continental breakfast is available for an extra 250 baht.",
+      "Breakfast is available on request at 1,000 THB per person per day: omelette, dairy, pickles, coffee or tea and juice.",
       "Please use electricity and water conservatively — turn off lights and AC when leaving.",
       "Supermarkets, ATMs, bars and restaurants are available along the main road.",
       "Free Wi-Fi and HDMI-enabled TVs are available — log in via your settings on arrival.",

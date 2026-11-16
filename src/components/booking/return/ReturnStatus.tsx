@@ -15,6 +15,8 @@
 //    confirmation email the page is the booking confirmation (Save or print,
 //    the agreed terms). Beam (design S5.3, BeamPaidView): the Cloudbeds email
 //    is the guest's written confirmation; no Beam copy mentions a receipt.
+//    Stripe and Beam (no add-ons online) end with "Add breakfast to your
+//    stay": breakfast on request, ordered on WhatsApp, paid at the villa.
 //  - confirming (hold-first, paid): "Payment received - confirming your
 //    booking" and keeps checking until Cloudbeds confirms.
 //  - attention (paid but needs a human): "Payment received - we'll contact
@@ -75,6 +77,7 @@ import type { ResumeReason } from "@/lib/booking/urls";
 import { useHydrated } from "../hooks";
 import { clearAttempt } from "../attempt";
 import { clearPersistedCart, readPersistedBooking } from "../state";
+import BreakfastCard, { breakfastWhatsAppMessage } from "../breakfast/BreakfastCard";
 import { whatsappHref } from "../checkout/PaymentMethodBadges";
 import { site } from "@/data/site";
 import { buildStayIcs, downloadIcs } from "./ics";
@@ -595,6 +598,8 @@ function PaidView({
               : "In live mode the guest receives the Cloudbeds confirmation and Beam's receipt by email."
         }
       />
+
+      <AddBreakfast result={result} />
     </div>
   );
 }
@@ -647,7 +652,30 @@ function BeamPaidView({
       {copy.pageIsConfirmation && <BookingTerms booking={booking} />}
 
       <PaidNextSteps booking={booking} emailTitle={copy.emailTitle} emailText={copy.emailText} />
+
+      <AddBreakfast result={result} />
     </div>
+  );
+}
+
+/**
+ * "Add breakfast to your stay" on a paid booking in the hold-first modes (Stripe, Beam), where breakfast can't
+ * be booked online: on request, ordered on WhatsApp with the booking reference and paid at the villa. Not in
+ * the demo (its add-ons step sells breakfast) nor when the booking already has breakfast. Left off the print.
+ */
+function AddBreakfast({ result }: { result: StatusResponse }) {
+  const { booking } = result;
+  const hasBreakfast = booking.items.some((i) => i.ratePlanId === "breakfast" || i.addonIds.includes("breakfast-pp"));
+  if (!isHoldFirstMode(result.paymentMode) || hasBreakfast) return null;
+  return (
+    <BreakfastCard
+      title="Add breakfast to your stay"
+      eyebrow="Breakfast at the villa - on request"
+      headingLevel={2}
+      headingId="return-breakfast-title"
+      whatsappMessage={breakfastWhatsAppMessage({ checkIn: booking.checkIn, checkOut: booking.checkOut, ref: booking.ref })}
+      className="print:hidden"
+    />
   );
 }
 
