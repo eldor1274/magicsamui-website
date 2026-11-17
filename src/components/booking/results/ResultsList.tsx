@@ -42,6 +42,11 @@ export interface ResultsListProps {
   onChangeDates: () => void;
   /** Shown under the rooms, above "Good to know", once results are listed (e.g. the breakfast card). */
   afterRooms?: ReactNode;
+  /**
+   * The id of the breakfast card's heading when `afterRooms` is that card: every rate row then links to it
+   * ("Breakfast on request: see details"). Leave it out when no card is passed.
+   */
+  breakfastCardId?: string;
 }
 
 function whatsappHref(text: string): string {
@@ -60,6 +65,7 @@ export default function ResultsList({
   onRetry,
   onChangeDates,
   afterRooms,
+  breakfastCardId,
 }: ResultsListProps) {
   const [showSoldOut, setShowSoldOut] = useState(false);
   const soldOutId = useId();
@@ -84,6 +90,8 @@ export default function ResultsList({
   const soldOut = offers.filter((o) => !o.available && o.unavailableReason !== "not-bookable");
   const bookableTotal = available.length + soldOut.length;
   const noneFitsParty = available.length > 0 && available.every((o) => !o.fitsParty);
+  // The rate rows link to the breakfast card only while it is rendered below (the same condition as that line).
+  const breakfastLinkId = afterRooms && (available.length > 0 || enquiry.length > 0) ? breakfastCardId : undefined;
 
   const renderCard = (offer: RoomOffer) => {
     const room = getCatalogueRoom(offer.slug);
@@ -105,6 +113,7 @@ export default function ResultsList({
           directCode={availability.promo?.valid && availability.promo.pct === 0 ? availability.promo.code : null}
           feePct={feePct}
           feeNote={feeNotes ? feeNotes.card : undefined}
+          breakfastCardId={breakfastLinkId}
           enquiryHref={
             offer.unavailableReason === "not-bookable"
               ? whatsappHref(

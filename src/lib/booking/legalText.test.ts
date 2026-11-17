@@ -180,6 +180,11 @@ const BOTH = "Depending on the booking, the payment is processed by Stripe or by
 /** The support index of Beam attempts (payments/beamSupport.ts): what the bot's payment lookup reads. */
 const BEAM_SUPPORT_CODE =
   "For a payment through Beam, our server also keeps a one-way code of the email address and phone number you entered (not the address or number itself), together with the booking reference, for about 30 days, so that our messaging assistant can tell you what happened to your payment if you ask it.";
+/**
+ * The policy's date: one for every provider set since the sentence on the room videos' player (the last test below),
+ * which every set shows. Before it: 15 August 2026, 5 October 2026 with the Stripe wording, 24 October 2026 with Beam's.
+ */
+const PRIVACY_UPDATED = "Last updated: 17 November 2026";
 
 /* ---------------------------------- tests ---------------------------------- */
 
@@ -224,7 +229,7 @@ test("privacy and legal without a Beam config: Stripe's wording on a Stripe page
     assert.equal(privacy.includes("Stripe — online payments on our own direct booking pages Upstash — temporary booking-process data (holds, payment status, abuse limits) Anthropic"), stripe, label);
     assert.equal(privacy.includes("Upstash — temporary booking-process data"), stripe, label);
     assert.equal(privacy.includes("payment providers or by Stripe and never reach our own systems"), stripe, label);
-    assert.ok(privacy.includes(`Last updated: ${stripe ? "5 October 2026" : "15 August 2026"}`), label);
+    assert.ok(privacy.includes(PRIVACY_UPDATED), label);
     assert.equal(legal.includes(STRIPE_LEGAL), stripe, label);
   }
 });
@@ -255,7 +260,7 @@ test("privacy and legal, Beam only: Beam's processing in plain words, no Stripe 
   for (const label of ["Beam only (beam-playground)", "Beam only (legacy rule: no provider variable, BEAM_API_BASE set)", "the demo with a Beam drain", "beam-live", "beam-live, emergency-stopped (fulfilment still runs)"]) {
     const html = render(Privacy, WITH_BEAM[label].env);
     const privacy = textOf(html);
-    assert.ok(privacy.includes("Last updated: 24 October 2026"), label);
+    assert.ok(privacy.includes(PRIVACY_UPDATED), label);
     assert.ok(privacy.includes(BEAM_SUPPORT_CODE), label);
     assert.ok(privacy.includes(DETAILS_TO_CLOUDBEDS), label);
     assert.ok(privacy.includes(BEAM_PRIVACY), label);
@@ -287,7 +292,7 @@ test("privacy and legal with both providers (a Stripe drain on Beam, or a Beam d
   ]) {
     const html = render(Privacy, WITH_BEAM[label].env);
     const privacy = textOf(html);
-    assert.ok(privacy.includes("Last updated: 24 October 2026"), label);
+    assert.ok(privacy.includes(PRIVACY_UPDATED), label);
     assert.ok(privacy.includes(BEAM_SUPPORT_CODE), label);
     assert.ok(privacy.includes(`${DETAILS_TO_CLOUDBEDS} ${BOTH}`), label);
     assert.ok(privacy.includes("Stripe processes card, Apple Pay, Google Pay and PromptPay payments on its own secure checkout page."), label);
@@ -386,4 +391,25 @@ test("previewHeadline: the Beam lines per writer and the live line; the Stripe a
     "LIVE payments: real cards are charged through Stripe and real reservations are made in Cloudbeds.",
   );
   assert.equal(previewHeadline({ paymentMode: "demo", dataSource: "demo" }), "demo mode: availability and prices are simulated, no real payment is taken.");
+});
+
+/** The room videos' player (owner, 16 Nov 2026): one sentence, in every provider set, right after the 12Go one. */
+const YOUTUBE_PLAYER =
+  "Some room pages include a video hosted by YouTube (a Google service): the player uses YouTube's privacy-enhanced mode and is loaded only when you press play, after which YouTube receives your IP address and may store data on your device.";
+
+test("privacy, the room videos: every provider set names the YouTube player in one sentence after the 12Go embed (privacy-enhanced mode, loaded only on play), and nowhere else, under the one date of that revision", async () => {
+  const { Privacy } = await loadPages();
+  const envs: Array<[string, Env]> = [...Object.entries(NO_BEAM_CONFIG), ...Object.entries(WITH_BEAM).map(([label, { env }]): [string, Env] => [label, env])];
+  assert.ok(envs.length > 20);
+  for (const [label, env] of envs) {
+    const privacy = textOf(render(Privacy, env));
+    assert.ok(
+      privacy.includes(`Some pages embed third-party content, such as a transport booking widget from 12Go, which may set its own cookies. ${YOUTUBE_PLAYER} You can block or delete cookies in your browser settings.`),
+      label,
+    );
+    assert.equal(privacy.split("YouTube").length - 1, 3, `${label}: named in that sentence only`);
+    // The sentence is in every set, so the page's date ("when it was last revised") is the same in every set.
+    assert.equal(privacy.split("Last updated:").length - 1, 1, label);
+    assert.ok(privacy.includes(`Privacy Policy ${PRIVACY_UPDATED} This policy explains`), label);
+  }
 });

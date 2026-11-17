@@ -5,11 +5,13 @@
 // payment. Shown on the booking page while add-ons are off (the live hold-first modes) and on the paid
 // return page. Built to be reused when breakfast becomes bookable during checkout: `action` replaces the
 // WhatsApp button (e.g. with an Add control) and `note` the payment line. Server-renderable (no state).
+// The heading can take focus (tabIndex -1): the booking page's rate rows link to it (results/RoomOfferCard).
 
 import Image from "next/image";
 import type { ReactNode } from "react";
 import { MessageCircle } from "lucide-react";
 import { site } from "@/data/site";
+import { BREAKFAST_CARD_HEADING_ID } from "@/lib/booking/breakfastLink";
 import { BREAKFAST_ITEMS, BREAKFAST_PHOTO, BREAKFAST_POLICY, BREAKFAST_SATANG_PER_GUEST_PER_NIGHT } from "@/lib/booking/catalogue";
 import { formatStayRange } from "@/lib/booking/dates";
 import { formatThbWhole } from "@/lib/booking/format";
@@ -57,7 +59,7 @@ export interface BreakfastCardProps {
   eyebrow?: string;
   /** h3 inside a step (the results list), h2 as a page section (the return page). */
   headingLevel?: 2 | 3;
-  /** id for the heading (labels the card). */
+  /** id for the heading (labels the card). Default: BREAKFAST_CARD_HEADING_ID, the id the booking page's rate rows link to. */
   headingId?: string;
   /** The prefilled WhatsApp message (default: breakfastWhatsAppMessage()). */
   whatsappMessage?: string;
@@ -72,7 +74,7 @@ export default function BreakfastCard({
   title = "Breakfast at the villa - on request",
   eyebrow,
   headingLevel = 3,
-  headingId = "breakfast-card-title",
+  headingId = BREAKFAST_CARD_HEADING_ID,
   whatsappMessage,
   action,
   note = BREAKFAST_PAYMENT_NOTE,
@@ -99,7 +101,7 @@ export default function BreakfastCard({
 
         <div className="flex min-w-0 flex-col">
           {eyebrow && <p className="text-xs font-semibold uppercase tracking-[0.2em] text-(--bk-link)">{eyebrow}</p>}
-          <Heading id={headingId} className={`bk-heading text-lg leading-snug sm:text-xl${eyebrow ? " mt-1" : ""}`}>
+          <Heading id={headingId} tabIndex={-1} className={`bk-heading text-lg leading-snug focus:outline-none sm:text-xl${eyebrow ? " mt-1" : ""}`}>
             {title}
           </Heading>
           <p className="mt-1">

@@ -12,6 +12,7 @@
 import { useId, useRef, useState } from "react";
 import Image from "next/image";
 import { BedDouble, Check, ChevronDown, ChevronRight, Info, MessageCircle, Ruler, Users, Waves } from "lucide-react";
+import { BREAKFAST_LINK_LABEL } from "@/lib/booking/breakfastLink";
 import { RATE_PLANS } from "@/lib/booking/catalogue";
 import { formatNights } from "@/lib/booking/dates";
 import { formatThb } from "@/lib/booking/format";
@@ -57,6 +58,11 @@ export interface RoomOfferCardProps {
    * "+ {feePct}% payment processing fee", as before.
    */
   feeNote?: readonly string[] | null;
+  /**
+   * The id of the breakfast card's heading while that card is on the page (the hold-first modes): each rate row
+   * then gets a "Breakfast on request: see details" link that scrolls to it. Undefined: no card, so no link.
+   */
+  breakfastCardId?: string;
 }
 
 /**
@@ -80,6 +86,7 @@ export default function RoomOfferCard({
   directCode = null,
   feePct = 0,
   feeNote,
+  breakfastCardId,
 }: RoomOfferCardProps) {
   const maxAdults = Math.max(1, maxAdultsProp ?? offer.maxAdults ?? room.maxGuests);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -213,6 +220,7 @@ export default function RoomOfferCard({
                 directCode={directCode}
                 feePct={feePct}
                 feeNote={feeNote}
+                breakfastCardId={breakfastCardId}
                 onShowPolicy={() => setPolicyPlan(RATE_PLANS[rate.ratePlanId])}
                 onAdd={(adults) => onAdd(rate.ratePlanId, adults)}
               />
@@ -255,6 +263,19 @@ export default function RoomOfferCard({
   );
 }
 
+/**
+ * The rate rows' breakfast link: brings the breakfast card's heading to the top of the page and moves keyboard
+ * focus to it. html's scroll-padding-top (booking.css) keeps it clear of the sticky header. A button rather
+ * than a "#..." link: the booking flow owns this page's history entries, and a hash would add one.
+ */
+function showBreakfastCard(headingId: string): void {
+  const heading = document.getElementById(headingId);
+  if (!heading) return;
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  heading.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  heading.focus({ preventScroll: true });
+}
+
 interface RateRowProps {
   room: CatalogueRoom;
   rate: RateOffer;
@@ -266,11 +287,12 @@ interface RateRowProps {
   directCode: string | null;
   feePct: number;
   feeNote: readonly string[] | null | undefined;
+  breakfastCardId: string | undefined;
   onShowPolicy: () => void;
   onAdd: (adults: number) => void;
 }
 
-function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason, promo, directCode, feePct, feeNote, onShowPolicy, onAdd }: RateRowProps) {
+function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason, promo, directCode, feePct, feeNote, breakfastCardId, onShowPolicy, onAdd }: RateRowProps) {
   const [picking, setPicking] = useState(false);
   const addRef = useRef<HTMLButtonElement>(null);
   const plan = RATE_PLANS[rate.ratePlanId];
@@ -318,6 +340,13 @@ function RateRow({ room, rate, nights, defaultAdults, maxAdults, disabledReason,
             <p className="font-semibold">{rate.ratePlanName}</p>
           )}
           <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-(--bk-text-muted)">{plan.shortDescription}</p>
+          {breakfastCardId && (
+            <p className="mt-1">
+              <button type="button" onClick={() => showBreakfastCard(breakfastCardId)} className={`${BTN_LINK} text-left text-xs`}>
+                {BREAKFAST_LINK_LABEL}
+              </button>
+            </p>
+          )}
         </div>
 
         <div className="col-span-2 flex items-center justify-between gap-4 sm:contents">

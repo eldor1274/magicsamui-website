@@ -9,11 +9,12 @@ export const metadata: Metadata = {
     "How Magic Suites & Villas collects, uses and protects your personal information when you book, contact us or use our website.",
 };
 
-const UPDATED = "15 August 2026";
-/** Date of the Stripe wording below (shown only once Stripe is the configured payment provider). */
-const UPDATED_STRIPE = "5 October 2026";
-/** Date of the Beam wording below (shown only while a Beam config exists: Beam design S5.4). */
-const UPDATED_BEAM = "24 October 2026";
+/**
+ * The day the policy was last revised: one date for every payment setup since the sentence on the room videos'
+ * YouTube player, which every setup shows. Until then the date followed the wording shown: 15 August 2026,
+ * 5 October 2026 with the Stripe wording, 24 October 2026 with the Beam wording (Beam design S5.4).
+ */
+const UPDATED = "17 November 2026";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -93,7 +94,7 @@ export default function PrivacyPage() {
     <div className="mx-auto max-w-3xl px-5 py-16">
       <p className="text-sm uppercase tracking-[0.3em] text-pool">Legal</p>
       <h1 className="mt-3 font-serif text-4xl text-ink">Privacy Policy</h1>
-      <p className="mt-4 text-sm text-ink-soft">Last updated: {beam ? UPDATED_BEAM : stripe ? UPDATED_STRIPE : UPDATED}</p>
+      <p className="mt-4 text-sm text-ink-soft">Last updated: {UPDATED}</p>
 
       <p className="mt-8 text-ink-soft">
         This policy explains what personal information {site.name} collects, why
@@ -225,6 +226,12 @@ export default function PrivacyPage() {
         <p>
           Some pages embed third-party content, such as a transport booking
           widget from 12Go, which may set its own cookies.
+        </p>
+        <p>
+          Some room pages include a video hosted by YouTube (a Google service):
+          the player uses YouTube&apos;s privacy-enhanced mode and is loaded
+          only when you press play, after which YouTube receives your IP address
+          and may store data on your device.
         </p>
         <p>
           You can block or delete cookies in your browser settings. Doing so may

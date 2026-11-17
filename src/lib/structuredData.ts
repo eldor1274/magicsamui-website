@@ -1,9 +1,11 @@
 // Relative .ts imports (not "@/"), so node --test can load this module too.
 import { CLOUDBEDS_ROOM_NAMES, SLUG_TO_ROOM_TYPE } from "../data/cloudbeds.ts";
 import { rooms, type Room } from "../data/rooms.ts";
+import { getRoomWalkthrough } from "../data/roomWalkthroughs.ts";
 import { site } from "../data/site.ts";
 import { villas } from "../data/villas.ts";
 import { ROOM_UNITS, UNIT_NAMES } from "./booking/catalogue.ts";
+import { isoDuration, walkthroughHeading } from "./roomWalkthrough.ts";
 
 const BASE = `https://${site.domain}`;
 
@@ -105,6 +107,26 @@ export function roomJsonLd(room: Room) {
       availability: "https://schema.org/InStock",
       url: `${BASE}/rooms/${room.slug}`,
     },
+  };
+}
+
+/**
+ * The room page's video as a schema.org VideoObject, or null for a room without one (data/roomWalkthroughs.ts).
+ * Verified facts only: YouTube's own title, publish time, length and embed URL, and the poster photo the page
+ * shows. No contentUrl: YouTube publishes no stable media-file URL, so there is nothing true to put there.
+ */
+export function roomVideoJsonLd(room: Room) {
+  const video = getRoomWalkthrough(room.slug);
+  if (!video) return null;
+  return {
+    "@context": "https://schema.org",
+    "@type": "VideoObject",
+    name: video.title,
+    description: `${walkthroughHeading(video)} of the ${room.name} at ${site.name}, Koh Samui.${video.note ? ` ${video.note}` : ""}`,
+    thumbnailUrl: `${BASE}${video.posterSrc}`,
+    uploadDate: video.publishedAt,
+    duration: isoDuration(video.durationSeconds),
+    embedUrl: `https://www.youtube.com/embed/${video.youtubeId}`,
   };
 }
 

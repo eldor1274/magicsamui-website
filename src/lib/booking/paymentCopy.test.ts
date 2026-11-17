@@ -13,9 +13,14 @@ import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
+import { getRoomBySlug } from "../../data/rooms.ts";
+import { roomWalkthroughs } from "../../data/roomWalkthroughs.ts";
 import { site } from "../../data/site.ts";
+import { walkthroughFrameTitle, walkthroughPlayLabel } from "../roomWalkthrough.ts";
 import { buildOffers } from "./availability.ts";
 import { BEAM_LIVE_ENV, BEAM_LIVE_STOPPED_ENV, BEAM_TEST_ENV, makeBeamKit } from "./beamTestkit.ts";
+import { BREAKFAST_CARD_HEADING_ID, BREAKFAST_LINK_LABEL } from "./breakfastLink.ts";
+import { RATE_PLANS } from "./catalogue.ts";
 import { createBookingAnalytics } from "./clientAnalytics.ts";
 import type { RecordedBookingEvent } from "./clientAnalytics.ts";
 import { getPublicBookingConfig, toPublicConfig } from "./config.ts";
@@ -45,6 +50,7 @@ import type { AvailabilityResponse, CartItem, PayMethod, PaymentMode, PublicBook
 
 type StateModule = typeof import("../../components/booking/state.ts");
 type BookingState = import("../../components/booking/state.ts").BookingState;
+type ResultsListProps = import("../../components/booking/results/ResultsList.tsx").ResultsListProps;
 
 const MOCK_ENV: Env = { BOOKING_PAYMENT_PROVIDER: "stripe", BOOKING_STRIPE_MOCK: "true" };
 const LOCKED_STRIPE_ENV: Env = { BOOKING_PAYMENT_PROVIDER: "stripe", STRIPE_SECRET_KEY: "sk_live_abcdefghijkl" };
@@ -108,6 +114,9 @@ function hookBookingPage(): void {
         const font = "export function Poppins() { return { className: 'stub-poppins', variable: 'stub-poppins-var', style: { fontFamily: 'stub' } }; }";
         return { url: `data:text/javascript,${encodeURIComponent(font)}`, shortCircuit: true };
       }
+      // The room video block (the last test) imports the Book button, and with it next/link and next/navigation:
+      // CommonJS files that Node's resolver only finds by their full name.
+      if (specifier === "next/link" || specifier === "next/navigation") return nextResolve(`${specifier}.js`, context);
       if (specifier.startsWith("@/")) return probe(new URL(`../../${specifier.slice(2)}`, import.meta.url)) ?? nextResolve(specifier, context);
       const parent = context.parentURL;
       if (specifier.startsWith(".") && parent?.startsWith("file:") && fileURLToPath(parent).startsWith(src)) {
@@ -947,8 +956,8 @@ test("the secure-payment window ('Learn more', round 7): every Beam page shows b
   assert.ok(src.includes("  if (config && beam) {") && src.includes("      feeNote: beam.feeNote,"));
 });
 
-/** The results list for a page with this config (its rooms and its fee notes). */
-async function renderResults(cfg: PublicBookingConfig): Promise<string> {
+/** The results list for a page with this config (its rooms and its fee notes); `extra` adds or replaces props. */
+async function renderResults(cfg: PublicBookingConfig, extra: Partial<ResultsListProps> = {}): Promise<string> {
   const { ResultsList } = await loadResultsAndModal();
   const noop = () => undefined;
   return withoutWindow(() =>
@@ -964,6 +973,7 @@ async function renderResults(cfg: PublicBookingConfig): Promise<string> {
           onAdd: noop,
           onRetry: noop,
           onChangeDates: noop,
+          ...extra,
         }),
       ),
     ),
@@ -1025,5 +1035,77 @@ test("room cards (round 7): every Beam page shows resultsFeeNotes' short lines u
       assert.equal(row.priceClass, "sm:text-right", name);
       assert.deepEqual(row.lines.slice(1), c.cardFeePct > 0 ? [`+ ${c.cardFeePct}% payment processing fee`] : [], name);
     }
+  }
+});
+
+test("breakfast link (owner, 16 Nov 2026): while the results list shows the breakfast card, every rate row says 'Breakfast on request: see details' in its description column - the price column and its fee lines untouched - and there is no link without the card, without its id, or when no room can be booked", async () => {
+  hookBookingPage();
+  const BreakfastCard = await withoutWindow(async () => (await import("../../components/booking/breakfast/BreakfastCard.tsx")).default);
+  const card = createElement(BreakfastCard, {});
+  const links = (html: string) => html.split(`>${BREAKFAST_LINK_LABEL}</button>`).length - 1;
+  const heading = `<h3 id="${BREAKFAST_CARD_HEADING_ID}" tabindex="-1"`;
+  const pages: Record<string, PublicBookingConfig> = { "stripe-live": config(STRIPE_LIVE_ENV), "stripe-test": config(STRIPE_TEST_ENV), "beam-playground": beamPage(), "beam-live": beamLivePage() };
+  for (const [name, cfg] of Object.entries(pages)) {
+    assert.equal(cfg.addonsEnabled, false, `${name}: the booking page passes the card and its id`);
+    const html = await renderResults(cfg, { afterRooms: card, breakfastCardId: BREAKFAST_CARD_HEADING_ID });
+    const rows = rateRows(html);
+    assert.ok(rows.length > 0, name);
+    assert.equal(links(html), rows.length, `${name}: one link in every rate row`);
+    // Right after the rate's description and before the price column...
+    const before = `${esc(RATE_PLANS.standard.shortDescription)}</p><p class="mt-1"><button type="button" class="`;
+    const after = `">${BREAKFAST_LINK_LABEL}</button></p></div><div class="col-span-2 flex items-center justify-between gap-4 sm:contents">`;
+    assert.equal(html.split(before).length - 1, rows.length, name);
+    assert.equal(html.split(after).length - 1, rows.length, name);
+    // ...so every row's grid, price column and fee lines are what they are without the link.
+    assert.deepEqual(rows, rateRows(await renderResults(cfg)), name);
+    // The link's target is on the page once: the card's heading, which a script can focus.
+    assert.equal(html.split(heading).length - 1, 1, name);
+    // No card, or no id: no link.
+    assert.equal(links(await renderResults(cfg, { breakfastCardId: BREAKFAST_CARD_HEADING_ID })), 0, `${name}: an id without the card`);
+    assert.equal(links(await renderResults(cfg, { afterRooms: card })), 0, `${name}: the card without an id`);
+    assert.equal(links(await renderResults(cfg)), 0, `${name}: neither`);
+    // No room can be booked: no rate rows, so no link - with the card (a room is offered on request) or without it (fully booked).
+    const data = availabilityFor(cfg);
+    const none = (keepOnRequest: boolean): AvailabilityResponse => ({
+      ...data,
+      offers: data.offers.map((o) => ({ ...o, available: false, unavailableReason: keepOnRequest && o.unavailableReason === "not-bookable" ? "not-bookable" : "sold-out", remaining: 0, rates: [] })),
+    });
+    const full = await renderResults(cfg, { availability: none(false), afterRooms: card, breakfastCardId: BREAKFAST_CARD_HEADING_ID });
+    assert.ok(full.includes("Fully booked for these dates") && !full.includes(heading), `${name}: fully booked, no card`);
+    assert.equal(links(full), 0, `${name}: fully booked`);
+    assert.ok(data.offers.some((o) => o.unavailableReason === "not-bookable"), `${name}: the fixture has a room on request`);
+    const onRequest = await renderResults(cfg, { availability: none(true), afterRooms: card, breakfastCardId: BREAKFAST_CARD_HEADING_ID });
+    assert.equal(onRequest.split(heading).length - 1, 1, `${name}: only a room on request, the card is shown`);
+    assert.equal(links(onRequest), 0, `${name}: no rate row, no link`);
+  }
+});
+
+// Here rather than in roomWalkthrough.test.ts (which pins the component's source): this file has the loader for components.
+test("room videos, before the tap (owner, 16 Nov 2026), as rendered: each room's block is its poster through this site's image route, one play button and the caption - no frame, script, stylesheet or media element, no address of another host in any attribute or text, and the video's id nowhere", async () => {
+  hookBookingPage();
+  const RoomWalkthrough = await withoutWindow(async () => (await import("../../components/RoomWalkthrough.tsx")).default);
+  assert.equal(Object.keys(roomWalkthroughs).length, 6);
+  for (const [slug, video] of Object.entries(roomWalkthroughs)) {
+    const room = getRoomBySlug(slug);
+    assert.ok(room, slug);
+    const label = walkthroughPlayLabel(video);
+    // The props the room page passes (app/rooms/[slug]/page.tsx); the HTML is what a visitor gets before any script runs.
+    const props = { slug, youtubeId: video.youtubeId, orientation: video.orientation, posterSrc: video.posterSrc, playLabel: label, frameTitle: walkthroughFrameTitle(room.shortName, video), note: video.note };
+    const html = await withoutWindow(() => renderToStaticMarkup(createElement(RoomWalkthrough, props)));
+    assert.equal(html.split("<img ").length - 1, 1, slug);
+    assert.equal(html.split("<button ").length - 1, 1, slug);
+    assert.ok(html.includes(`<button type="button" class="`) && html.includes(`>${esc(label)}</span></button>`), slug);
+    assert.ok(html.endsWith(`>The video is hosted on YouTube and loads when you press play.${video.note ? ` ${esc(video.note)}` : ""}</p></div>`), slug);
+    // Nothing that loads or runs by itself.
+    assert.doesNotMatch(html, /<(iframe|script|link|style|video|audio|source|track|object|embed)\b/i, slug);
+    // Every address in the markup is the room's poster through this site's own image route...
+    const poster = `/_next/image?url=${encodeURIComponent(video.posterSrc)}&amp;w=`;
+    const addresses = [...html.matchAll(/\s(?:src|srcset|href|poster|action|data)="([^"]*)"/gi)].flatMap((m) => m[1].split(", "));
+    assert.ok(addresses.length > 2 && addresses.every((a) => a.startsWith(poster)), slug);
+    // ...and nothing else points anywhere: with the icon's SVG namespace set aside (a name, never fetched), the markup
+    // holds no scheme, no "//", no url() and no video host - in any attribute or in the text - and not the video's id.
+    const rest = html.replace(/ xmlns="http:\/\/www\.w3\.org\/2000\/svg"/g, "");
+    assert.doesNotMatch(rest, /https?:|\/\/|url\(|youtube\.|youtu\.be|ytimg|googlevideo|google\./i, slug);
+    assert.ok(!html.includes(video.youtubeId), slug);
   }
 });

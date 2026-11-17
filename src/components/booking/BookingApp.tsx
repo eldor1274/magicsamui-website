@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { fetchAvailability, isAllowedPaymentRedirect, postAbandon, postCheckout, recallLinkToken, rememberLinkToken } from "@/lib/booking/apiClient";
+import { BREAKFAST_CARD_HEADING_ID } from "@/lib/booking/breakfastLink";
 import { POLICY_VERSION, getCatalogueRoom } from "@/lib/booking/catalogue";
 import { abandonVerdict, attemptOf, attemptPayableMs, tracksAttempts } from "@/lib/booking/checkoutAttempt";
 import { createBookingAnalytics } from "@/lib/booking/clientAnalytics";
@@ -874,6 +875,8 @@ export default function BookingApp({
                           <BreakfastCard whatsappMessage={breakfastWhatsAppMessage({ checkIn: stayIn, checkOut: stayOut })} />
                         )
                       }
+                      // Each rate row links to that card: the same condition, so there is never a link without the card.
+                      breakfastCardId={addonsEnabled ? undefined : BREAKFAST_CARD_HEADING_ID}
                     />
                   </>
                 )}

@@ -5,9 +5,12 @@ import { BedDouble, Users, Bath, Ruler, Star, Check } from "lucide-react";
 import BookNowButton from "@/components/BookNowButton";
 import JsonLd from "@/components/JsonLd";
 import RoomGallery from "@/components/RoomGallery";
+import RoomWalkthrough from "@/components/RoomWalkthrough";
 import { rooms, getRoomBySlug } from "@/data/rooms";
+import { getRoomWalkthrough } from "@/data/roomWalkthroughs";
 import { airbnbRoomRatings, reviewStats, roomReviews } from "@/data/reviews";
-import { roomJsonLd, breadcrumbJsonLd } from "@/lib/structuredData";
+import { walkthroughFrameTitle, walkthroughHeading, walkthroughPlayLabel } from "@/lib/roomWalkthrough";
+import { roomJsonLd, roomVideoJsonLd, breadcrumbJsonLd } from "@/lib/structuredData";
 
 export function generateStaticParams() {
   return rooms.map((room) => ({ slug: room.slug }));
@@ -46,10 +49,14 @@ export default async function RoomPage({
 
   const suiteReviews = roomReviews[room.slug];
   const suiteRating = airbnbRoomRatings[room.slug];
+  // The room's video, where it has a verified one (data/roomWalkthroughs.ts): the block after the Overview, and its VideoObject.
+  const walkthrough = getRoomWalkthrough(room.slug);
+  const videoJsonLd = roomVideoJsonLd(room);
 
   return (
     <>
       <JsonLd data={roomJsonLd(room)} />
+      {videoJsonLd && <JsonLd data={videoJsonLd} />}
       <JsonLd
         data={breadcrumbJsonLd([
           { name: "Home", path: "/" },
@@ -128,6 +135,21 @@ export default async function RoomPage({
               {p}
             </p>
           ))}
+
+          {walkthrough && (
+            <>
+              <h2 className="pt-6 font-serif text-2xl text-ink">{walkthroughHeading(walkthrough)}</h2>
+              <RoomWalkthrough
+                slug={room.slug}
+                youtubeId={walkthrough.youtubeId}
+                orientation={walkthrough.orientation}
+                posterSrc={walkthrough.posterSrc}
+                playLabel={walkthroughPlayLabel(walkthrough)}
+                frameTitle={walkthroughFrameTitle(room.shortName, walkthrough)}
+                note={walkthrough.note}
+              />
+            </>
+          )}
 
           <h2 className="pt-6 font-serif text-2xl text-ink">Amenities</h2>
           <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
