@@ -451,7 +451,8 @@ export function averageNightlySatang(line: QuoteLine): number {
 /**
  * Validates a promo code. `promoPct` comes from server config (0 = promos
  * switched off, as in every Beam mode). Returns null for an empty code. Only
- * DIRECT (any case) is recognised, and only the demo hints at it.
+ * DIRECT (any case) is recognised. An unknown code is answered without naming
+ * another code or promising a price, in the demo too (rate parity, 2026-11-16).
  */
 export function resolvePromo(code: string | null | undefined, promoPct: number, validCode = "DIRECT"): PromoResult | null {
   const normalized = (code ?? "").trim().toUpperCase();
@@ -462,8 +463,7 @@ export function resolvePromo(code: string | null | undefined, promoPct: number, 
   if (normalized === validCode && promoPct > 0) {
     return { code: normalized, valid: true, pct: promoPct, label: `Direct booking discount (${promoPct}%)` };
   }
-  const hint = promoPct > 0 ? ` Try ${validCode} for our best direct rate.` : "";
-  return { code: normalized, valid: false, message: `We don't recognise the code ${normalized}.${hint}` };
+  return { code: normalized, valid: false, message: `We don't recognise the code ${normalized}.` };
 }
 
 /** PromoResult.label of the Cloudbeds Direct rate (the quote adds " - code DIRECT"). */
@@ -479,7 +479,10 @@ export function promoInputOffered(config: Pick<PublicBookingConfig, "promoEnable
   return config.promoEnabled || config.promoMode === "classic-only";
 }
 
-/** The code the page suggests ("Use code DIRECT..."), or null where no code can lower the price. */
+/**
+ * Non-null (the DIRECT alias) where a code can lower the price, null where none can. The pages no longer print it
+ * (rate parity, 2026-11-16): the results bar only says where a code goes (SearchBar: "Have a promo code? Add it above.").
+ */
 export function promoCodeHint(config: Pick<PublicBookingConfig, "promoEnabled" | "promoCode">): string | null {
   return config.promoEnabled ? (config.promoCode ?? "DIRECT") : null;
 }

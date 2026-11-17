@@ -513,10 +513,17 @@ test("the preview is tracked only while it takes real payments (stripe-live on p
   assert.equal(getPublicBookingConfig({ ...STRIPE_LIVE_ENV, VERCEL_ENV: "preview" }).live, false);
 });
 
-test("landing descriptions drop the best-rate promise only while the own engine serves /booking without the Direct rate", async () => {
-  const { descriptionForEngine, landings } = await import("../../data/landings.ts");
+test("landing descriptions carry no best-rate promise (rate parity, 2026-11-16); the guard still drops the former clause while the own engine serves /booking without the Direct rate", async () => {
+  const { OWN_ENGINE_DESCRIPTION_CLAUSE, descriptionForEngine, landings } = await import("../../data/landings.ts");
   for (const t of Object.values(landings)) {
+    const [bestRate, neutral] = OWN_ENGINE_DESCRIPTION_CLAUSE[t.code];
+    assert.ok(t.description.endsWith(neutral) && !t.description.includes(bestRate), `${t.code}: the neutral clause, in every state`);
     assert.equal(descriptionForEngine(t, false), t.description);
-    assert.notEqual(descriptionForEngine(t, true), t.description, `${t.code}: clause found and replaced`);
+    assert.equal(descriptionForEngine(t, true), t.description, `${t.code}: nothing to replace today`);
+    // The guard itself: the former clause, should it come back, is replaced by the neutral one.
+    const old = { code: t.code, description: t.description.replace(neutral, bestRate) };
+    assert.notEqual(old.description, t.description);
+    assert.equal(descriptionForEngine(old, false), old.description);
+    assert.equal(descriptionForEngine(old, true), t.description, `${t.code}: clause found and replaced`);
   }
 });

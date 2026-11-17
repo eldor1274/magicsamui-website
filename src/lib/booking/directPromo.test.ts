@@ -5,7 +5,8 @@
 // CLOUDBEDS_PROMO_CODE), availability with and without the code, the combined
 // base + derived stay rules, the hold (roomRateID + promoCode), Cloudbeds
 // pricing the hold at the base rate, the classic-page note when the code can't
-// be applied, the DIRECT copy swap, GA4 coupon, and the demo staying as it was.
+// be applied, the public copy (since 2026-11-16 it names no code and promises
+// no price: rate parity), GA4 coupon, and the demo staying as it was.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -651,27 +652,86 @@ test("GA4 coupon carries the code on the Direct rate (begin_checkout / add_payme
 
 /* ----------------------------------- copy ---------------------------------- */
 
-test("DIRECT copy: the own engine keeps it while it honours DIRECT; swapped only with the flag off (or no Cloudbeds rates); default pages unchanged", () => {
+test("directCopySwapped: true only for the own engine that does not honour codes (the flag off, or no Cloudbeds rates); it now only feeds the language pages' guard", () => {
   const own = { ...STRIPE_LIVE_ENV, BOOKING_ENGINE: "own" };
   assert.equal(directCopySwapped({}), false, "public default (BOOKING_ENGINE unset)");
-  assert.equal(directCopySwapped({ ...STRIPE_LIVE_ENV, BOOKING_DIRECT_PROMO: "off" }), false, "the classic engine always keeps DIRECT");
-  assert.equal(directCopySwapped(own), false, "own engine honouring DIRECT: same copy as the classic engine");
+  assert.equal(directCopySwapped({ ...STRIPE_LIVE_ENV, BOOKING_DIRECT_PROMO: "off" }), false, "the classic engine");
+  assert.equal(directCopySwapped(own), false, "own engine honouring DIRECT");
   assert.equal(directCopySwapped({ ...own, BOOKING_DIRECT_PROMO: "off" }), true);
   assert.equal(directCopySwapped({ ...MOCK_ENV, BOOKING_ENGINE: "own" }), true, "own engine without Cloudbeds rates");
   assert.equal(directCopySwapped({ ...own, BOOKING_ALLOW_LIVE_PAYMENTS: "false" }), false, "emergency stop: /booking is the classic engine again");
 });
 
-test("every page that swaps the DIRECT copy asks directCopySwapped() (not just 'is the own engine on')", () => {
+test("the language pages' guard asks directCopySwapped() (not just 'is the own engine on'); the homepage, /booking and the site-wide description have one neutral copy and nothing to swap", () => {
   const src = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
-  const pages = ["app/page.tsx", "app/booking/page.tsx", "app/layout.tsx", "components/LocalizedLanding.tsx", ...["he", "ru", "fr", "de", "zh", "es", "th"].map((c) => `app/${c}/page.tsx`)];
-  for (const p of pages) {
+  const guarded = ["components/LocalizedLanding.tsx", ...["he", "ru", "fr", "de", "zh", "es", "th"].map((c) => `app/${c}/page.tsx`)];
+  for (const p of guarded) {
     const s = src(p);
     assert.ok(s.includes("directCopySwapped()"), `${p} uses directCopySwapped()`);
     assert.doesNotMatch(s, /(perksForEngine|descriptionForEngine)\([^)]*resolveBookingEngine/, `${p}: no engine-only swap`);
   }
-  assert.doesNotMatch(src("app/page.tsx"), /resolveBookingEngine\(\) === "own"\s*\?\s*\/\/ Promo/, "homepage perks follow directCopySwapped");
-  assert.match(src("app/booking/page.tsx"), /description:\s*\r?\n\s*directCopySwapped\(\)/);
-  assert.match(src("app/layout.tsx"), /description:\s*\r?\n\s*directCopySwapped\(\)/);
+  // Rate parity (owner, 2026-11-16): these three say the same in every state, so they read no promo switch.
+  for (const p of ["app/page.tsx", "app/booking/page.tsx", "app/layout.tsx"]) {
+    assert.doesNotMatch(src(p), /directCopySwapped|OWN_ENGINE_PERK/, `${p}: one copy, nothing to swap`);
+  }
+  assert.match(src("app/page.tsx"), /title: "Book direct, instantly",\s*text: "Live availability and secure payment\.",/);
+  assert.ok(src("app/page.tsx").includes("{directPerks.map(({ icon: Icon, title, text }) => ("));
+  assert.match(src("app/booking/page.tsx"), /description:\s*"Check live availability and book [^"]* — free airport or pier pickup on stays of 2\+ nights\.",/);
+  assert.match(src("app/layout.tsx"), /description:\s*"Koh Samui villas and suites[^"]* Book direct with live prices\.",/);
+});
+
+test("rate parity (owner, 2026-11-16): no public page names the DIRECT code or claims the best, a lower or a cheaper price; a guest who was given a code can still enter it", async () => {
+  const repo = (path: string) => readFileSync(new URL(`../../../${path}`, import.meta.url), "utf8");
+  const PRICE_CLAIM = /best[\s-]+(?:direct[\s-]+)?(?:rate|price|deal)s?|beats?\s+any|cheap(?:er|est)|lowest|price[\s-]+match/i;
+  // Everything these files hold, comments included: the homepage, the site-wide and /booking descriptions, the classic
+  // booking page with its hint, the own page's search bar, code picker and search step, and the file for AI assistants.
+  // Not in this list (owner decision open, 2026-11-17; docs/booking-engine.md, section 1): the guest points page
+  // (src/app/points/page.tsx, src/components/PointsLookup.tsx), which still describes points as money off a stay booked directly.
+  for (const path of [
+    "src/app/page.tsx",
+    "src/app/layout.tsx",
+    "src/app/booking/page.tsx",
+    "src/components/ClassicBookingPage.tsx",
+    "src/components/PromoHint.tsx",
+    "src/components/booking/search/SearchBar.tsx",
+    "src/components/booking/search/PromoPopover.tsx",
+    "src/components/booking/search/SearchStep.tsx",
+    "public/llms.txt",
+  ]) {
+    const text = repo(path);
+    assert.doesNotMatch(text, /\bDIRECT\b/, `${path} names the code`);
+    assert.doesNotMatch(text, PRICE_CLAIM, `${path} claims a price`);
+  }
+  assert.match(repo("public/llms.txt"), /Booking direct at https:\/\/magicsamui\.com\/booking shows live availability\s+and prices, includes a free transfer/);
+  // Its guest points line only points to the page: the file AI assistants read offers no money off for booking direct.
+  assert.match(repo("public/llms.txt"), /^- \[Guest points\]\(https:\/\/magicsamui\.com\/points\): check your guest points balance\r?$/m);
+  assert.doesNotMatch(repo("public/llms.txt"), /\boff\s+(?:a\s+|your\s+)?direct\b|\bdiscount|%\s+of\s+every\s+stay/i, "public/llms.txt offers money off for booking direct");
+  // The seven language pages, as rendered: the description and the four perks of each (no price words in its language).
+  const { landings, OWN_ENGINE_DESCRIPTION_CLAUSE, descriptionForEngine, perksForEngine } = await import("../../data/landings.ts");
+  const claims: Record<string, RegExp> = { he: /המחיר הטוב|זול/, ru: /лучш|дешев/i, fr: /meilleur|bat tous/i, de: /\bbeste[nr]?\b|günstig/i, zh: /最优|划算/, es: /mejor precio|supera/i, th: /ราคาดี|ถูกกว่า/ };
+  assert.deepEqual(Object.keys(claims).sort(), Object.keys(landings).sort());
+  for (const t of Object.values(landings)) {
+    assert.equal(t.perks.length, 4, t.code);
+    for (const text of [t.description, ...t.perks.flatMap((p) => [p.title, p.text])]) {
+      assert.doesNotMatch(text, /DIRECT/, `${t.code}: ${text}`);
+      assert.doesNotMatch(text, claims[t.code], `${t.code}: ${text}`);
+    }
+    const [bestRateClause, neutralClause] = OWN_ENGINE_DESCRIPTION_CLAUSE[t.code];
+    assert.ok(!t.description.includes(bestRateClause) && t.description.includes(neutralClause), `${t.code}: the neutral clause`);
+    // So the guard has nothing to swap, with the promo switch on or off.
+    assert.deepEqual(perksForEngine(t.perks, t.code, true), t.perks, t.code);
+    assert.equal(descriptionForEngine(t, true), t.description, t.code);
+  }
+  // Kept for guests who were given a code: the "Add Code" pill and its picker, a typed DIRECT, a link carrying a code.
+  const bar = repo("src/components/booking/search/SearchBar.tsx");
+  assert.ok(bar.includes('{promoCode || "Add Code"}') && bar.includes("<PromoPopover"));
+  assert.ok(repo("src/components/booking/search/PromoPopover.tsx").includes("Have a code? Enter it here."));
+  assert.ok(repo("src/components/PromoHint.tsx").includes("Have a promo code? Enter it at checkout."));
+  // With ?promo= in the link the classic page's note is conditional: that page can't see whether Cloudbeds accepted the code.
+  assert.ok(repo("src/components/PromoHint.tsx").includes("Where your promo code applies, the prices below already include it."));
+  assert.doesNotMatch(repo("src/components/PromoHint.tsx"), /(?:code|discount) is applied/);
+  assert.deepEqual(resolvePromoFor("direct", getBookingConfig(STRIPE_TEST_ENV).promo, "/booking"), { code: "DIRECT", valid: true, pct: 0, label: "Direct rate" });
+  assert.ok(repo("src/components/booking/OwnBookingPage.tsx").includes("one(sp.promo)"), "?promo= from a link is still applied");
 });
 
 /* ------------------------------------ UI ----------------------------------- */
@@ -686,12 +746,11 @@ test("booking page UI: Direct prices struck through with the label, the not-appl
   assert.ok(ui("results/ResultsList.tsx").includes("availability.promo.pct > 0"));
   assert.ok(ui("summary/ReservationSummary.tsx").includes("line.listRoomSatang") && ui("checkout/PaymentStep.tsx").includes("line.listRoomSatang"));
   assert.ok(ui("search/SearchBar.tsx").includes("promoVerdict.link") && ui("search/PromoPopover.tsx").includes("note.link"));
-  // The DIRECT hint and the "Best direct rate" perk only where the code lowers the price (never on the classic-only note page).
-  assert.ok(ui("search/PromoPopover.tsx").includes("Use code ${hint} for our best direct rate."));
-  assert.ok(ui("search/SearchStep.tsx").includes("!props.promoCodeHint ? OWNER_PERK : promoPerk(props.promoCodeHint)"));
-  // The Direct plan is confirmed on the Honeymoon Suite only: the perk must not promise the code works on every room.
-  assert.ok(ui("search/SearchStep.tsx").includes("Use code ${code} for our best direct rate."));
-  assert.doesNotMatch(ui("search/SearchStep.tsx"), /every room/i, "the DIRECT perk must not promise every room");
+  // Rate parity (2026-11-16): the code picker and the search step name no code and promise no price, whatever the promo mode.
+  assert.ok(ui("search/PromoPopover.tsx").includes('<p className="mt-2 text-xs text-(--bk-text-subtle)">Have a code? Enter it here.</p>'));
+  assert.doesNotMatch(ui("search/PromoPopover.tsx"), /hintCode|Use code/);
+  assert.ok(ui("search/SearchStep.tsx").includes("{[OWNER_PERK, ...perks].map("));
+  assert.doesNotMatch(ui("search/SearchStep.tsx"), /promoPerk|BadgePercent|Use code|every room/i);
   assert.ok(ui("BookingApp.tsx").includes("promoInputOffered(config)") && ui("OwnBookingPage.tsx").includes("promoInputOffered(config)"));
   const route = readFileSync(new URL("../../app/api/booking/availability/route.ts", import.meta.url), "utf8");
   // The route asks Cloudbeds as promoAskFor says (DIRECT -> CLOUDBEDS_PROMO_CODE, any other code looked up first) and
@@ -700,15 +759,17 @@ test("booking page UI: Direct prices struck through with the label, the not-appl
   assert.ok(route.includes("searchPromoVerdict(search.promo, promoSettings, config.classicBookingPath, result)"));
 });
 
-test("results step: with no code entered, the bar above the results invites the DIRECT code (arrivals with dates skip the search step's perk)", () => {
+test("results step: with no code entered, the bar above the results says where a promo code goes - it names no code and promises no price (rate parity)", () => {
   const ui = (path: string) => readFileSync(new URL(`../../components/booking/${path}`, import.meta.url), "utf8");
   const bar = ui("search/SearchBar.tsx");
   // Only while no code is typed, and only where a code lowers the price (promoCodeHint is null in the classic-only and off modes).
   assert.ok(bar.includes('codeHint={promoEnabled && promoCode === "" ? promoCodeHint : null}'));
-  assert.match(bar, /\} else if \(compact && codeHint\) \{[\s\S]{0,300}?content = `Have code \$\{codeHint\}\? Add it above for our best direct rate\.`;/);
+  assert.match(bar, /\} else if \(compact && codeHint\) \{[\s\S]{0,300}?content = "Have a promo code\? Add it above\.";/);
+  assert.doesNotMatch(bar, /\$\{(codeHint|promoCodeHint)\}/, "the code itself is never printed");
+  assert.ok(bar.includes("promoCodeHint = null,"), "no code by default");
   // It goes after the code verdicts and the missing-dates prompts (an applied or refused code says so instead).
   assert.ok(bar.indexOf("compact && codeHint") > bar.indexOf('"Choose your dates to see prices."'));
-  assert.doesNotMatch(bar, /Have code[^`]*at checkout/, "the code is entered in this bar, not at a later step");
+  assert.doesNotMatch(bar, /Have (?:a promo )?code[^"`]*at checkout/, "the code is entered in this bar, not at a later step");
   const app = ui("BookingApp.tsx");
   assert.ok(app.includes("promoCodeHint: promoCodeHint(config),") && app.includes('<SearchBar {...searchBarProps} variant="compact" />'));
 });

@@ -45,7 +45,7 @@ const groupStaysLine = new RegExp(
 test("home and /rooms descriptions: true, and they name the group stays", () => {
   const layout = repoFile("src/app/layout.tsx");
   const descriptions = [...layout.matchAll(/"(Koh Samui villas and suites[^"]*)"/g)].map((m) => m[1]);
-  assert.equal(descriptions.length, 2, "both engine variants");
+  assert.equal(descriptions.length, 1, "one description, whichever engine serves /booking (rate parity, 2026-11-16)");
   for (const d of descriptions) {
     assert.ok(d.length <= 160, `${d.length} characters: ${d}`);
     assert.match(d, /most with a private pool/);

@@ -82,6 +82,13 @@ export const DEFAULT_CLOUDBEDS_PROMO_CODE = "Direct";
  * ("Last minute 10% off", "Long term booking", and any "Early bird..." plan the owner creates).
  */
 export const DEFAULT_AUTO_DISCOUNT_PLANS = ["Last minute", "Long term", "Early bird"];
+/**
+ * The website's main rate (owner decision, 2026-11-16: rate parity with Booking.com): the Cloudbeds plan whose public
+ * name starts with "Website" (e.g. "Website rate": derived from the base rate, no promo code) is sold automatically as
+ * every room's price. This prefix is always one of the automatic plan prefixes while BOOKING_AUTO_DISCOUNTS is on,
+ * whatever BOOKING_AUTO_DISCOUNT_PLANS lists (withWebsiteRatePlan). With no such plan in Cloudbeds nothing changes.
+ */
+export const WEBSITE_RATE_PLAN_PREFIX = "Website";
 export const MAX_NIGHTS = 30;
 export const BOOKING_WINDOW_MONTHS = 18;
 export const MAX_SEARCH_ADULTS = 18;
@@ -190,9 +197,9 @@ export interface CloudbedsReadSettings {
   propertyId: string | null;
   baseRateOnly: boolean;
   /**
-   * Automatic discounts (resolveAutoDiscountPlans): name prefixes of the Cloudbeds discount plans sold
-   * without a code next to the base rate. Empty or absent = none (the flag is off, not a Stripe mode, or no
-   * usable name in BOOKING_AUTO_DISCOUNT_PLANS).
+   * Automatic plans (autoDiscountPlansFor): name prefixes of the Cloudbeds plans sold without a code next to the
+   * base rate - BOOKING_AUTO_DISCOUNT_PLANS and, always, the website's main rate (WEBSITE_RATE_PLAN_PREFIX).
+   * Empty or absent = none (the flag is off, or not a Stripe or Beam mode).
    */
   autoDiscountPlans?: string[];
 }
@@ -210,9 +217,9 @@ export interface BookingConfig {
   /**
    * Read-side Cloudbeds access (availability). baseRateOnly (Stripe and Beam): only the
    * base (BAR) row is sold, never another rate plan under the Standard label -
-   * except the Direct rate for the code and the automatic discount plans
-   * (autoDiscountPlans: BOOKING_AUTO_DISCOUNT_PLANS while BOOKING_AUTO_DISCOUNTS
-   * is on, Stripe and Beam only; empty or absent = none).
+   * except the Direct rate for the code and the automatic plans
+   * (autoDiscountPlans: BOOKING_AUTO_DISCOUNT_PLANS and the website's main rate
+   * while BOOKING_AUTO_DISCOUNTS is on, Stripe and Beam only; empty or absent = none).
    */
   cloudbeds: CloudbedsReadSettings | null;
   /** Stripe modes only. */
@@ -600,8 +607,9 @@ export function directPromoOn(env: Env = process.env): boolean {
 
 /**
  * BOOKING_AUTO_DISCOUNTS = on | off (default on; empty = on): whether the own engine sells Cloudbeds' public
- * discount plans (BOOKING_AUTO_DISCOUNT_PLANS) automatically, with no code. "off" (or false/0/no) is the
- * emergency switch when Cloudbeds prices those holds at the base rate (alert "Automatic discounts blocked").
+ * discount plans (BOOKING_AUTO_DISCOUNT_PLANS) and the website's main rate (WEBSITE_RATE_PLAN_PREFIX) automatically,
+ * with no code. "off" (or false/0/no) is the emergency switch when Cloudbeds prices those holds at the base rate
+ * (alert "Automatic discounts blocked"): the page then sells the base rate only - the website rate is off too.
  */
 export function autoDiscountsOn(env: Env = process.env): boolean {
   const raw = trimmed(env.BOOKING_AUTO_DISCOUNTS).toLowerCase();
@@ -623,7 +631,9 @@ function unquoted(s: string): string {
  * (getRatePlans ratePlanNamePublic) to sell automatically; default DEFAULT_AUTO_DISCOUNT_PLANS. Unset or empty =
  * the default. The owner narrows it by hand in Vercel, so quotes around the value or an entry are ignored and `;`
  * separates like `,`. An entry that is still not a plain name is dropped with one config_warning; when none is left
- * NO plan is sold automatically (fail closed: a mistyped list must never bring back a plan the owner dropped).
+ * NO listed or default plan is sold automatically (fail closed: a mistyped list must never bring back a plan the
+ * owner dropped). The website's main rate is not part of this list: autoDiscountPlansFor adds its prefix afterwards,
+ * so it stays automatic whatever this variable says.
  * The name never decides alone: cloudbedsProvider.ts also requires a derived plan, no promo code, a name that
  * doesn't read as non-refundable (NON_REFUNDABLE_RE) and a price below the base rate (isAutoDiscountRow).
  */
@@ -635,7 +645,7 @@ export function resolveAutoDiscountPlans(env: Env = process.env): string[] {
   const entries = list.split(/[,;]/).map((s) => unquoted(s.trim()).replace(/\s+/g, " ")).filter((s) => s !== "");
   const valid = [...new Set(entries.filter((s) => AUTO_DISCOUNT_PLAN_RE.test(s)))];
   if (valid.length === 0) {
-    configWarning("BOOKING_AUTO_DISCOUNT_PLANS", "no entry is a plan name (2-40 letters, digits, spaces): automatic discounts are off");
+    configWarning("BOOKING_AUTO_DISCOUNT_PLANS", "no entry is a plan name (2-40 letters, digits, spaces): no listed or default plan is automatic, only the website rate");
   } else if (valid.length < entries.length) {
     configWarning("BOOKING_AUTO_DISCOUNT_PLANS", "an entry is not a plan name (2-40 letters, digits, spaces): dropped");
   }
@@ -643,11 +653,21 @@ export function resolveAutoDiscountPlans(env: Env = process.env): string[] {
 }
 
 /**
- * The automatic discount plans this deployment sells: the hold-first providers only (Stripe and Beam; the demo is
- * unchanged), while the flag is on. `provider` is the rules provider (rulesProviderOf).
+ * `plans` with the website's main rate prefix (WEBSITE_RATE_PLAN_PREFIX) added once, at the end; a list that already
+ * names it (any case) is returned as it is. The prefixes are matched case-insensitively (isAutoDiscountName).
+ */
+export function withWebsiteRatePlan(plans: readonly string[]): string[] {
+  const website = WEBSITE_RATE_PLAN_PREFIX.toLowerCase();
+  return plans.some((p) => p.trim().toLowerCase() === website) ? [...plans] : [...plans, WEBSITE_RATE_PLAN_PREFIX];
+}
+
+/**
+ * The automatic plans this deployment sells: the hold-first providers only (Stripe and Beam; the demo is
+ * unchanged), while the flag is on - BOOKING_AUTO_DISCOUNT_PLANS (or its default) and, always, the website's main
+ * rate (also when that list has no usable entry). `provider` is the rules provider (rulesProviderOf).
  */
 function autoDiscountPlansFor(env: Env, provider: PaymentProvider): string[] {
-  return isHoldFirstProvider(provider) && autoDiscountsOn(env) ? resolveAutoDiscountPlans(env) : [];
+  return isHoldFirstProvider(provider) && autoDiscountsOn(env) ? withWebsiteRatePlan(resolveAutoDiscountPlans(env)) : [];
 }
 
 /**
@@ -672,12 +692,13 @@ export function resolvePromoSettings(env: Env, provider: PaymentProvider, paymen
 }
 
 /**
- * True while the DIRECT copy ("Best rate, always - Code DIRECT at checkout", the best-rate meta
- * descriptions) must be swapped out: the own engine serves /booking (BOOKING_ENGINE=own) but does
- * NOT honour the code with Cloudbeds' Direct rate (BOOKING_DIRECT_PROMO=off, or no live Cloudbeds
- * rates). While it honours DIRECT it shows the same copy as the classic engine; with the default
- * engine nothing changes. public/llms.txt is a static file that cannot follow this switch and keeps
- * the best-rate line (code DIRECT): reword it there too if production ever runs with this true.
+ * True while any copy that names the DIRECT code or promises the best rate must be swapped out: the
+ * own engine serves /booking (BOOKING_ENGINE=own) but does NOT honour the code with Cloudbeds' Direct
+ * rate (BOOKING_DIRECT_PROMO=off, or no live Cloudbeds rates). Since 2026-11-16 (rate parity with
+ * Booking.com) no page carries such copy in any state - the homepage, /booking, the site-wide meta
+ * description, the language pages and public/llms.txt are neutral themselves - so this now only feeds
+ * the language pages' guard (data/landings.ts perksForEngine / descriptionForEngine), which changes
+ * nothing while their data stays neutral.
  */
 export function directCopySwapped(env: Env = process.env): boolean {
   if (resolveBookingEngine(env) !== "own") return false;

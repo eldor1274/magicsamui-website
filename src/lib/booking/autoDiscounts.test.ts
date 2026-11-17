@@ -5,23 +5,25 @@
 // Direct rate keeps its own path). Covers the config switch, the one rate-plan index read, the row choice
 // (cheapest of base / Direct / automatic), the combined stay rules, the hold on the plan's roomRateID, the
 // "priced at the base rate" refusal, the "rate not open to the source" fix line, the booking token, GA4 and
-// the UI wiring.
+// the UI wiring. Since 2026-11-16 also the website's main rate: a plan named "Website..." is sold the same way,
+// as every room's price, and its prefix is always on the list (rate parity with Booking.com).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { SEARCH_CACHE_TTL_MS, buildOffers, getInventory, promoVerdictForInventory } from "./availability.ts";
+import { SEARCH_CACHE_TTL_MS, buildOffers, getInventory, isWebsiteRateDiscount, promoVerdictForInventory } from "./availability.ts";
 import { purchaseParams, itemFromQuoteLine } from "./clientAnalytics.ts";
 import { runCheckout } from "./checkout.ts";
 import { CloudbedsBudgetError, RATE_PLAN_FAIL_TTL_MS, cloudbedsInventory, cloudbedsRateIndex, createTokenBucket, evaluateRestrictions, isAutoDiscountName, parseAvailableRoomTypes, parseRatePlanIndex, planDisplayName } from "./cloudbedsProvider.ts";
 import type { AutoDiscountIndex, PromoRateIndex, RatePlanIndex } from "./cloudbedsProvider.ts";
-import { DEFAULT_AUTO_DISCOUNT_PLANS, getBookingConfig, getInventoryConfig, resolveAutoDiscountPlans } from "./config.ts";
+import { DEFAULT_AUTO_DISCOUNT_PLANS, WEBSITE_RATE_PLAN_PREFIX, getBookingConfig, getInventoryConfig, resolveAutoDiscountPlans, withWebsiteRatePlan } from "./config.ts";
 import type { Env } from "./config.ts";
 import { addDays } from "./dates.ts";
 import { demoInventory } from "./demoProvider.ts";
-import { FAKE_DIRECT_PROMO_CODE, fakeLastMinutePlan, fakeLongTermPlan, fakeNonRefundablePlan, rateNotForSourceMessage } from "./mock/fakeCloudbeds.ts";
-import type { FakeCloudbedsOptions, FakeRoomType } from "./mock/fakeCloudbeds.ts";
-import { computeQuote, lineDiscountLabel, promoNotAppliedNote, rateDiscountLabel } from "./quote.ts";
+import { formatThb } from "./format.ts";
+import { FAKE_DIRECT_PROMO_CODE, fakeLastMinutePlan, fakeLongTermPlan, fakeNonRefundablePlan, fakeWebsiteRatePlan, rateNotForSourceMessage } from "./mock/fakeCloudbeds.ts";
+import type { FakeCloudbedsOptions, FakePlan, FakeRoomType } from "./mock/fakeCloudbeds.ts";
+import { computeQuote, lineDiscountLabel, listTotalForAdults, promoNotAppliedNote, rateDiscountLabel, rateTotalForAdults } from "./quote.ts";
 import { AUTO_AT_BASE_ALERT_PREFIX, DIRECT_AT_BASE_ALERT, autoAtBaseAlert, classifyHoldTotal, rateNotForSourceFix, rateSourceFixLine } from "./stripeCheckout.ts";
 import { handleStripeWebhook } from "./stripeWebhook.ts";
 import { FAR_CHECKIN, HONEYMOON, NOW, STRIPE_TEST_ENV, checkout, makeKit, request, serverQuote, sessionIdOf } from "./testkit.ts";
@@ -65,11 +67,14 @@ const hmOf = (inv: RoomInventory[]) => inv.find((i) => i.slug === "honeymoon-sui
 
 /* --------------------------------- config --------------------------------- */
 
-test("config: BOOKING_AUTO_DISCOUNTS on by default (empty = on, off/false/0/no = off); plans default to Last minute, Long term, Early bird; Stripe and Beam with Cloudbeds data only", () => {
+/** What a Stripe or Beam config sells automatically by default: the default discount plans, then the website's main rate. */
+const DEFAULT_PLANS_SOLD = [...DEFAULT_AUTO_DISCOUNT_PLANS, WEBSITE_RATE_PLAN_PREFIX];
+
+test("config: BOOKING_AUTO_DISCOUNTS on by default (empty = on, off/false/0/no = off); plans default to Last minute, Long term, Early bird (and always the website rate); Stripe and Beam with Cloudbeds data only", () => {
   assert.deepEqual(DEFAULT_AUTO_DISCOUNT_PLANS, ["Last minute", "Long term", "Early bird"]);
-  assert.deepEqual(getBookingConfig(STRIPE_TEST_ENV).cloudbeds?.autoDiscountPlans, DEFAULT_AUTO_DISCOUNT_PLANS);
+  assert.deepEqual(getBookingConfig(STRIPE_TEST_ENV).cloudbeds?.autoDiscountPlans, DEFAULT_PLANS_SOLD);
   for (const on of ["", "on", "ON", " true ", "1", "yes"]) {
-    assert.deepEqual(getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNTS: on }).cloudbeds?.autoDiscountPlans, DEFAULT_AUTO_DISCOUNT_PLANS, JSON.stringify(on));
+    assert.deepEqual(getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNTS: on }).cloudbeds?.autoDiscountPlans, DEFAULT_PLANS_SOLD, JSON.stringify(on));
   }
   for (const off of ["off", "OFF", " false ", "0", "no"]) {
     assert.deepEqual(getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNTS: off }).cloudbeds?.autoDiscountPlans, [], off);
@@ -79,30 +84,69 @@ test("config: BOOKING_AUTO_DISCOUNTS on by default (empty = on, off/false/0/no =
   assert.deepEqual(resolveAutoDiscountPlans({ BOOKING_AUTO_DISCOUNT_PLANS: "Last minute,<script>,x" }), ["Last minute"]);
   assert.deepEqual(resolveAutoDiscountPlans({ BOOKING_AUTO_DISCOUNT_PLANS: "" }), DEFAULT_AUTO_DISCOUNT_PLANS);
   assert.deepEqual(resolveAutoDiscountPlans({ BOOKING_AUTO_DISCOUNT_PLANS: "   " }), DEFAULT_AUTO_DISCOUNT_PLANS);
-  assert.deepEqual(getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNT_PLANS: "Early bird" }).cloudbeds?.autoDiscountPlans, ["Early bird"]);
+  assert.deepEqual(getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNT_PLANS: "Early bird" }).cloudbeds?.autoDiscountPlans, ["Early bird", "Website"]);
   // Narrowing the list by hand (runbook: `Last minute,Long term` drops an early bird plan): quotes around the value or
   // an entry and `;` as the separator are read as meant - never as "nothing valid, sell the default again".
   for (const value of [`"Last minute,Long term"`, `'Last minute,Long term'`, "Last minute;Long term", ` "Last minute" ; 'Long term' `, `"Last minute","Long term"`, "`Last minute,Long term`"]) {
     assert.deepEqual(resolveAutoDiscountPlans({ BOOKING_AUTO_DISCOUNT_PLANS: value }), ["Last minute", "Long term"], value);
   }
   assert.deepEqual(resolveAutoDiscountPlans({ BOOKING_AUTO_DISCOUNT_PLANS: `"Owner's deal,Long term"` }), ["Owner's deal", "Long term"], "an apostrophe inside a name stays");
-  // Set, but no entry is a plan name: fail closed - NO automatic discount (never the default, which would bring back the plan dropped).
+  // Set, but no entry is a plan name: fail closed - NO listed or default discount plan (never the default, which would
+  // bring back the plan dropped). Only the website's main rate stays, as with any list.
   for (const value of ["<b>", "Long term (7+ nights)", "-", ",,", `""`, `"Last minute|Long term"`]) {
     assert.deepEqual(resolveAutoDiscountPlans({ BOOKING_AUTO_DISCOUNT_PLANS: value }), [], value);
   }
-  assert.deepEqual(getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNT_PLANS: "Long term (7+ nights)" }).cloudbeds?.autoDiscountPlans, [], "the flag on, no plan sold");
-  assert.deepEqual(getInventoryConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNT_PLANS: "<b>" }).cloudbeds?.autoDiscountPlans, []);
+  assert.deepEqual(getBookingConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNT_PLANS: "Long term (7+ nights)" }).cloudbeds?.autoDiscountPlans, ["Website"], "the flag on, no discount plan sold");
+  assert.deepEqual(getInventoryConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNT_PLANS: "<b>" }).cloudbeds?.autoDiscountPlans, ["Website"]);
   // The availability API's config agrees, and never throws.
-  assert.deepEqual(getInventoryConfig(STRIPE_TEST_ENV).cloudbeds?.autoDiscountPlans, DEFAULT_AUTO_DISCOUNT_PLANS);
+  assert.deepEqual(getInventoryConfig(STRIPE_TEST_ENV).cloudbeds?.autoDiscountPlans, DEFAULT_PLANS_SOLD);
   assert.deepEqual(getInventoryConfig({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNTS: "off" }).cloudbeds?.autoDiscountPlans, []);
   // The demo (with a Cloudbeds read key): unchanged, no automatic discounts. MOCK without Cloudbeds data: nothing to read.
   assert.deepEqual(getBookingConfig({ CLOUDBEDS_API_KEY: "k" }).cloudbeds?.autoDiscountPlans, []);
   assert.deepEqual(getInventoryConfig({ CLOUDBEDS_API_KEY: "k" }).cloudbeds?.autoDiscountPlans, []);
   // Beam (with a Cloudbeds read key) is hold-first since design S3.1: the same plans as Stripe, in both configs.
   const beamEnv: Env = { BOOKING_PAYMENT_PROVIDER: "beam", BEAM_API_BASE: "https://playground.api.beamcheckout.com", BEAM_MERCHANT_ID: "m", BEAM_API_KEY: "k", BOOKING_TOKEN_SECRET: "test-only-7f3K9qLm2xVw8RtY4pZn6bHc1dJe5gUa", CLOUDBEDS_API_KEY: "k" };
-  assert.deepEqual(getBookingConfig(beamEnv).cloudbeds?.autoDiscountPlans, DEFAULT_AUTO_DISCOUNT_PLANS);
-  assert.deepEqual(getInventoryConfig(beamEnv).cloudbeds?.autoDiscountPlans, DEFAULT_AUTO_DISCOUNT_PLANS);
+  assert.deepEqual(getBookingConfig(beamEnv).cloudbeds?.autoDiscountPlans, DEFAULT_PLANS_SOLD);
+  assert.deepEqual(getInventoryConfig(beamEnv).cloudbeds?.autoDiscountPlans, DEFAULT_PLANS_SOLD);
   assert.equal(getBookingConfig({ BOOKING_PAYMENT_PROVIDER: "stripe", BOOKING_STRIPE_MOCK: "true" }).cloudbeds, null);
+});
+
+test("website rate: the prefix \"Website\" is always one of the automatic plan prefixes - after the default list or a custom BOOKING_AUTO_DISCOUNT_PLANS, once (any case), also when that list has no usable entry; BOOKING_AUTO_DISCOUNTS=off still switches it off", () => {
+  assert.equal(WEBSITE_RATE_PLAN_PREFIX, "Website");
+  // The merge: appended once, the list given left as it is; an entry in any case already is the prefix.
+  assert.deepEqual(withWebsiteRatePlan(DEFAULT_AUTO_DISCOUNT_PLANS), ["Last minute", "Long term", "Early bird", "Website"]);
+  assert.deepEqual(DEFAULT_AUTO_DISCOUNT_PLANS, ["Last minute", "Long term", "Early bird"], "the default list itself is unchanged");
+  assert.deepEqual(withWebsiteRatePlan([]), ["Website"]);
+  assert.deepEqual(withWebsiteRatePlan(["Website"]), ["Website"]);
+  assert.deepEqual(withWebsiteRatePlan(["website", "Long term"]), ["website", "Long term"]);
+  assert.deepEqual(withWebsiteRatePlan(["Long term", "WEBSITE"]), ["Long term", "WEBSITE"]);
+  assert.deepEqual(withWebsiteRatePlan(["Website rate"]), ["Website rate", "Website"], "a longer entry is another prefix: \"Website\" itself is still added");
+  // The env parser is as before (the prefix is no part of the variable or of its default).
+  assert.deepEqual(resolveAutoDiscountPlans({}), DEFAULT_AUTO_DISCOUNT_PLANS);
+  // Both configs (checkout and the availability API): the default list, then custom lists.
+  const sold = (env: Env) => {
+    const plans = getBookingConfig(env).cloudbeds?.autoDiscountPlans;
+    assert.deepEqual(getInventoryConfig(env).cloudbeds?.autoDiscountPlans, plans, "the availability API's config agrees");
+    return plans;
+  };
+  assert.deepEqual(sold(STRIPE_TEST_ENV), ["Last minute", "Long term", "Early bird", "Website"]);
+  const custom = (value: string) => sold({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNT_PLANS: value });
+  assert.deepEqual(custom("Early bird"), ["Early bird", "Website"]);
+  assert.deepEqual(custom(`"Last minute;Long term"`), ["Last minute", "Long term", "Website"]);
+  assert.deepEqual(custom("Website"), ["Website"], "listed: not twice");
+  assert.deepEqual(custom("website,Long term"), ["website", "Long term"], "listed in another case: not twice");
+  assert.deepEqual(custom("Long term, WEBSITE"), ["Long term", "WEBSITE"]);
+  assert.deepEqual(custom("Website,website"), ["Website", "website"], "the owner's own entries are not touched");
+  assert.deepEqual(custom("<b>"), ["Website"], "no usable entry: the listed and default plans stay off, the website rate stays on");
+  // The master switch is in front of it; the demo never sells automatic plans.
+  assert.deepEqual(sold({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNTS: "off" }), []);
+  assert.deepEqual(sold({ ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNTS: "off", BOOKING_AUTO_DISCOUNT_PLANS: "Website" }), []);
+  assert.deepEqual(sold({ CLOUDBEDS_API_KEY: "k" }), []);
+  // Matching stays a case-insensitive PREFIX match with every guard on the name.
+  for (const plans of [["Website"], ["website"], DEFAULT_PLANS_SOLD]) {
+    for (const name of ["Website rate", "WEBSITE RATE", "website rate", "Website", "  Website   rate "]) assert.equal(isAutoDiscountName(name, plans), true, name);
+    for (const name of ["Our Website rate", "Web rate", "Website rate NRF", "Website rate - non-refundable", "Website prepaid"]) assert.equal(isAutoDiscountName(name, plans), false, name);
+  }
 });
 
 /* --------------------------------- the index -------------------------------- */
@@ -253,7 +297,7 @@ test("cheapest wins between the Direct rate and an automatic discount: Direct on
   const valid = { code: "DIRECT", valid: true as const, pct: 0, label: "Direct rate" };
   const note = promoVerdictForInventory(valid, "direct-rate", [autoWins.hm]);
   assert.ok(note && !note.valid);
-  assert.equal(note && !note.valid ? note.message : "", "Code DIRECT doesn't apply to these dates - the prices shown are our best rates for them.");
+  assert.equal(note && !note.valid ? note.message : "", "Code DIRECT doesn't apply to these dates - the prices shown are our current rates for them.");
   assert.equal(promoVerdictForInventory(valid, "direct-rate", [directWins.hm]), valid);
 });
 
@@ -677,6 +721,234 @@ test("mixed cart (Direct + automatic + base, 7 nights, code DIRECT): each room o
   const { payload, header } = kit.fakeStripe.signedEvent("checkout.session.completed", session.id);
   assert.equal((await handleStripeWebhook(payload, header, kit.deps, { nowMs: NOW })).body, "confirmed");
   assert.equal(kit.fakeCb.balance(body.holdReservationId!), 0);
+});
+
+/* ------------------------- the website's main rate ------------------------- */
+
+/**
+ * The owner's setup (owner decision, 2026-11-16): every room type has a "Website rate" plan - derived from its base
+ * rate, 5% off, no promo code, always offered - next to whatever `extra` adds for a room type.
+ */
+function withWebsiteRate(roomTypes: Record<string, FakeRoomType>, extra: (rt: FakeRoomType) => Partial<FakeRoomType> = () => ({})): Record<string, FakeRoomType> {
+  return Object.fromEntries(
+    Object.entries(roomTypes).map(([id, rt]) => {
+      const more = extra(rt);
+      return [id, { ...rt, ...more, plans: [fakeWebsiteRatePlan(`${rt.rateId}-web`), ...(more.plans ?? [])] }];
+    }),
+  );
+}
+const WEB_ROOM_TYPES = withWebsiteRate(ROOM_TYPES);
+const THREE_NIGHTS = { checkIn: FAR_CHECKIN, checkOut: addDays(FAR_CHECKIN, 3) };
+const HM_BASE_3 = 3 * 900_000;
+const HM_WEB_3 = 3 * 855_000; // 9,000 x 95% = 8,550
+/** The reasons of the cloudbeds_auto_discount_row_unused lines a mocked console.info has seen ("<rateId>: <reason>"). */
+const unusedAutoRows = (infos: { mock: { calls: { arguments: unknown[] }[] } }) =>
+  infos.mock.calls
+    .filter((c) => c.arguments[0] === "[booking] cloudbeds_auto_discount_row_unused")
+    .map((c) => JSON.parse(String(c.arguments[1])) as { rateId: string; reason: string })
+    .map((d) => `${d.rateId}: ${d.reason}`);
+
+test("website rate: a \"Website rate\" plan, the only automatic plan, is every room's price with no code - shown as the plain price: no struck-through list price, no plan label", async () => {
+  const kit = autoKit({ roomTypes: WEB_ROOM_TYPES });
+  const { inventory } = await search(kit, THREE_NIGHTS);
+  const hm = hmOf(inventory);
+  assert.equal(hm.rateId, "rate-hm-web");
+  assert.deepEqual(hm.discount && { kind: hm.discount.kind, name: hm.discount.name, baseRateId: hm.discount.baseRateId }, { kind: "auto", name: "Website rate", baseRateId: "rate-hm" });
+  assert.deepEqual(hm.baseNightly.map((n) => n.amountSatang), [855_000, 855_000, 855_000]);
+  assert.deepEqual(hm.discount?.baseNightly.map((n) => n.amountSatang), [900_000, 900_000, 900_000]);
+  assert.equal(hm.promoNotApplied, undefined);
+  // Every room Cloudbeds offers is on its own "Website rate" row: 5% under its base rate, to the satang (4,500.50 -> 4,275.48).
+  const sold = Object.fromEntries(inventory.filter((i) => i.available).map((i) => [i.slug, [i.rateId, i.discount?.name, i.baseNightly[0].amountSatang, i.discount?.baseNightly[0].amountSatang]]));
+  assert.deepEqual(sold, {
+    "honeymoon-suite": ["rate-hm-web", "Website rate", 855_000, 900_000],
+    "garden-suite": ["rate-gs-web", "Website rate", 285_000, 300_000],
+    "sunrise-suite": ["rate-sr-web", "Website rate", 427_548, 450_050],
+    "seaview-2br": ["rate-sv2-web", "Website rate", 570_000, 600_000],
+  });
+  assert.equal(unfilteredRatePlanReads(kit), 1, "one rate-plan index read per search, as before");
+  assert.equal(kit.fakeCb.calls.some((c) => c.params.promoCode !== undefined), false, "no promo code is asked or needed");
+  // What the room card shows (RoomOfferCard): "Standard Rate" and 25,650.00 as the plain price. It is the website's
+  // price, not a discount (owner, 2026-11-17): no base price struck through, no plan label.
+  const rate = buildOffers(inventory, 2, ["standard"]).find((o) => o.slug === "honeymoon-suite")!.rates[0];
+  assert.equal(rate.ratePlanName, "Standard Rate");
+  assert.equal(formatThb(rateTotalForAdults(rate, 2)), "25,650.00");
+  assert.equal(rate.list, undefined);
+  assert.equal(listTotalForAdults(rate, 2), null);
+  assert.equal(rateDiscountLabel(rate.list, null), null);
+  assert.equal(rateDiscountLabel(rate.list, "DIRECT"), null);
+  assert.equal(isWebsiteRateDiscount(hm.discount), true);
+  assert.equal(isWebsiteRateDiscount({ ...hm.discount!, name: "Last minute 10% off" }), false, "other automatic plans keep their struck-through price");
+  assert.equal(isWebsiteRateDiscount({ ...hm.discount!, kind: "direct", name: "Website rate" }), false, "a code plan is never the website's main rate");
+  assert.equal(isWebsiteRateDiscount(undefined), false);
+  // Whatever BOOKING_AUTO_DISCOUNT_PLANS says (a list that doesn't name it, a list with no usable entry): still sold.
+  for (const value of ["Early bird", "Last minute,Long term", "<b>"]) {
+    const custom = autoKit({ roomTypes: WEB_ROOM_TYPES, env: { ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNT_PLANS: value } });
+    assert.equal(hmOf((await search(custom, THREE_NIGHTS)).inventory).rateId, "rate-hm-web", value);
+  }
+  // The master switch is unchanged: off sells the base rate, with no rate-plan index read.
+  const off = autoKit({ roomTypes: WEB_ROOM_TYPES, env: { ...STRIPE_TEST_ENV, BOOKING_AUTO_DISCOUNTS: "off" } });
+  const hmOff = hmOf((await search(off, THREE_NIGHTS)).inventory);
+  assert.equal(hmOff.rateId, "rate-hm");
+  assert.equal(hmOff.discount, undefined);
+  assert.equal(off.fakeCb.count("getRatePlans"), 0);
+});
+
+test("website rate sold end to end (3 nights, no code): the hold on the plan's roomRateID without a promo code, the plan's total + 5% fee, quoted and charged as the plain price (no list price, no label), paid, folio balance 0", async () => {
+  const kit = autoKit({ roomTypes: WEB_ROOM_TYPES });
+  const res = await checkout(kit, HONEYMOON, THREE_NIGHTS);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  const body = res.body as CheckoutSuccess;
+  const fee = Math.round(HM_WEB_3 * 0.05);
+  assert.equal(body.quote.roomsSubtotalSatang, HM_WEB_3);
+  assert.equal(body.quote.lines[0].listRoomSatang, undefined, "no struck-through base price");
+  assert.equal(body.quote.lines[0].discount, undefined);
+  assert.equal(body.quote.autoDiscount, null, "the website rate is the price, not an automatic discount");
+  assert.equal(body.quote.directRate, null);
+  assert.equal(body.quote.promo, null);
+  assert.equal(body.quote.totalSatang, HM_WEB_3 + fee);
+  assert.equal(lineDiscountLabel(body.quote.lines[0], body.quote), null);
+
+  const post = postOf(kit)!;
+  assert.equal(post.params["rooms[0][roomRateID]"], "rate-hm-web");
+  assert.equal(post.params.promoCode, undefined, "the website rate needs no code");
+  const reservation = kit.fakeCb.reservations.get(body.holdReservationId!)!;
+  assert.equal(reservation.subTotal * 100, HM_WEB_3);
+  assert.doesNotMatch(reservation.notes.join("\n"), /Automatic discount/);
+
+  const sessionId = sessionIdOf(body);
+  const session = kit.fakeStripe.session(sessionId)!;
+  assert.equal(session.amount_total, HM_WEB_3 + fee);
+  assert.match(session.line_items_input[0].name, /^Honeymoon .+ - Standard Rate$/);
+  const v = verifyBookingToken(new URL(session.success_url.replace("{CHECKOUT_SESSION_ID}", "x")).searchParams.get("t"), kit.config.tokenSecret, NOW);
+  assert.ok(v.ok);
+  if (v.ok) {
+    assert.equal(v.payload.booking.itemDiscounts, undefined, "the return page shows the plain price too");
+    assert.equal(v.payload.booking.promoCode, null);
+  }
+
+  kit.fakeStripe.complete(sessionId);
+  const { payload, header } = kit.fakeStripe.signedEvent("checkout.session.completed", sessionId);
+  assert.equal((await handleStripeWebhook(payload, header, kit.deps, { nowMs: NOW })).body, "confirmed");
+  assert.equal(reservation.status, "confirmed");
+  assert.equal(kit.fakeCb.balance(body.holdReservationId!), 0);
+});
+
+test("website rate next to another automatic plan: the cheaper is sold - \"Last minute 10% off\" inside its window, the website rate outside it; a typed DIRECT (20% off) still gets the Direct rate", async (t) => {
+  const infos = t.mock.method(console, "info", () => undefined);
+  const roomTypes = withWebsiteRate(ROOM_TYPES, (rt) => (rt.rateId === "rate-hm" ? { directRateId: "rate-hm-direct", plans: [fakeLastMinutePlan("rate-hm-lm")] } : {}));
+  const kit = autoKit({ env: NEAR_ENV, roomTypes });
+  const near = hmOf((await search(kit, NEAR)).inventory);
+  assert.equal(near.rateId, "rate-hm-lm", "Last minute (8,100) beats the website rate (8,550) and the base (9,000)");
+  assert.equal(near.discount?.name, "Last minute 10% off");
+  assert.deepEqual(near.baseNightly.map((n) => n.amountSatang), [810_000, 810_000, 810_000]);
+  assert.deepEqual(unusedAutoRows(infos), ["rate-hm-web: a cheaper rate was sold (Last minute 10% off)"]);
+  // 15 days ahead Cloudbeds doesn't offer Last minute: the website rate.
+  const later = hmOf((await search(kit, { checkIn: "2026-10-20", checkOut: "2026-10-23" })).inventory);
+  assert.equal(later.rateId, "rate-hm-web");
+  assert.equal(later.discount?.name, "Website rate");
+  // The same choice in the parser, whatever the order of Cloudbeds' rows; a dearer Last minute row loses.
+  const index: AutoDiscountIndex = {
+    "462958": [
+      { rateId: "hm-web", parentRateId: "hm-base", name: "Website rate" },
+      { rateId: "hm-lm", parentRateId: "hm-base", name: "Last minute 10% off" },
+    ],
+  };
+  const pick = (rows: Record<string, unknown>[]) => hmOf(parseAvailableRoomTypes(answer(rows), FAR_CHECKIN, addDays(FAR_CHECKIN, 3), { baseRateOnly: true, auto: { rates: index } })).rateId;
+  const base = row("462958", "hm-base", 9000);
+  const web = derivedRow("462958", "hm-web", 8550, "Website rate");
+  assert.equal(pick([base, web, derivedRow("462958", "hm-lm", 8100, "Last minute 10% off")]), "hm-lm");
+  assert.equal(pick([base, derivedRow("462958", "hm-lm", 8100, "Last minute 10% off"), web]), "hm-lm");
+  assert.equal(pick([base, web, derivedRow("462958", "hm-lm", 8800, "Last minute 10% off")]), "hm-web");
+  assert.equal(pick([base, web]), "hm-web");
+  // At checkout: the Last minute row is held inside its window (near arrival: the MOCK writer has no test guard).
+  const res = await checkout(kit, HONEYMOON, NEAR);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.deepEqual((res.body as CheckoutSuccess).quote.autoDiscount?.names, ["Last minute 10% off"]);
+  assert.equal(postOf(kit)?.params["rooms[0][roomRateID]"], "rate-hm-lm");
+  // A guest who was given the code: DIRECT still sells the Direct rate (7,200), with its promo code, where a room has one.
+  const direct = autoKit({ roomTypes });
+  const withCode = await checkout(direct, HONEYMOON, { ...THREE_NIGHTS, promo: "DIRECT" });
+  assert.equal(withCode.status, 200, JSON.stringify(withCode.body));
+  assert.equal((withCode.body as CheckoutSuccess).quote.roomsSubtotalSatang, 3 * 720_000);
+  assert.equal((withCode.body as CheckoutSuccess).quote.autoDiscount, null);
+  assert.equal(postOf(direct)?.params["rooms[0][roomRateID]"], "rate-hm-direct");
+  assert.equal(postOf(direct)?.params.promoCode, FAKE_DIRECT_PROMO_CODE);
+});
+
+test("website rate alone (BOOKING_AUTO_DISCOUNT_PLANS=Website, the runbook's parity setting): inside the Last minute window the website rate is still the price shown and held, never the cheaper Last minute plan", async () => {
+  const roomTypes = withWebsiteRate(ROOM_TYPES, (rt) => (rt.rateId === "rate-hm" ? { plans: [fakeLastMinutePlan("rate-hm-lm")] } : {}));
+  const kit = autoKit({ env: { ...NEAR_ENV, BOOKING_AUTO_DISCOUNT_PLANS: "Website" }, roomTypes });
+  assert.deepEqual(kit.config.cloudbeds?.autoDiscountPlans, ["Website"]);
+  const near = hmOf((await search(kit, NEAR)).inventory);
+  assert.equal(near.rateId, "rate-hm-web", "the website rate (8,550), although Cloudbeds offers Last minute (8,100) for the stay");
+  assert.equal(near.discount?.name, "Website rate");
+  assert.deepEqual(near.baseNightly.map((n) => n.amountSatang), [855_000, 855_000, 855_000]);
+  const res = await checkout(kit, HONEYMOON, NEAR);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal((res.body as CheckoutSuccess).quote.autoDiscount, null, "the website rate is the plain price, not an automatic discount");
+  assert.equal((res.body as CheckoutSuccess).quote.roomsSubtotalSatang, HM_WEB_3);
+  assert.equal(postOf(kit)?.params["rooms[0][roomRateID]"], "rate-hm-web");
+  assert.equal(postOf(kit)?.params.promoCode, undefined);
+});
+
+test("a \"Website...\" plan is NOT sold automatically when it carries a promo code, reads as non-refundable, is not cheaper than the base rate, or is not derived from it: the base rate is sold, as before", async (t) => {
+  const infos = t.mock.method(console, "info", () => undefined);
+  const web = fakeWebsiteRatePlan("rate-hm-web");
+  const cases: { why: string; plan: FakePlan; unused?: string }[] = [
+    { why: "a promo code (though Cloudbeds lists it in the plain answer)", plan: { ...web, promoCode: "WEB", inPlainAnswer: true } },
+    { why: "reads as non-refundable", plan: { ...web, name: "Website rate - non-refundable", pctOfBase: 90 } },
+    { why: "reads as non-refundable (NRF)", plan: { ...web, name: "Website NRF", pctOfBase: 90 } },
+    { why: "dearer than the base rate", plan: { ...web, pctOfBase: 105 }, unused: "not cheaper than the base rate" },
+    { why: "the base rate's own price", plan: { ...web, pctOfBase: 100 }, unused: "not cheaper than the base rate" },
+    { why: "not a derived plan", plan: { ...web, isDerived: false } },
+    { why: "derived from another rate", plan: { ...web, parentRateId: "rate-other" }, unused: "derived from another rate" },
+  ];
+  for (const { why, plan, unused } of cases) {
+    infos.mock.resetCalls();
+    const kit = autoKit({ roomTypes: { ...ROOM_TYPES, "462958": { ...ROOM_TYPES["462958"], plans: [plan] } } });
+    const hm = hmOf((await search(kit, THREE_NIGHTS)).inventory);
+    assert.equal(hm.rateId, "rate-hm", why);
+    assert.equal(hm.discount, undefined, why);
+    assert.deepEqual(hm.baseNightly.map((n) => n.amountSatang), [900_000, 900_000, 900_000], why);
+    assert.deepEqual(unusedAutoRows(infos), unused ? [`rate-hm-web: ${unused}`] : [], why);
+    const res = await checkout(kit, HONEYMOON, THREE_NIGHTS);
+    assert.equal(res.status, 200, `${why}: ${JSON.stringify(res.body)}`);
+    assert.equal((res.body as CheckoutSuccess).quote.autoDiscount, null, why);
+    assert.equal((res.body as CheckoutSuccess).quote.roomsSubtotalSatang, HM_BASE_3, why);
+    assert.equal(postOf(kit)?.params["rooms[0][roomRateID]"], "rate-hm", why);
+    assert.equal(postOf(kit)?.params.promoCode, undefined, why);
+  }
+});
+
+test("no \"Website...\" plan in Cloudbeds: nothing changes - the same rows, prices and Cloudbeds calls as with the plan prefixes of before the website rate", async () => {
+  const before = [...DEFAULT_AUTO_DISCOUNT_PLANS];
+  // AUTO_ROOM_TYPES (Last minute, Long term, Non-refundable, a Direct plan) has no plan named "Website...".
+  const reads = async (env: Env, stay: { checkIn: string; checkOut: string }, extra: Parameters<typeof getInventory>[3] = {}) => {
+    const kit = autoKit({ env });
+    assert.deepEqual(kit.config.cloudbeds?.autoDiscountPlans, DEFAULT_PLANS_SOLD);
+    const old = autoKit({ env });
+    const oldConfig = { ...old.config, cloudbeds: { ...old.config.cloudbeds!, autoDiscountPlans: before } };
+    const now = await search(kit, stay, extra);
+    const then = await getInventory(stay.checkIn, stay.checkOut, oldConfig, { fetchImpl: old.fakeCb.fetch, allowDemoFallback: false, ...extra });
+    assert.deepEqual(now, then, `${stay.checkIn} to ${stay.checkOut}`);
+    assert.deepEqual(kit.fakeCb.calls.map((c) => [c.method, c.params]), old.fakeCb.calls.map((c) => [c.method, c.params]));
+    return hmOf(now.inventory).rateId;
+  };
+  assert.equal(await reads(STRIPE_TEST_ENV, THREE_NIGHTS), "rate-hm");
+  assert.equal(await reads(STRIPE_TEST_ENV, SEVEN_NIGHTS), "rate-hm-lt");
+  assert.equal(await reads(NEAR_ENV, NEAR), "rate-hm-lm");
+  assert.equal(await reads(STRIPE_TEST_ENV, SEVEN_NIGHTS, { promo: { cloudbedsCode: FAKE_DIRECT_PROMO_CODE } }), "rate-hm-direct");
+  // Checkout too: the same quote, the same Cloudbeds calls in the same order, the same rate held.
+  const booked = async (plans?: string[]) => {
+    const kit = autoKit();
+    if (plans) kit.config.cloudbeds!.autoDiscountPlans = plans;
+    const res = await checkout(kit, HONEYMOON, SEVEN_NIGHTS);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    return { quote: (res.body as CheckoutSuccess).quote, calls: kit.fakeCb.calls.map((c) => c.method), rateId: postOf(kit)?.params["rooms[0][roomRateID]"] };
+  };
+  const now = await booked();
+  assert.equal(now.rateId, "rate-hm-lt");
+  assert.deepEqual(now, await booked(before));
 });
 
 /* ------------------------------ stay rules ------------------------------ */

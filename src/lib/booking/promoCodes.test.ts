@@ -412,10 +412,10 @@ test("cheapest wins between a code's rate and the automatic discounts: LONGSTAY 
   assert.equal(postOf(earlyKit)?.params["rooms[0][roomRateID]"], "rate-hm-eb");
   assert.equal(postOf(earlyKit)?.params.promoCode, undefined, "no promo code without a room on the code's rate");
 
-  // When no room gets the code's rate, the search note says the prices shown are the best rates.
+  // When no room gets the code's rate, the search note says the prices shown are the current rates (never "best": rate parity).
   const onlyHm = { ...vsEarly, "462960": { ...CODE_ROOM_TYPES["462960"], plans: [] } };
   const none = await routeSearch(codeKit({ roomTypes: onlyHm }), SEVEN_NIGHTS, "LONGSTAY");
-  assert.deepEqual(none.promo, { code: "LONGSTAY", valid: false, note: true, message: "Code LONGSTAY doesn't apply to these dates - the prices shown are our best rates for them." });
+  assert.deepEqual(none.promo, { code: "LONGSTAY", valid: false, note: true, message: "Code LONGSTAY doesn't apply to these dates - the prices shown are our current rates for them." });
 
   // A tie: the rate the guest asked for.
   const tie = withHmPlans([fakeLongStayCodePlan("rate-hm-ls"), { rateId: "rate-hm-eb", name: "Early bird 26% off", pctOfBase: 74 }]);

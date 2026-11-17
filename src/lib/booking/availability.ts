@@ -3,11 +3,12 @@
 // inventory into priced offers.
 
 import { CATALOGUE } from "./catalogue.ts";
-import { cloudbedsInventory, cloudbedsRateIndex } from "./cloudbedsProvider.ts";
+import { cloudbedsInventory, cloudbedsRateIndex, isAutoDiscountName } from "./cloudbedsProvider.ts";
 import type { PromoRateIndex, RatePlanIndex, TokenBucket } from "./cloudbedsProvider.ts";
 import { demoInventory } from "./demoProvider.ts";
 import { logEvent } from "./routeUtils.ts";
 import { buildRateOffers, occupancyExtraSatang, resolvePromoFor } from "./quote.ts";
+import { WEBSITE_RATE_PLAN_PREFIX } from "./config.ts";
 import type { BookingConfig, PromoSettings } from "./config.ts";
 import type { AlertFn } from "./stripeDeps.ts";
 import type { CartItemInput, DataSource, IsoDate, PromoLookup, PromoMode, PromoResult, RateListPrice, RatePlanId, RoomInventory, RoomOffer } from "./types.ts";
@@ -349,7 +350,7 @@ export function promoVerdictForInventory(promo: PromoResult | null, mode: PromoM
   if (!promo?.valid || mode !== "direct-rate") return promo;
   const available = inventory.filter((i) => i.available);
   if (available.length === 0 || available.some((i) => i.discount?.kind === "direct")) return promo;
-  const shown = available.some((i) => i.discount?.kind === "auto") ? "the prices shown are our best rates for them" : "the prices shown are our standard rates";
+  const shown = available.some((i) => i.discount?.kind === "auto") ? "the prices shown are our current rates for them" : "the prices shown are our standard rates";
   return { code: promo.code, valid: false, note: true, message: `Code ${promo.code} doesn't apply to these dates - ${shown}.` };
 }
 
@@ -365,6 +366,17 @@ export function searchPromoVerdict(
   result: Pick<InventoryResult, "inventory" | "promoLookup">,
 ): PromoResult | null {
   return promoVerdictForInventory(resolvePromoFor(code, settings, classicPath, result.promoLookup ?? null), settings.mode, result.inventory);
+}
+
+/**
+ * The website's main rate (owner, 2026-11-17): a room sold on the automatic plan whose public name starts with
+ * "Website" (WEBSITE_RATE_PLAN_PREFIX). That plan IS the price the website shows, not a discount, so its offer
+ * gets no list price: no struck-through base price and no plan label on the card, summary, payment step or
+ * return page (a base price nobody is charged must not be shown as a "was" price). The hold still goes on the
+ * plan's own roomRateID (RoomInventory.rateId) and the price check still needs Cloudbeds' total to equal it.
+ */
+export function isWebsiteRateDiscount(discount: RoomInventory["discount"]): boolean {
+  return discount?.kind === "auto" && isAutoDiscountName(discount.name, [WEBSITE_RATE_PLAN_PREFIX]);
 }
 
 /**
@@ -387,10 +399,12 @@ export function buildOffers(inventory: RoomInventory[], adults: number, ratePlan
     const pricedFor = Math.min(Math.max(1, adults), maxAdults);
     // A discounted Cloudbeds rate (a promo code's or automatic): priced at its own rows, with the base row it is derived
     // from as the list price; an automatic discount, and a code other than DIRECT, also carry the plan's name (the label).
+    // The website's main rate is the exception: priced at its own rows, shown as the plain price (isWebsiteRateDiscount).
     const d = inv.discount;
-    const list: RateListPrice | undefined = d
-      ? { baseNightly: d.baseNightly, adultsExtraSatang: d.baseAdultsExtraSatang, kind: d.kind, ...(d.kind === "auto" || d.showName ? { name: d.name } : {}) }
-      : undefined;
+    const list: RateListPrice | undefined =
+      d && !isWebsiteRateDiscount(d)
+        ? { baseNightly: d.baseNightly, adultsExtraSatang: d.baseAdultsExtraSatang, kind: d.kind, ...(d.kind === "auto" || d.showName ? { name: d.name } : {}) }
+        : undefined;
     return {
       slug: room.slug,
       available: true,

@@ -649,16 +649,21 @@ test("homepage: the booking page's SearchBar under the own engine, the Cloudbeds
   assert.ok(page.includes('ownEngine ? " md:pb-48" : ""'));
   assert.ok(page.includes('ownEngine ? "relative z-10 mx-auto -mt-9 max-w-3xl px-5 md:-mt-40" : "mx-auto -mt-9 max-w-3xl px-5"'));
   assert.ok(page.includes('import HomeSearch from "@/components/HomeSearchLazy";'));
-  // Same limits, code pill and hint as BookingApp hands its SearchBar.
+  // Same limits and code pill as BookingApp hands its SearchBar.
   for (const prop of [
     "maxNights={config.maxNights}",
     "bookingWindowMonths={config.bookingWindowMonths}",
     "maxAdults={config.maxSearchAdults}",
     "promoEnabled={promoInputOffered(config)}",
-    "promoCodeHint={promoCodeHint(config)}",
   ]) {
     assert.ok(page.includes(prop), `homepage passes ${prop}`);
   }
+  // No code hint: the hero bar never shows one (SearchBar prints its line above the results only), and a prop passed
+  // from the server page to the bar is sent to the browser with the page - the promo code itself would be in the
+  // homepage's data (rate parity, 2026-11-16).
+  assert.doesNotMatch(page, /promoCodeHint/, "the homepage never receives the promo code");
+  assert.doesNotMatch(repoSrc("components/HomeSearchBar.tsx"), /promoCodeHint/, "the homepage bar takes no code hint");
+  assert.doesNotMatch(repoSrc("components/HomeSearch.tsx"), /promoCodeHint/);
   assert.doesNotMatch(page, /OwnDatePicker/);
 
   // Code-split twice: the default homepage ships only a loader; the bar (and booking.css) loads in the browser only.
@@ -734,14 +739,18 @@ test("StatusResponse fields the return page reads stay in the contract", () => {
   assert.equal(returnViewKind(sample), "paid");
 });
 
-test("own engine without the Direct rate (directCopySwapped): the DIRECT-code perk is swapped out; otherwise pages keep it", async () => {
+test("language pages: no perk names the DIRECT code (rate parity, 2026-11-16); the guard still swaps such a perk out on the own engine without the Direct rate (directCopySwapped)", async () => {
   const { landings, perksForEngine, OWN_ENGINE_PERK } = await import("../../data/landings.ts");
   for (const t of Object.values(landings)) {
-    assert.ok(t.perks.some((p) => p.text.includes("DIRECT")), `${t.code} has the DIRECT perk today`);
+    assert.equal(t.perks.some((p) => /DIRECT/.test(`${p.title} ${p.text}`)), false, `${t.code} names no code`);
     assert.deepEqual(perksForEngine(t.perks, t.code, false), t.perks, "default engine: unchanged");
-    const own = perksForEngine(t.perks, t.code, true);
+    assert.deepEqual(perksForEngine(t.perks, t.code, true), t.perks, `${t.code}: nothing to swap today`);
+    // The guard itself: a perk naming the code, should one come back, is replaced by the translated neutral perk.
+    const old = [{ title: "x", text: "Code DIRECT at checkout" }, ...t.perks.slice(1)];
+    assert.deepEqual(perksForEngine(old, t.code, false), old);
+    const own = perksForEngine(old, t.code, true);
     assert.equal(own.some((p) => p.text.includes("DIRECT")), false, `${t.code}: no DIRECT promise on the own engine`);
-    assert.equal(own.length, t.perks.length);
+    assert.deepEqual(own, [OWN_ENGINE_PERK[t.code], ...t.perks.slice(1)]);
     assert.ok(OWN_ENGINE_PERK[t.code], `${t.code} has a translated replacement`);
   }
 });

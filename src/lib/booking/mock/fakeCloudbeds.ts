@@ -80,6 +80,11 @@ export function fakeNonRefundablePlan(rateId: string): FakePlan {
   return { rateId, name: "Non-refundable 10% discount", pctOfBase: 90 };
 }
 
+/** The website's main rate (owner decision, 2026-11-16): a "Website rate" plan, derived, 5% off the base rate, no promo code, always offered. */
+export function fakeWebsiteRatePlan(rateId: string): FakePlan {
+  return { rateId, name: "Website rate", pctOfBase: 95 };
+}
+
 /** The promo code of the owner's "Long term" plan (owner decision, 2026-10-07: behind a code, never shown automatically). */
 export const FAKE_LONGSTAY_PROMO_CODE = "LONGSTAY";
 

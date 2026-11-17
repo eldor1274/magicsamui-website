@@ -30,11 +30,11 @@ export interface HomeSearchBarProps {
   maxAdults: number;
   /** promoInputOffered(config): whether the "Add Code" pill is offered (false in Beam modes). */
   promoEnabled: boolean;
-  /** promoCodeHint(config): the code the picker suggests, or null where no code lowers the price. */
-  promoCodeHint: string | null;
+  // No code hint here: the hero bar shows no code line (SearchBar prints it above the results only), and passing the
+  // hint would put the promo code itself into the homepage's data (rate parity, 2026-11-16).
 }
 
-export default function HomeSearchBar({ maxNights, bookingWindowMonths, maxAdults, promoEnabled, promoCodeHint }: HomeSearchBarProps) {
+export default function HomeSearchBar({ maxNights, bookingWindowMonths, maxAdults, promoEnabled }: HomeSearchBarProps) {
   // Today in Samui. This component only renders in the browser, so the prerendered homepage never pins a stale date.
   const [today, setToday] = useState(todayInBangkok);
   const [draft, setDraft] = useState<SearchDraft>({ checkIn: null, checkOut: null, adults: DEFAULT_ADULTS, promo: "" });
@@ -85,7 +85,6 @@ export default function HomeSearchBar({ maxNights, bookingWindowMonths, maxAdult
         maxNights={maxNights}
         maxAdults={maxAdults}
         promoEnabled={promoEnabled}
-        promoCodeHint={promoCodeHint}
       />
     </BookingThemeScope>
   );

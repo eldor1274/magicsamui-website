@@ -11,8 +11,8 @@
 > on Koh Samui for over 12 years and manages every stay personally (English,
 > Russian, Thai, Hebrew).
 
-Booking direct at https://magicsamui.com/booking is always the best rate
-(code DIRECT), includes a free transfer from Samui Airport or a nearby pier
+Booking direct at https://magicsamui.com/booking shows live availability
+and prices, includes a free transfer from Samui Airport or a nearby pier
 on stays of 2+ nights, and a direct WhatsApp line to the host
 (+66 95 246 6011).
 
@@ -58,7 +58,7 @@ night; live prices for your dates are on the booking page.
 
 - [Suites & Villas](https://magicsamui.com/rooms): every unit with photos, sizes and amenities
 - [Booking](https://magicsamui.com/booking): live availability and rates
-- [Guest points](https://magicsamui.com/points): 5% of every stay back, 1 point = 1 THB off direct bookings
+- [Guest points](https://magicsamui.com/points): check your guest points balance
 - [Island guide](https://magicsamui.com/guide): the host's local recommendations
 - [Blog](https://magicsamui.com/blog): 30 guides to Koh Samui travel
 - [Contact](https://magicsamui.com/contact): WhatsApp, LINE, email

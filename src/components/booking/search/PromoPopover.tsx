@@ -24,10 +24,6 @@ export interface PromoPopoverProps {
   /** Apply a code ("" clears it). */
   onApply: (code: string) => void;
   anchorRef: RefObject<HTMLElement | null>;
-  /** False when no code can be valid right now (Beam modes): no DIRECT hint. */
-  promoEnabled?: boolean;
-  /** The code to suggest ("Use code DIRECT..."); null = none (the code can't change the price here). Default: DIRECT while promoEnabled. */
-  hintCode?: string | null;
 }
 
 const CODE_RE = /^[A-Z0-9_-]{1,32}$/;
@@ -37,8 +33,7 @@ export default function PromoPopover(props: PromoPopoverProps) {
   return <PromoPicker {...props} />;
 }
 
-function PromoPicker({ onClose, value, result, onApply, anchorRef, promoEnabled = true, hintCode }: PromoPopoverProps) {
-  const hint = hintCode !== undefined ? hintCode : promoEnabled ? "DIRECT" : null;
+function PromoPicker({ onClose, value, result, onApply, anchorRef }: PromoPopoverProps) {
   const [code, setCode] = useState(value);
   const [formatError, setFormatError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -163,9 +158,8 @@ function PromoPicker({ onClose, value, result, onApply, anchorRef, promoEnabled 
             <span>{message}</span>
           </p>
         ) : (
-          <p className="mt-2 text-xs text-(--bk-text-subtle)">
-            {hint ? `Booking direct? Use code ${hint} for our best direct rate.` : "Have a code? Enter it here."}
-          </p>
+          // Names no code and promises no price (rate parity, 2026-11-16): a guest who was given a code enters it here.
+          <p className="mt-2 text-xs text-(--bk-text-subtle)">Have a code? Enter it here.</p>
         )}
       </form>
     </PickerOverlay>

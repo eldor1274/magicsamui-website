@@ -8,7 +8,7 @@ import Footer from "@/components/Footer";
 import WhatsAppFab from "@/components/WhatsAppFab";
 import { site } from "@/data/site";
 import { GOOGLE_ADS_ID } from "@/lib/analytics";
-import { directCopySwapped, finishesLivePayments, getPublicBookingConfig, resolveBookingEngine } from "@/lib/booking/config";
+import { finishesLivePayments, getPublicBookingConfig, resolveBookingEngine } from "@/lib/booking/config";
 import "./globals.css";
 
 const sans = Inter({
@@ -24,11 +24,9 @@ const serif = Fraunces({
 
 export const metadata: Metadata = {
   title: "Luxury Private Pool Villas in Koh Samui | Magic Suites",
-  // No best-rate promise while our own engine (fee shown openly) serves /booking without the DIRECT code (BOOKING_DIRECT_PROMO=off).
+  // No price promise and no promo code, whichever engine serves /booking (rate parity, 2026-11-16).
   description:
-    directCopySwapped()
-      ? "Koh Samui villas and suites, most with a private pool: 3-bedroom stays for 6 and the whole Magic Villa (5 bedrooms, sleeps 10). Book direct with live prices."
-      : "Koh Samui villas and suites, most with a private pool: 3-bedroom stays for 6 and the whole Magic Villa (5 bedrooms, sleeps 10). Book direct for our best rate.",
+    "Koh Samui villas and suites, most with a private pool: 3-bedroom stays for 6 and the whole Magic Villa (5 bedrooms, sleeps 10). Book direct with live prices.",
   metadataBase: new URL(`https://${site.domain}`),
   openGraph: {
     type: "website",

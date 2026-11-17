@@ -42,7 +42,10 @@ export interface SearchBarProps {
    * the Direct code still offers it, and answers the code with a note linking the classic booking page.
    */
   promoEnabled?: boolean;
-  /** The code the picker suggests ("Use code DIRECT..."); null = suggest none (the code can't change the price here). Default DIRECT. */
+  /**
+   * Non-null where a code can lower the price here: the bar above the results then says where a code goes. The code
+   * itself is never shown (rate parity, 2026-11-16: the page names no code and promises no price). null = no such line.
+   */
   promoCodeHint?: string | null;
 }
 
@@ -65,7 +68,7 @@ export default function SearchBar({
   maxNights,
   maxAdults,
   promoEnabled = true,
-  promoCodeHint = "DIRECT",
+  promoCodeHint = null,
 }: SearchBarProps) {
   const [panel, setPanel] = useState<Panel>(null);
   const datesRef = useRef<HTMLDivElement>(null);
@@ -303,8 +306,6 @@ export default function SearchBar({
             result={promoResult}
             onApply={(promo) => applyPatch({ promo })}
             anchorRef={promoRef}
-            promoEnabled={promoEnabled}
-            hintCode={promoCodeHint}
           />
         )}
       </form>
@@ -324,7 +325,7 @@ function SearchFeedback({
   ready: boolean;
   hasCheckIn: boolean;
   promoVerdict: PromoResult | null;
-  /** The code to suggest while none is entered (null where no code lowers the price, e.g. Beam or classic-only). */
+  /** Non-null while no code is entered and a code can lower the price here (null e.g. on a classic-only page): says where a code goes, never which. */
   codeHint: string | null;
 }) {
   let content: ReactNode = null;
@@ -353,9 +354,9 @@ function SearchFeedback({
   } else if (!ready) {
     content = hasCheckIn ? "Now choose your check-out date." : "Choose your dates to see prices.";
   } else if (compact && codeHint) {
-    // Above the results: a guest who arrived with dates (e.g. the homepage date picker) skips the search
-    // step's DIRECT perk, and the code goes in this bar - not at a later step.
-    content = `Have code ${codeHint}? Add it above for our best direct rate.`;
+    // Above the results: a guest who was given a code enters it in this bar - not at a later step. The line names
+    // no code and promises no price (rate parity, 2026-11-16).
+    content = "Have a promo code? Add it above.";
   }
   if (content === null) {
     // Both variants keep the line's height, so the bar (and the results under it) never jump.

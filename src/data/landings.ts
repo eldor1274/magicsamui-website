@@ -9,11 +9,13 @@ export interface LandingPerk {
 }
 
 /**
- * Replaces the "Code DIRECT at checkout" perk while our own booking engine
- * serves /booking (BOOKING_ENGINE=own) WITHOUT honouring DIRECT
- * (BOOKING_DIRECT_PROMO=off: see directCopySwapped in lib/booking/config), so
- * the page never promises a code that page can't apply. While the own engine
- * sells Cloudbeds' Direct rate for the code, the DIRECT perk stays.
+ * Since 2026-11-16 (rate parity with Booking.com) no landing names a promo
+ * code, promises a price or compares prices: each page's first perk and its
+ * description are neutral in the data below, so the two helpers under here
+ * change nothing today. They stay as a guard: a perk naming DIRECT, should one
+ * ever come back, is still replaced by this one while our own booking engine
+ * serves /booking (BOOKING_ENGINE=own) WITHOUT honouring codes
+ * (BOOKING_DIRECT_PROMO=off: see directCopySwapped in lib/booking/config).
  */
 export const OWN_ENGINE_PERK: Record<string, LandingPerk> = {
   en: { title: "Book direct, instantly", text: "Live availability and secure card or PromptPay payment, confirmed on the spot." },
@@ -27,11 +29,11 @@ export const OWN_ENGINE_PERK: Record<string, LandingPerk> = {
 };
 
 /**
- * The "best rate when you book direct" clause of each landing description,
- * and its neutral replacement while our own engine serves /booking without
- * DIRECT (BOOKING_DIRECT_PROMO=off): it adds an openly shown payment processing
- * fee, so without the Direct rate the site must not promise the best price
- * (consumer law, Google Ads misrepresentation).
+ * The former "best rate when you book direct" clause of each landing
+ * description and its neutral wording. Since 2026-11-16 every description
+ * below carries the neutral wording itself (the site promises no price: rate
+ * parity); descriptionForEngine still swaps the former clause out, should it
+ * ever come back, while our own engine serves /booking without codes.
  */
 export const OWN_ENGINE_DESCRIPTION_CLAUSE: Record<string, [string, string]> = {
   he: ["הזמינו ישירות וקבלו את המחיר הטוב ביותר.", "הזמינו ישירות עם זמינות בזמן אמת."],
@@ -44,8 +46,9 @@ export const OWN_ENGINE_DESCRIPTION_CLAUSE: Record<string, [string, string]> = {
 };
 
 /**
- * A landing's meta description, without the best-rate promise while `swapDirectCopy`
- * (directCopySwapped(): the own engine serves /booking without the Direct rate).
+ * A landing's meta description, without the former best-rate clause while `swapDirectCopy`
+ * (directCopySwapped(): the own engine serves /booking without the Direct rate). The
+ * descriptions carry no such clause since 2026-11-16, so today this returns them as they are.
  */
 export function descriptionForEngine(t: Pick<Landing, "code" | "description">, swapDirectCopy: boolean): string {
   const clause = OWN_ENGINE_DESCRIPTION_CLAUSE[t.code];
@@ -53,7 +56,10 @@ export function descriptionForEngine(t: Pick<Landing, "code" | "description">, s
   return t.description.replace(clause[0], clause[1]);
 }
 
-/** The perks to show: the DIRECT-code perk is swapped out while `swapDirectCopy` (directCopySwapped()). */
+/**
+ * The perks to show: a perk naming DIRECT is swapped out while `swapDirectCopy` (directCopySwapped()).
+ * No landing has such a perk since 2026-11-16, so today this returns the perks as they are.
+ */
 export function perksForEngine(perks: LandingPerk[], code: string, swapDirectCopy: boolean): LandingPerk[] {
   if (!swapDirectCopy) return perks;
   return perks.map((p) => (/DIRECT/.test(p.text) ? (OWN_ENGINE_PERK[code] ?? OWN_ENGINE_PERK.en) : p));
@@ -120,7 +126,7 @@ export const landings: Record<string, Landing> = {
     label: "עברית",
     title: "וילות יוקרה עם בריכה פרטית בקוסמוי | Magic Suites",
     description:
-      "וילות וסוויטות על צלע הר בקוסמוי עם נוף לים, רובן עם בריכה משלה. ציון 9.8 בבוקינג. 5 דקות מהחוף — הזמינו ישירות וקבלו את המחיר הטוב ביותר.",
+      "וילות וסוויטות על צלע הר בקוסמוי עם נוף לים, רובן עם בריכה משלה. ציון 9.8 בבוקינג. 5 דקות מהחוף — הזמינו ישירות עם זמינות בזמן אמת.",
     eyebrow: "קוסמוי, תאילנד",
     h1: "וילות עם בריכה פרטית בקוסמוי",
     sub: "2 וילות ו־5 סוויטות פרטיות — רובן עם בריכה משלה, על צלע הר מעל מפרץ תאילנד, 5 דקות מהחוף.",
@@ -134,7 +140,7 @@ export const landings: Record<string, Landing> = {
     familyText: "כל הווילה רק שלכם: 5 חדרי שינה, 4 בריכות פרטיות, עד 10 אורחים. החל מ־฿{price} ללילה.",
     perksTitle: "למה להזמין ישירות?",
     perks: [
-      { title: "המחיר הטוב ביותר, תמיד", text: "קוד DIRECT בתשלום — זול יותר מכל אתר הזמנות." },
+      { title: "הזמנה ישירה ומיידית", text: "זמינות בזמן אמת ותשלום מאובטח." },
       { title: "הסעה חינם משדה התעופה או מהמזח", text: "טרנספר חינם משדה התעופה בקוסמוי או ממזח סמוך, בשהייה של שני לילות ומעלה." },
       { title: "קשר ישיר עם המארח", text: "וואטסאפ איתנו לפני, במהלך ואחרי השהייה." },
       { title: "הגעה גמישה", text: "אפשר להשאיר מזוודות בכל שעה — רק תעדכנו מראש." },
@@ -156,7 +162,7 @@ export const landings: Record<string, Landing> = {
     label: "Русский",
     title: "Виллы с частным бассейном на Самуи | Magic Suites",
     description:
-      "Виллы и люксы на холме с видом на море на Ко Самуи — большинство со своим бассейном. 9,8 на Booking.com. 5 минут до пляжа. Бронируйте напрямую по лучшей цене.",
+      "Виллы и люксы на холме с видом на море на Ко Самуи — большинство со своим бассейном. 9,8 на Booking.com. 5 минут до пляжа. Бронируйте напрямую — наличие в реальном времени.",
     eyebrow: "Ко Самуи, Таиланд",
     h1: "Виллы с частным бассейном на Самуи",
     sub: "2 виллы и 5 люксов — большинство со своим бассейном, на холме над Сиамским заливом, всего в 5 минутах от пляжа.",
@@ -170,7 +176,7 @@ export const landings: Record<string, Landing> = {
     familyText: "Вся вилла только для вас: 5 спален, 4 частных бассейна, до 10 гостей. От ฿{price} за ночь.",
     perksTitle: "Почему бронировать напрямую",
     perks: [
-      { title: "Лучшая цена — всегда", text: "Промокод DIRECT при оформлении дешевле любого сайта бронирования." },
+      { title: "Прямое бронирование сразу", text: "Наличие в реальном времени и безопасная оплата." },
       { title: "Бесплатный трансфер из аэропорта или с пирса", text: "Из аэропорта Самуи или с ближайшего пирса — для проживания от 2 ночей." },
       { title: "Прямая связь с хозяином", text: "WhatsApp до, во время и после поездки." },
       { title: "Гибкое прибытие", text: "Оставьте багаж в любое время — просто предупредите нас." },
@@ -192,7 +198,7 @@ export const landings: Record<string, Landing> = {
     label: "Français",
     title: "Villas avec piscine privée à Koh Samui | Magic Suites",
     description:
-      "Villas et suites à flanc de colline avec vue mer à Koh Samui, la plupart avec piscine privée. Note 9,8 sur Booking.com. Plage à 5 minutes — réservez en direct au meilleur tarif.",
+      "Villas et suites à flanc de colline avec vue mer à Koh Samui, la plupart avec piscine privée. Note 9,8 sur Booking.com. Plage à 5 minutes — réservez en direct, disponibilités en temps réel.",
     eyebrow: "Koh Samui, Thaïlande",
     h1: "Villas avec piscine privée à Koh Samui",
     sub: "2 villas et 5 suites privées — la plupart avec piscine privée, à flanc de colline au-dessus du golfe de Thaïlande, à 5 minutes de la plage.",
@@ -206,7 +212,7 @@ export const landings: Record<string, Landing> = {
     familyText: "Toute la villa rien que pour vous : 5 chambres, 4 piscines privées, jusqu’à 10 personnes. À partir de ฿{price} la nuit.",
     perksTitle: "Pourquoi réserver en direct ?",
     perks: [
-      { title: "Le meilleur tarif, toujours", text: "Le code DIRECT au paiement bat tous les sites de réservation." },
+      { title: "Réservation directe immédiate", text: "Disponibilités en temps réel et paiement sécurisé." },
       { title: "Transfert aéroport ou embarcadère offert", text: "Navette gratuite depuis l’aéroport de Samui ou un embarcadère proche, dès 2 nuits." },
       { title: "Contact direct avec l’hôte", text: "WhatsApp avant, pendant et après votre séjour." },
       { title: "Arrivée flexible", text: "Déposez vos bagages à toute heure — prévenez-nous simplement." },
@@ -228,7 +234,7 @@ export const landings: Record<string, Landing> = {
     label: "Deutsch",
     title: "Villen mit privatem Pool auf Koh Samui | Magic Suites",
     description:
-      "Villen und Suiten am Hang mit Meerblick auf Koh Samui, die meisten mit eigenem Pool. 9,8 auf Booking.com. Strand in 5 Minuten – direkt buchen zum besten Preis.",
+      "Villen und Suiten am Hang mit Meerblick auf Koh Samui, die meisten mit eigenem Pool. 9,8 auf Booking.com. Strand in 5 Minuten – direkt buchen mit Live-Verfügbarkeit.",
     eyebrow: "Koh Samui, Thailand",
     h1: "Villen mit privatem Pool auf Koh Samui",
     sub: "2 Villen und 5 private Suiten – die meisten mit eigenem Pool – am Hang über dem Golf von Thailand, nur 5 Minuten vom Strand.",
@@ -242,7 +248,7 @@ export const landings: Record<string, Landing> = {
     familyText: "Die ganze Villa für Sie allein: 5 Schlafzimmer, 4 private Pools, bis zu 10 Gäste. Ab ฿{price} pro Nacht.",
     perksTitle: "Warum direkt buchen?",
     perks: [
-      { title: "Immer der beste Preis", text: "Mit dem Code DIRECT an der Kasse günstiger als auf jedem Buchungsportal." },
+      { title: "Direkt und sofort buchen", text: "Live-Verfügbarkeit und sichere Zahlung." },
       { title: "Kostenloser Transfer ab Flughafen oder Pier", text: "Gratis vom Flughafen Samui oder einem nahe gelegenen Pier – ab 2 Übernachtungen." },
       { title: "Direkter Draht zum Gastgeber", text: "WhatsApp vor, während und nach Ihrem Aufenthalt." },
       { title: "Flexible Anreise", text: "Gepäck jederzeit abstellen – sagen Sie uns einfach Bescheid." },
@@ -264,7 +270,7 @@ export const landings: Record<string, Landing> = {
     label: "中文",
     title: "苏梅岛私人泳池别墅 | Magic Suites",
     description:
-      "苏梅岛山坡海景别墅与套房，大多配有专属泳池。Booking.com 评分 9.8。距海滩仅 5 分钟——直接预订享最优价格。",
+      "苏梅岛山坡海景别墅与套房，大多配有专属泳池。Booking.com 评分 9.8。距海滩仅 5 分钟——实时房态，直接预订。",
     eyebrow: "泰国 · 苏梅岛",
     h1: "苏梅岛私人泳池别墅",
     sub: "2 栋别墅与 5 间私享套房——大多配有专属泳池，坐落于俯瞰泰国湾的山坡上，距海滩仅 5 分钟。",
@@ -278,7 +284,7 @@ export const landings: Record<string, Landing> = {
     familyText: "整栋别墅由您独享：5 间卧室、4 个私人泳池，最多可住 10 位客人。每晚 ฿{price} 起。",
     perksTitle: "为什么直接预订",
     perks: [
-      { title: "始终最优价", text: "结账时使用 DIRECT 优惠码，比任何预订网站都划算。" },
+      { title: "直接预订", text: "实时房态，安全支付。" },
       { title: "抵达时免费机场或码头接驳", text: "入住 2 晚及以上，免费从苏梅机场或附近码头接您。" },
       { title: "直连房东", text: "入住前后随时通过 WhatsApp 联系我们。" },
       { title: "灵活抵达", text: "任何时间都可寄存行李——提前告知即可。" },
@@ -299,7 +305,7 @@ export const landings: Record<string, Landing> = {
     label: "Español",
     title: "Villas con piscina privada en Koh Samui | Magic Suites",
     description:
-      "Villas y suites en la ladera con vistas al mar en Koh Samui, la mayoría con piscina propia. 9,8 en Booking.com. Playa a 5 minutos: reserva directa al mejor precio.",
+      "Villas y suites en la ladera con vistas al mar en Koh Samui, la mayoría con piscina propia. 9,8 en Booking.com. Playa a 5 minutos: reserva directa con disponibilidad en tiempo real.",
     eyebrow: "Koh Samui, Tailandia",
     h1: "Villas con piscina privada en Koh Samui",
     sub: "2 villas y 5 suites privadas, la mayoría con piscina propia, en una ladera sobre el golfo de Tailandia, a solo 5 minutos de la playa.",
@@ -313,7 +319,7 @@ export const landings: Record<string, Landing> = {
     familyText: "La villa entera en exclusiva: 5 dormitorios, 4 piscinas privadas, hasta 10 huéspedes. Desde ฿{price} por noche.",
     perksTitle: "Por qué reservar directo",
     perks: [
-      { title: "El mejor precio, siempre", text: "El código DIRECT al pagar supera a cualquier web de reservas." },
+      { title: "Reserva directa al instante", text: "Disponibilidad en tiempo real y pago seguro." },
       { title: "Traslado gratis desde el aeropuerto o el muelle", text: "Desde el aeropuerto de Samui o un muelle cercano, en estancias de 2 noches o más." },
       { title: "Línea directa con el anfitrión", text: "WhatsApp antes, durante y después de tu estancia." },
       { title: "Llegada flexible", text: "Deja tu equipaje a cualquier hora; solo avísanos." },
@@ -335,7 +341,7 @@ export const landings: Record<string, Landing> = {
     label: "ไทย",
     title: "พูลวิลล่าส่วนตัว เกาะสมุย | Magic Suites",
     description:
-      "วิลล่าและห้องสวีทวิวทะเลบนเนินเขาเกาะสมุย ส่วนใหญ่มีสระส่วนตัว คะแนน 9.8 บน Booking.com ห่างหาด 5 นาที จองตรงราคาดีที่สุด",
+      "วิลล่าและห้องสวีทวิวทะเลบนเนินเขาเกาะสมุย ส่วนใหญ่มีสระส่วนตัว คะแนน 9.8 บน Booking.com ห่างหาด 5 นาที จองตรงพร้อมดูห้องว่างแบบเรียลไทม์",
     eyebrow: "เกาะสมุย ประเทศไทย",
     h1: "พูลวิลล่าส่วนตัวบนเกาะสมุย",
     sub: "วิลล่า 2 หลังและสวีทส่วนตัว 5 ห้อง ส่วนใหญ่มีสระส่วนตัว ตั้งอยู่บนเนินเขามองเห็นอ่าวไทย ห่างจากหาดเพียง 5 นาที",
@@ -349,7 +355,7 @@ export const landings: Record<string, Landing> = {
     familyText: "เหมาทั้งวิลล่า: 5 ห้องนอน สระว่ายน้ำส่วนตัว 4 สระ พักได้สูงสุด 10 ท่าน เริ่มต้น ฿{price} ต่อคืน",
     perksTitle: "ทำไมต้องจองตรง",
     perks: [
-      { title: "ราคาดีที่สุดเสมอ", text: "ใส่โค้ด DIRECT ตอนชำระเงิน ถูกกว่าทุกเว็บจอง" },
+      { title: "จองตรงได้ทันที", text: "ดูห้องว่างแบบเรียลไทม์ ชำระเงินอย่างปลอดภัย" },
       { title: "รับฟรีจากสนามบินหรือท่าเรือ", text: "รับจากสนามบินสมุยหรือท่าเรือใกล้เคียง ฟรีเมื่อเข้าพัก 2 คืนขึ้นไป" },
       { title: "ติดต่อเจ้าของโดยตรง", text: "WhatsApp ได้ทั้งก่อน ระหว่าง และหลังเข้าพัก" },
       { title: "การมาถึงที่ยืดหยุ่น", text: "ฝากกระเป๋าได้ทุกเวลา เพียงแจ้งล่วงหน้า" },

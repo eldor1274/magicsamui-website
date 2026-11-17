@@ -146,10 +146,11 @@ test("promo codes: DIRECT any case, unknown codes get a friendly error", () => {
   assert.equal(bad?.valid, false);
   assert.equal(resolvePromo("", 10), null);
   assert.equal(resolvePromo("DIRECT", 0)?.valid, false);
-  // Only the demo (promo switched on) hints at DIRECT; otherwise the message stays neutral.
-  assert.match(bad && !bad.valid ? bad.message : "", /Try DIRECT/);
-  const off = resolvePromo("SUMMER", 0);
-  assert.equal(off && !off.valid && off.message.includes("DIRECT"), false);
+  // An unknown code is answered without naming another code or promising a price - in the demo (promo switched on)
+  // as with promos off (rate parity, 2026-11-16: until then the demo's answer suggested the DIRECT code).
+  for (const r of [bad, resolvePromo("SUMMER", 0)]) {
+    assert.deepEqual(r, { code: "SUMMER", valid: false, message: "We don't recognise the code SUMMER." });
+  }
 });
 
 test("occupancy extras are added per stay at the booked party size", () => {

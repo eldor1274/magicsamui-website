@@ -221,7 +221,8 @@ test("Beam with live Cloudbeds rates: the direct-rate promo, the automatic disco
   assert.deepEqual(cfg.promo, getBookingConfig(STRIPE_TEST_ENV).promo, "the same promo settings as Stripe");
   assert.equal(cfg.promoPct, 0);
   assert.equal(cfg.cloudbeds?.baseRateOnly, true);
-  assert.deepEqual(cfg.cloudbeds?.autoDiscountPlans, DEFAULT_AUTO_DISCOUNT_PLANS);
+  // The default discount plans and, always, the website's main rate (the live provider is Beam).
+  assert.deepEqual(cfg.cloudbeds?.autoDiscountPlans, [...DEFAULT_AUTO_DISCOUNT_PLANS, "Website"]);
   // The availability API's config agrees with the checkout's.
   assert.deepEqual(inv.promo, cfg.promo);
   assert.deepEqual(inv.cloudbeds, cfg.cloudbeds);
@@ -233,7 +234,7 @@ test("Beam with live Cloudbeds rates: the direct-rate promo, the automatic disco
   // The switches work as on Stripe.
   assert.equal(getBookingConfig({ ...env, BOOKING_DIRECT_PROMO: "off" }).promo.mode, "classic-only");
   assert.deepEqual(getBookingConfig({ ...env, BOOKING_AUTO_DISCOUNTS: "off" }).cloudbeds?.autoDiscountPlans, []);
-  assert.deepEqual(getInventoryConfig({ ...env, BOOKING_AUTO_DISCOUNT_PLANS: "Long term" }).cloudbeds?.autoDiscountPlans, ["Long term"]);
+  assert.deepEqual(getInventoryConfig({ ...env, BOOKING_AUTO_DISCOUNT_PLANS: "Long term" }).cloudbeds?.autoDiscountPlans, ["Long term", "Website"]);
   // No Cloudbeds rates: every code points to the classic booking page.
   assert.equal(getBookingConfig(BEAM_PG).promo.mode, "classic-only");
   // Locked (the emergency stop; since S7.1 the code switch no longer locks beam-live): availability still uses the Beam rules.

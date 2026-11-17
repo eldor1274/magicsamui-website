@@ -7,7 +7,7 @@ import {
   Bike,
   Car,
   ArrowRight,
-  BadgePercent,
+  CalendarCheck,
   PlaneLanding,
   MessageCircle,
   Clock,
@@ -17,15 +17,15 @@ import { resortJsonLd } from "@/lib/structuredData";
 import BookNowButton from "@/components/BookNowButton";
 import CloudbedsDatePicker from "@/components/CloudbedsDatePicker";
 import HomeSearch from "@/components/HomeSearchLazy";
-import { directCopySwapped, getPublicBookingConfig, resolveBookingEngine } from "@/lib/booking/config";
-import { promoCodeHint, promoInputOffered } from "@/lib/booking/quote";
+import { getPublicBookingConfig, resolveBookingEngine } from "@/lib/booking/config";
+import { promoInputOffered } from "@/lib/booking/quote";
 import DesktopVideo from "@/components/DesktopVideo";
 import ReviewsSection from "@/components/ReviewsSection";
 import RoomCard from "@/components/RoomCard";
 import { getRoomBySlug, rooms, type Room } from "@/data/rooms";
 import { reviewStats } from "@/data/reviews";
 import { getBlogPostsByRecency } from "@/data/blog";
-import { LANG_ALTERNATES, OWN_ENGINE_PERK } from "@/data/landings";
+import { LANG_ALTERNATES } from "@/data/landings";
 import { site } from "@/data/site";
 import { isBookableSlug, sharedUnits } from "@/lib/booking/catalogue";
 import { Star } from "lucide-react";
@@ -104,11 +104,13 @@ const groupStays: {
   },
 ];
 
+// Reasons to book direct. None names a promo code, promises a price or compares prices with a booking site
+// (rate parity, 2026-11-16); the first is true whichever engine serves /booking.
 const directPerks = [
   {
-    icon: BadgePercent,
-    title: "Best rate, always",
-    text: "Code DIRECT at checkout beats any booking site.",
+    icon: CalendarCheck,
+    title: "Book direct, instantly",
+    text: "Live availability and secure payment.",
   },
   {
     icon: PlaneLanding,
@@ -140,7 +142,9 @@ export const metadata: Metadata = {
 
 /**
  * BOOKING_ENGINE=own: the booking page's own search bar, with /booking's limits
- * and its code pill and hint (exactly as BookingApp passes them to SearchBar).
+ * and its code pill (as BookingApp passes them to SearchBar). No code hint is
+ * passed: the hero bar never shows one, and the prop would put the promo code
+ * itself into this page's data (rate parity, 2026-11-16).
  */
 function OwnHomeSearch() {
   const config = getPublicBookingConfig();
@@ -150,7 +154,6 @@ function OwnHomeSearch() {
       bookingWindowMonths={config.bookingWindowMonths}
       maxAdults={config.maxSearchAdults}
       promoEnabled={promoInputOffered(config)}
-      promoCodeHint={promoCodeHint(config)}
     />
   );
 }
@@ -230,11 +233,7 @@ export default function Home() {
           Why book direct
         </p>
         <div className="mt-6 grid grid-cols-2 gap-5 lg:grid-cols-4">
-          {(directCopySwapped()
-            ? // Our own engine without the Direct rate (BOOKING_DIRECT_PROMO=off): never promise the DIRECT code there.
-              directPerks.map((p) => (p.icon === BadgePercent ? { ...p, ...OWN_ENGINE_PERK.en } : p))
-            : directPerks
-          ).map(({ icon: Icon, title, text }) => (
+          {directPerks.map(({ icon: Icon, title, text }) => (
             <div key={title} className="rounded-2xl bg-stone-100 p-5">
               <Icon size={22} className="text-pool" />
               <p className="mt-3 text-sm font-semibold text-ink">{title}</p>

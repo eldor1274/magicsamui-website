@@ -307,7 +307,7 @@ export interface PublicBookingConfig extends PricingConfig {
   promoEnabled: boolean;
   /** How a code works here (see PromoMode). Absent in answers cached before it existed. */
   promoMode?: PromoMode;
-  /** The code guests type (BOOKING_PROMO_CODE, default DIRECT): not a secret, the site advertises it. */
+  /** The code guests type (BOOKING_PROMO_CODE, default DIRECT): not a secret, though the pages no longer print it (rate parity, 2026-11-16). */
   promoCode?: string;
   /**
    * Beam only (absent for Stripe and the demo): the payment processing fee % per method group the guest picks on
